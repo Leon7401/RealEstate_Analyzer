@@ -1,0 +1,623 @@
+"""物件情報スクレイピングエージェント - 楽待/SUUMO賃貸から実データを取得"""
+import re
+import time
+from typing import List, Optional, Dict
+from urllib.parse import urljoin
+
+import requests
+from bs4 import BeautifulSoup
+
+from .base_agent import BaseAgent
+from models.property import Property
+
+
+class ScraperAgent(BaseAgent):
+    """
+    不動産ポータルサイトから収益物件・賃料データをスクレイピング
+
+    収益物件: 楽待 (rakumachi.jp) - 1ページ50件、ページネーション有
+    賃料データ: SUUMO賃貸 (suumo.jp/chintai/) - 1ページ20件
+
+    注意: robots.txt準拠、レート制限遵守
+    """
+
+    RAKUMACHI_BASE = "https://www.rakumachi.jp"
+    RAKUMACHI_SEARCH = "https://www.rakumachi.jp/syuuekibukken/area/"
+
+    # 対象物件種別（タイトル先頭で判定）
+    ALLOWED_PROPERTY_TYPES = ["1棟アパート", "1棟マンション", "一棟アパート", "一棟マンション", "1棟商業ビル", "土地"]
+    # 除外キーワード（借地権・区分・PR広告等）
+    EXCLUDED_KEYWORDS = ["借地", "定借", "定期借地", "地上権", "区分"]
+    EXCLUDED_PREFIXES = ["PR"]  # PR広告物件
+
+    SUUMO_BASE = "https://suumo.jp"
+    # SUUMO賃貸のエリア別URL
+    SUUMO_CHINTAI_AREAS = {
+        "13": {
+            "shinjuku": "sc_shinjuku", "shibuya": "sc_shibuya",
+            "minato": "sc_minato", "chiyoda": "sc_chiyoda",
+            "chuo": "sc_chuo", "shinagawa": "sc_shinagawa",
+            "meguro": "sc_meguro", "setagaya": "sc_setagaya",
+            "suginami": "sc_suginami", "nakano": "sc_nakano",
+            "toshima": "sc_toshima", "bunkyo": "sc_bunkyo",
+            "taito": "sc_taito", "sumida": "sc_sumida",
+            "koto": "sc_koto", "ota": "sc_ota",
+            "kita": "sc_kita", "arakawa": "sc_arakawa",
+            "itabashi": "sc_itabashi", "nerima": "sc_nerima",
+            "adachi": "sc_adachi", "katsushika": "sc_katsushika",
+            "edogawa": "sc_edogawa",
+        },
+        "14": {"yokohama": "sc_yokohama", "kawasaki": "sc_kawasaki"},
+        "11": {"saitama": "sc_saitamashi"},
+        "12": {"chiba": "sc_chibashi", "funabashi": "sc_funabashi"},
+    }
+
+    RAKUMACHI_PREF_MAP = {
+        "13": "tokyo", "14": "kanagawa", "11": "saitama", "12": "chiba",
+    }
+
+    HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    }
+
+    def __init__(self):
+        super().__init__("ScraperAgent")
+        self.session = requests.Session()
+        self.session.headers.update(self.HEADERS)
+        self._rate_limit = 3.0
+        self._last_request = 0.0
+
+    # ================================================================
+    # 収益物件スクレイピング (楽待)
+    # ================================================================
+
+    def run(
+        self,
+        prefecture_code: str = "13",
+        sources: List[str] = None,
+        price_min: int = None,
+        price_max: int = None,
+        yield_min: float = None,
+        max_pages: int = 10,
+        split_by_price: bool = False,
+    ) -> List[Property]:
+        """
+        楽待から収益物件をスクレイピング
+
+        Args:
+            prefecture_code: 都道府県コード
+            sources: 互換性のため残すが楽待のみ使用
+            max_pages: 最大ページ数（楽待は1ページ約50件）
+        """
+        self.logger.info(
+            f"収益物件スクレイピング開始: pref={prefecture_code}, pages={max_pages}"
+        )
+
+        all_properties = []
+        seen_urls = set()
+
+        # 楽待をスクレイピング
+        for page in range(1, max_pages + 1):
+            self.logger.info(f"  [楽待] ページ {page}/{max_pages}...")
+            try:
+                props = self._scrape_rakumachi_page(prefecture_code, page)
+                if not props:
+                    self.logger.info(f"  [楽待] ページ {page}: 0件、終了")
+                    break
+                for p in props:
+                    url = p.source_url or ""
+                    if url not in seen_urls:
+                        seen_urls.add(url)
+                        all_properties.append(p)
+                self.logger.info(f"  [楽待] ページ {page}: {len(props)}件")
+            except Exception as e:
+                self.logger.warning(f"  [楽待] ページ {page} エラー: {e}")
+                break
+
+        self.logger.info(f"収益物件スクレイピング完了: {len(all_properties)}件")
+        return all_properties
+
+    def _throttle(self):
+        elapsed = time.time() - self._last_request
+        if elapsed < self._rate_limit:
+            time.sleep(self._rate_limit - elapsed)
+        self._last_request = time.time()
+
+    def _scrape_rakumachi_page(
+        self, pref_code: str, page: int = 1,
+    ) -> List[Property]:
+        """楽待の収益物件一覧をスクレイピング"""
+        self._throttle()
+
+        pref_name = self.RAKUMACHI_PREF_MAP.get(pref_code, "tokyo")
+        url = f"{self.RAKUMACHI_SEARCH}{pref_name}/"
+        params = {
+            "page": str(page),
+            "sort": "property_created_at",
+            "sort_type": "desc",
+        }
+
+        try:
+            resp = self.session.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            resp.encoding = "utf-8"
+        except requests.RequestException as e:
+            self.logger.error(f"楽待 HTTP error: {e}")
+            return []
+
+        return self._parse_rakumachi(resp.text, pref_code)
+
+    def _parse_rakumachi(self, html: str, pref_code: str) -> List[Property]:
+        """楽待HTMLを構造的にパース"""
+        soup = BeautifulSoup(html, "html.parser")
+        properties = []
+
+        cards = soup.select(".propertyBlock")
+        for card in cards:
+            try:
+                prop = self._parse_rakumachi_card(card, pref_code)
+                if prop:
+                    properties.append(prop)
+            except Exception as e:
+                self.logger.debug(f"楽待パースエラー: {e}")
+                continue
+
+        return properties
+
+    def _parse_rakumachi_card(self, card, pref_code: str) -> Optional[Property]:
+        """楽待の .propertyBlock カードを構造的にパース"""
+        # タイトル（物件種別 + 物件名）
+        title_el = card.select_one(".propertyBlock__title")
+        if not title_el:
+            return None
+        name = title_el.get_text(strip=True)
+        if not name or len(name) < 3:
+            return None
+
+        # PR広告除外
+        if any(name.startswith(prefix) for prefix in self.EXCLUDED_PREFIXES):
+            return None
+
+        # 物件種別フィルタ: 1棟もの・土地のみ通す
+        full_text = card.get_text(" ", strip=True)
+        is_allowed = any(t in name for t in self.ALLOWED_PROPERTY_TYPES)
+        if not is_allowed:
+            return None
+
+        # 借地権・区分除外
+        if any(kw in name or kw in full_text[:200] for kw in self.EXCLUDED_KEYWORDS):
+            return None
+
+        # 一都三県以外の物件除外
+        pref_names = {"13": "東京都", "14": "神奈川県", "11": "埼玉県", "12": "千葉県"}
+        target_pref = pref_names.get(pref_code, "")
+        address_text = ""
+        for dt in card.select("dt"):
+            if "所在地" in dt.get_text(strip=True):
+                dd = dt.find_next_sibling("dd")
+                if dd:
+                    address_text = dd.get_text(strip=True)
+                    break
+        if not address_text:
+            import re as _re
+            m = _re.search(r"所在地\s*((?:東京都|神奈川県|埼玉県|千葉県)\S+)", full_text)
+            address_text = m.group(1) if m else ""
+        # 一都三県のいずれかを含まない場合は除外
+        if address_text and not any(p in address_text for p in pref_names.values()):
+            return None
+
+        # リンク
+        link = card.select_one("a[href*='/syuueki']")
+        source_url = ""
+        if link:
+            href = link.get("href", "")
+            source_url = href if href.startswith("http") else self.RAKUMACHI_BASE + href
+
+        # dt/dd構造から情報抽出
+        fields = {}
+        for dt in card.select("dt"):
+            label = dt.get_text(strip=True)
+            dd = dt.find_next_sibling("dd")
+            if dd:
+                fields[label] = dd.get_text(strip=True)
+
+        # offerエリア（価格・利回り）
+        offer = card.select_one(".propertyBlock__offer")
+        if offer:
+            for dt in offer.select("dt"):
+                label = dt.get_text(strip=True)
+                dd = dt.find_next_sibling("dd")
+                if dd:
+                    fields[label] = dd.get_text(strip=True)
+
+        # 価格
+        price_text = fields.get("価格", "")
+        price = self._extract_price(price_text)
+
+        # 利回り
+        yield_text = fields.get("利回り", "")
+        gross_yield = self._extract_yield_val(yield_text)
+
+        # 所在地
+        address = fields.get("所在地", "")
+
+        # 交通
+        transport = fields.get("交通", "")
+        station, distance = self._extract_station_from_transport(transport)
+
+        # 構造
+        structure = self._extract_structure(
+            fields.get("構造", "") + " " + fields.get("建物構造", "")
+        )
+
+        # 築年
+        age_text = fields.get("築年数", "") or fields.get("築年月", "")
+        built_year, building_age = self._extract_age(age_text)
+
+        # 面積
+        land_text = fields.get("土地面積", "")
+        land_area = self._extract_area_val(land_text)
+        bldg_text = fields.get("建物面積", "") or fields.get("専有面積", "")
+        building_area = self._extract_area_val(bldg_text)
+
+        # フォールバック: フルテキストから不足情報を補完
+        full_text = card.get_text(" ", strip=True)
+        if not price:
+            # "価格 4180万円" パターン
+            m = re.search(r"価格\s*([\d,]+万円|[\d.]+億円|[\d]+億[\d,]+万円)", full_text)
+            if m:
+                price = self._extract_price(m.group(1))
+        if not address:
+            m = re.search(
+                r"所在地\s*((?:東京都|神奈川県|埼玉県|千葉県)\S+?(?:区|市|町|村)\S*?\d)",
+                full_text
+            )
+            if m:
+                address = m.group(1)
+        if not gross_yield:
+            m = re.search(r"利回り\s*([\d.]+)\s*%", full_text)
+            if m:
+                gross_yield = float(m.group(1)) / 100
+        if not structure:
+            # "建物構造 RC造" or "SRC造" etc
+            m = re.search(r"(?:建物構造|構造)\s*(SRC|RC|鉄骨|木造|鉄筋)", full_text)
+            if m:
+                s = m.group(1)
+                structure = "SRC" if s == "鉄骨鉄筋" else ("RC" if s == "鉄筋" else s)
+            else:
+                structure = self._extract_structure(full_text)
+        if not station:
+            station, distance = self._extract_station_from_transport(full_text)
+        if not land_area:
+            m = re.search(r"土地\s*([\d,.]+)\s*(?:m²|㎡|m2)", full_text)
+            if m:
+                land_area = float(m.group(1).replace(",", ""))
+        if not building_area:
+            m = re.search(r"建物\s*([\d,.]+)\s*(?:m²|㎡|m2)", full_text)
+            if m:
+                building_area = float(m.group(1).replace(",", ""))
+        if not building_age:
+            m = re.search(r"築(\d+)年", full_text)
+            if m:
+                building_age = int(m.group(1))
+                from datetime import datetime
+                built_year = datetime.now().year - building_age
+
+        if not price and not gross_yield:
+            return None
+
+        city_code = self._guess_city_code(address, pref_code)
+
+        return Property(
+            name=name[:100],
+            address=address,
+            prefecture_code=pref_code,
+            city_code=city_code,
+            asking_price=price,
+            land_area=land_area,
+            building_area=building_area,
+            structure=structure,
+            built_year=built_year,
+            building_age=building_age,
+            gross_yield=gross_yield,
+            nearest_station=station,
+            station_distance_min=distance,
+            current_rent_annual=(
+                int(price * gross_yield) if price and gross_yield else None
+            ),
+            source="楽待",
+            source_url=source_url,
+        )
+
+    # ================================================================
+    # 賃料スクレイピング (SUUMO賃貸)
+    # ================================================================
+
+    def scrape_rentals(
+        self,
+        prefecture_code: str = "13",
+        city_code: str = "",
+        max_pages: int = 10,
+    ) -> List[Dict]:
+        """
+        SUUMO賃貸から賃料データをスクレイピング
+        区ごとに巡回して大量取得
+        """
+        self.logger.info(
+            f"賃料スクレイピング開始: pref={prefecture_code}, pages={max_pages}"
+        )
+
+        areas = self.SUUMO_CHINTAI_AREAS.get(prefecture_code, {})
+        if not areas:
+            self.logger.warning(f"賃貸エリア未定義: pref={prefecture_code}")
+            return []
+
+        all_rentals = []
+        pages_per_area = max(1, max_pages // len(areas))
+
+        for area_key, sc_code in areas.items():
+            for page in range(1, pages_per_area + 1):
+                try:
+                    rentals = self._scrape_suumo_chintai_page(
+                        prefecture_code, sc_code, page
+                    )
+                    if not rentals:
+                        break
+                    all_rentals.extend(rentals)
+                    self.logger.info(
+                        f"  [{area_key}] p{page}: {len(rentals)}件"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"  [{area_key}] p{page} エラー: {e}")
+                    break
+
+        self.logger.info(f"賃料スクレイピング完了: {len(all_rentals)}件")
+        return all_rentals
+
+    def _scrape_suumo_chintai_page(
+        self, pref_code: str, sc_code: str, page: int
+    ) -> List[Dict]:
+        """SUUMO賃貸の1ページをスクレイピング"""
+        self._throttle()
+
+        pref_map = {"13": "tokyo", "14": "kanagawa", "11": "saitama", "12": "chiba"}
+        pref_name = pref_map.get(pref_code, "tokyo")
+        url = f"{self.SUUMO_BASE}/chintai/{pref_name}/{sc_code}/"
+        params = {"page": str(page)}
+
+        try:
+            resp = self.session.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            resp.encoding = "utf-8"
+        except requests.RequestException as e:
+            self.logger.error(f"SUUMO賃貸 HTTP error: {e}")
+            return []
+
+        return self._parse_suumo_chintai(resp.text, pref_code)
+
+    def _parse_suumo_chintai(self, html: str, pref_code: str) -> List[Dict]:
+        """SUUMO賃貸HTMLをパース（.cassetteitem構造）"""
+        soup = BeautifulSoup(html, "html.parser")
+        rentals = []
+
+        cards = soup.select(".cassetteitem")
+        for card in cards:
+            try:
+                # 建物情報
+                title_el = card.select_one(".cassetteitem_content-title")
+                building_name = title_el.get_text(strip=True) if title_el else ""
+
+                addr_el = card.select_one(".cassetteitem_detail-col1")
+                address = addr_el.get_text(strip=True) if addr_el else ""
+
+                station_el = card.select_one(".cassetteitem_detail-col2")
+                station_text = station_el.get_text(strip=True) if station_el else ""
+
+                col3 = card.select_one(".cassetteitem_detail-col3")
+                col3_text = col3.get_text(strip=True) if col3 else ""
+
+                # 築年・階数
+                built_year = None
+                m = re.search(r"築(\d+)年", col3_text)
+                if m:
+                    from datetime import datetime
+                    built_year = datetime.now().year - int(m.group(1))
+
+                # 構造
+                structure = self._extract_structure(col3_text + " " + building_name)
+
+                # 駅・徒歩
+                station, distance = self._extract_station_from_transport(station_text)
+
+                city_code = self._guess_city_code(address, pref_code)
+
+                # 各部屋（建物内の複数ユニット）
+                units = card.select("table.cassetteitem_other tbody tr")
+                for unit in units:
+                    tds = unit.select("td")
+                    if len(tds) < 6:
+                        continue
+
+                    texts = [td.get_text(strip=True) for td in tds]
+
+                    # 賃料 (例: "15万円12000円" → 150000 + 12000 = rent, 管理費は別)
+                    rent_text = texts[3] if len(texts) > 3 else ""
+                    rent = self._extract_rent(rent_text)
+                    if not rent or rent < 10000:
+                        continue
+
+                    # 面積 (例: "1SK34.7m2")
+                    area_text = texts[5] if len(texts) > 5 else ""
+                    area = self._extract_area_val(area_text)
+                    if not area or area < 5:
+                        continue
+
+                    # 間取り
+                    layout = None
+                    m = re.search(r"(\d[SLDK]+)", area_text)
+                    if m:
+                        layout = m.group(1)
+
+                    rentals.append({
+                        "address": address,
+                        "rent_monthly": rent,
+                        "area_sqm": area,
+                        "rent_per_sqm": rent / area,
+                        "layout": layout,
+                        "structure": structure,
+                        "built_year": built_year,
+                        "nearest_station": station,
+                        "station_distance_min": distance,
+                        "city_code": city_code,
+                        "source": "SUUMO賃貸",
+                    })
+            except Exception as e:
+                self.logger.debug(f"SUUMO賃貸パースエラー: {e}")
+                continue
+
+        return rentals
+
+    # ================================================================
+    # テキスト抽出ヘルパー
+    # ================================================================
+
+    def _extract_price(self, text: str) -> Optional[int]:
+        """価格抽出（万円 → 円）"""
+        if not text:
+            return None
+        # "1億5000万円"
+        m = re.search(r"(\d+)億(\d+)万", text)
+        if m:
+            return int(m.group(1)) * 100_000_000 + int(m.group(2)) * 10_000
+        # "5000万円"
+        m = re.search(r"([\d,]+)万円", text)
+        if m:
+            return int(m.group(1).replace(",", "")) * 10_000
+        # "1.5億円"
+        m = re.search(r"([\d.]+)億円", text)
+        if m:
+            return int(float(m.group(1)) * 100_000_000)
+        return None
+
+    def _extract_yield_val(self, text: str) -> Optional[float]:
+        """利回り値抽出"""
+        if not text:
+            return None
+        m = re.search(r"([\d.]+)\s*%", text)
+        if m:
+            val = float(m.group(1))
+            if 0.5 < val < 30:
+                return val / 100
+        return None
+
+    def _extract_rent(self, text: str) -> Optional[int]:
+        """賃料抽出"""
+        if not text:
+            return None
+        # "15万円" or "15.5万円"
+        m = re.search(r"([\d.]+)万円", text)
+        if m:
+            return int(float(m.group(1)) * 10000)
+        # "150000円"
+        m = re.search(r"([\d,]+)円", text)
+        if m:
+            val = int(m.group(1).replace(",", ""))
+            if val > 10000:
+                return val
+        return None
+
+    def _extract_area_val(self, text: str) -> Optional[float]:
+        """面積値抽出"""
+        if not text:
+            return None
+        m = re.search(r"([\d,.]+)\s*(?:m2|m²|㎡|平米)", text)
+        if m:
+            val = float(m.group(1).replace(",", ""))
+            if 3 < val < 50000:
+                return val
+        return None
+
+    def _extract_structure(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+        for s in ["SRC", "RC", "鉄骨鉄筋", "鉄骨", "鉄筋", "軽量鉄骨", "木造"]:
+            if s in text:
+                if s == "鉄骨鉄筋":
+                    return "SRC"
+                if s == "鉄筋":
+                    return "RC"
+                return s
+        return None
+
+    def _extract_age(self, text: str) -> tuple:
+        if not text:
+            return (None, None)
+        from datetime import datetime
+        m = re.search(r"築(\d+)年", text)
+        if m:
+            age = int(m.group(1))
+            return (datetime.now().year - age, age)
+        m = re.search(r"(\d{4})年", text)
+        if m:
+            year = int(m.group(1))
+            return (year, max(0, datetime.now().year - year))
+        return (None, None)
+
+    def _extract_station_from_transport(self, text: str) -> tuple:
+        """交通テキストから駅名と徒歩分数を抽出"""
+        if not text:
+            return (None, None)
+        # "東武亀戸線 小村井駅 徒歩2分"
+        m = re.search(r"(\S+駅)\s*(?:.*?)(?:歩|徒歩)\s*(\d+)\s*分", text)
+        if m:
+            return (m.group(1), int(m.group(2)))
+        # "「渋谷」駅 歩5分"
+        m = re.search(r"「(.+?)」.*?(?:歩|徒歩)\s*(\d+)\s*分", text)
+        if m:
+            return (m.group(1), int(m.group(2)))
+        return (None, None)
+
+    def _extract_area(self, text: str, prefix: str) -> Optional[float]:
+        pattern = prefix + r"[面積]?\s*[:：]?\s*([\d,.]+)\s*(?:m2|㎡|平米)"
+        m = re.search(pattern, text)
+        if m:
+            return float(m.group(1).replace(",", ""))
+        return None
+
+    def _extract_yield(self, text: str) -> Optional[float]:
+        m = re.search(r"利回り[^\d]*([\d.]+)\s*%", text)
+        if m:
+            return float(m.group(1)) / 100
+        return None
+
+    def _guess_city_code(self, address: str, pref_code: str) -> str:
+        """住所から市区町村コードを推定"""
+        TOKYO_MUNICIPALITIES = {
+            "千代田区": "13101", "中央区": "13102", "港区": "13103",
+            "新宿区": "13104", "文京区": "13105", "台東区": "13106",
+            "墨田区": "13107", "江東区": "13108", "品川区": "13109",
+            "目黒区": "13110", "大田区": "13111", "世田谷区": "13112",
+            "渋谷区": "13113", "中野区": "13114", "杉並区": "13115",
+            "豊島区": "13116", "北区": "13117", "荒川区": "13118",
+            "板橋区": "13119", "練馬区": "13120", "足立区": "13121",
+            "葛飾区": "13122", "江戸川区": "13123",
+            "八王子市": "13201", "立川市": "13202", "武蔵野市": "13203",
+            "三鷹市": "13204", "府中市": "13206", "調布市": "13208",
+            "町田市": "13209", "小金井市": "13210", "小平市": "13211",
+            "国分寺市": "13214", "国立市": "13215", "西東京市": "13229",
+        }
+        OTHER = {
+            "横浜市": "14100", "川崎市": "14130", "相模原市": "14150",
+            "さいたま市": "11100", "川口市": "11203",
+            "千葉市": "12100", "船橋市": "12204", "浦安市": "12227",
+        }
+        lookup = {**TOKYO_MUNICIPALITIES, **OTHER}
+        for name, code in lookup.items():
+            if name in address:
+                return code
+        return f"unknown_{pref_code}"

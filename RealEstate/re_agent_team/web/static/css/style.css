@@ -1,0 +1,591 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* ダッシュボードセクション */
+.dash-section { border-bottom: 1px solid #1a2744; }
+.dash-section > summary { user-select: none; }
+.dash-section > summary::-webkit-details-marker { display: none; }
+.dash-section > summary::after { content: '▸'; color: #546e7a; margin-left: 4px; font-size: 0.7rem; }
+.dash-section[open] > summary::after { content: '▾'; }
+.dash-section[open] > summary { background: #0d1b2a; }
+
+/* セクション折りたたみ */
+.panel-details { margin-bottom: 4px; }
+.panel-details > .panel { margin-top: 0; }
+.panel-summary {
+    padding: 8px 12px;
+    background: #16213e;
+    color: #4fc3f7;
+    font-size: 0.82rem;
+    font-weight: 600;
+    border-radius: 6px;
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.panel-summary::before {
+    content: '\25B6';
+    font-size: 0.6rem;
+    transition: transform 0.2s;
+}
+.panel-details[open] > .panel-summary::before {
+    transform: rotate(90deg);
+}
+.panel-summary:hover { background: #1a2a4e; }
+
+body {
+    font-family: 'Segoe UI', 'Meiryo', sans-serif;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+    background: #0f0f1a;
+}
+
+/* ===== サイドバー ===== */
+#sidebar {
+    width: 340px;
+    min-width: 340px;
+    height: 100vh;
+    overflow-y: auto;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    display: flex;
+    flex-direction: column;
+}
+
+#sidebar::-webkit-scrollbar { width: 6px; }
+#sidebar::-webkit-scrollbar-track { background: #1a1a2e; }
+#sidebar::-webkit-scrollbar-thumb { background: #2a3a5e; border-radius: 3px; }
+
+.sidebar-header {
+    padding: 14px 16px 8px;
+    border-bottom: 1px solid #2a3a5e;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+}
+
+.sidebar-header h1 {
+    font-size: 1.05rem;
+    color: #4fc3f7;
+}
+
+.status-badge {
+    font-size: 0.7rem;
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
+.status-ok { background: #1b5e20; color: #a5d6a7; }
+.status-warn { background: #e65100; color: #ffe0b2; }
+
+/* ===== タブ ===== */
+.tabs {
+    display: flex;
+    border-bottom: 1px solid #2a3a5e;
+    flex-shrink: 0;
+}
+
+.tab {
+    flex: 1;
+    padding: 8px 4px;
+    background: none;
+    border: none;
+    color: #78909c;
+    font-size: 0.8rem;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+}
+
+.tab:hover { color: #b0bec5; }
+.tab.active { color: #4fc3f7; border-bottom-color: #4fc3f7; }
+
+.tab-content {
+    display: none;
+    padding: 12px 16px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.tab-content.active { display: block; }
+
+#map { flex: 1; height: 100vh; }
+
+/* ===== パネル ===== */
+.panel {
+    background: #16213e;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+}
+
+.panel h3 {
+    font-size: 0.82rem;
+    color: #81d4fa;
+    margin-bottom: 8px;
+    border-bottom: 1px solid #2a3a5e;
+    padding-bottom: 4px;
+}
+
+/* ===== フォーム ===== */
+select, input[type="text"], input[type="number"], input[type="file"] {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid #2a3a5e;
+    border-radius: 4px;
+    background: #0f3460;
+    color: #e0e0e0;
+    font-size: 0.82rem;
+    margin-bottom: 5px;
+}
+
+select:focus, input:focus {
+    outline: none;
+    border-color: #4fc3f7;
+}
+
+label {
+    display: block;
+    font-size: 0.75rem;
+    color: #90a4ae;
+    margin-bottom: 2px;
+}
+
+.form-group { margin-bottom: 5px; }
+.form-row { display: flex; gap: 8px; }
+.form-row .form-group { flex: 1; }
+
+.hint {
+    font-size: 0.72rem;
+    color: #607d8b;
+    margin-bottom: 6px;
+    line-height: 1.4;
+}
+
+code {
+    background: #0f3460;
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+}
+
+details.loan-details {
+    margin-top: 6px;
+    border: 1px solid #2a3a5e;
+    border-radius: 4px;
+    padding: 6px 8px;
+}
+
+details.loan-details summary {
+    font-size: 0.78rem;
+    color: #90a4ae;
+    cursor: pointer;
+}
+
+/* ===== ボタン ===== */
+.btn-primary {
+    width: 100%;
+    padding: 9px;
+    background: #4fc3f7;
+    color: #1a1a2e;
+    border: none;
+    border-radius: 5px;
+    font-weight: bold;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.btn-primary:hover { background: #29b6f6; }
+
+.btn-secondary {
+    width: 100%;
+    padding: 7px;
+    background: #2a3a5e;
+    color: #b0bec5;
+    border: 1px solid #37474f;
+    border-radius: 5px;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+.btn-secondary:hover { background: #37474f; }
+
+.btn-primary:disabled, .btn-secondary:disabled {
+    background: #263238;
+    color: #546e7a;
+    cursor: not-allowed;
+}
+
+/* ===== チェックボックス ===== */
+label:has(input[type="checkbox"]) {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 3px;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+
+/* ===== 判定結果 ===== */
+#result-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+#result-meta {
+    flex: 1;
+}
+
+.grade-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    font-size: 1.8rem;
+    font-weight: bold;
+    border-radius: 12px;
+    flex-shrink: 0;
+}
+
+.grade-S { background: #1a9641; color: white; }
+.grade-A { background: #4dac26; color: white; }
+.grade-B { background: #b8e186; color: #1a1a2e; }
+.grade-C { background: #fdb863; color: #1a1a2e; }
+.grade-D { background: #e66101; color: white; }
+.grade-F { background: #d7191c; color: white; }
+
+#result-recommendation {
+    font-size: 1rem;
+    font-weight: bold;
+    margin-bottom: 2px;
+}
+
+#result-score {
+    font-size: 0.8rem;
+    color: #90a4ae;
+}
+
+/* スコアバー */
+.score-bar-row {
+    display: flex;
+    align-items: center;
+    margin-bottom: 4px;
+    font-size: 0.75rem;
+}
+
+.score-bar-label {
+    width: 72px;
+    color: #90a4ae;
+    flex-shrink: 0;
+}
+
+.score-bar-track {
+    flex: 1;
+    height: 8px;
+    background: #0f3460;
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 0 6px;
+}
+
+.score-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.5s ease;
+}
+
+.score-bar-value {
+    width: 30px;
+    text-align: right;
+    color: #b0bec5;
+    flex-shrink: 0;
+}
+
+/* 主要指標 */
+#result-metrics {
+    margin-top: 8px;
+    font-size: 0.78rem;
+}
+
+.metric-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+    border-bottom: 1px solid #1a2744;
+}
+
+.metric-row span:last-child {
+    font-weight: 600;
+    color: #e0e0e0;
+}
+
+/* SWOT */
+#result-swot {
+    margin-top: 8px;
+    font-size: 0.75rem;
+}
+
+.swot-section { margin-bottom: 6px; }
+.swot-title { font-weight: bold; font-size: 0.78rem; }
+.swot-section ul { margin-left: 14px; }
+.swot-section li { line-height: 1.5; margin-bottom: 1px; }
+
+.strength { color: #66bb6a; }
+.weakness { color: #ef5350; }
+.risk { color: #ffa726; }
+.opportunity { color: #42a5f5; }
+
+/* エリア統計 */
+.stat-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.78rem;
+    padding: 3px 0;
+    border-bottom: 1px solid #1a2744;
+}
+
+/* ランキング */
+.ranking-item {
+    display: flex;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid #1a2744;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+.ranking-item:hover { background: #1a2744; }
+
+.ranking-rank {
+    width: 24px;
+    font-weight: bold;
+    color: #4fc3f7;
+}
+
+.ranking-grade {
+    display: inline-block;
+    width: 28px;
+    height: 28px;
+    line-height: 28px;
+    text-align: center;
+    border-radius: 6px;
+    font-weight: bold;
+    font-size: 0.85rem;
+    margin-right: 8px;
+}
+
+.ranking-info { flex: 1; }
+.ranking-name { font-weight: 600; }
+.ranking-detail { font-size: 0.72rem; color: #90a4ae; }
+
+/* レポート一覧 */
+.report-item {
+    padding: 6px 0;
+    border-bottom: 1px solid #1a2744;
+    font-size: 0.78rem;
+    cursor: pointer;
+}
+
+.report-item:hover { background: #1a2744; }
+
+.report-item .report-name { font-weight: 600; }
+.report-item .report-meta { font-size: 0.7rem; color: #78909c; }
+
+/* レンタルデータ */
+.rental-stat-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    padding: 2px 0;
+}
+
+.rental-station-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.72rem;
+    padding: 1px 0;
+    color: #90a4ae;
+}
+
+/* ===== ローディング ===== */
+.loading {
+    text-align: center;
+    color: #4fc3f7;
+    padding: 16px;
+    font-size: 0.85rem;
+}
+
+.loading::after {
+    content: '';
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid #4fc3f7;
+    border-radius: 50%;
+    border-top-color: transparent;
+    animation: spin 0.7s linear infinite;
+    margin-left: 8px;
+    vertical-align: middle;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ===== Leaflet Popup ===== */
+.leaflet-popup-content-wrapper { border-radius: 8px; }
+.popup-title { font-weight: bold; font-size: 0.88rem; margin-bottom: 3px; }
+.popup-price { font-size: 1rem; color: #d32f2f; font-weight: bold; }
+.popup-detail { font-size: 0.78rem; color: #555; line-height: 1.5; }
+
+.grade-marker {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    font-weight: bold;
+    font-size: 0.9rem;
+    color: white;
+    border: 2px solid white;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+}
+
+.grade-marker.grade-S { background: #1a9641; }
+.grade-marker.grade-A { background: #4dac26; }
+.grade-marker.grade-B { background: #b8e186; color: #333; }
+.grade-marker.grade-C { background: #fdb863; color: #333; }
+.grade-marker.grade-D { background: #e66101; }
+.grade-marker.grade-F { background: #d7191c; }
+
+/* ===== スクレイパー切替 ===== */
+.scraper-switcher select {
+    margin-bottom: 8px;
+}
+.scraper-sub-panel { display: none; }
+.scraper-sub-panel.active { display: block; }
+
+/* ===== 判定結果リデザイン ===== */
+.result-key-numbers {
+    display: flex;
+    gap: 6px;
+    margin: 8px 0;
+}
+.result-key-num {
+    flex: 1;
+    text-align: center;
+    padding: 6px 4px;
+    background: #0d1b2a;
+    border-radius: 6px;
+}
+.result-key-num .num-label {
+    font-size: 0.65rem;
+    color: #78909c;
+    margin-bottom: 2px;
+}
+.result-key-num .num-value {
+    font-size: 0.92rem;
+    font-weight: 700;
+    color: #e0e0e0;
+}
+.hold-sell-section {
+    margin: 8px 0;
+    padding: 8px;
+    background: linear-gradient(135deg, #1a2744 0%, #0d2818 100%);
+    border: 1px solid #2e7d32;
+    border-radius: 6px;
+}
+.hold-sell-section .hs-title {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: #66bb6a;
+    margin-bottom: 6px;
+}
+.hold-sell-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+}
+.hold-sell-grid .hs-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 6px;
+    background: rgba(0,0,0,0.25);
+    border-radius: 3px;
+    font-size: 0.75rem;
+}
+.hold-sell-grid .hs-item .hs-label { color: #78909c; }
+.hold-sell-grid .hs-item .hs-val { font-weight: 600; color: #a5d6a7; }
+
+.result-details-section {
+    margin-top: 4px;
+}
+.result-details-section details {
+    border: 1px solid #1a2744;
+    border-radius: 4px;
+    margin-bottom: 4px;
+}
+.result-details-section details summary {
+    padding: 6px 8px;
+    font-size: 0.76rem;
+    font-weight: 600;
+    color: #81d4fa;
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.result-details-section details summary::before {
+    content: '\25B6';
+    font-size: 0.55rem;
+    transition: transform 0.2s;
+}
+.result-details-section details[open] summary::before {
+    transform: rotate(90deg);
+}
+.result-details-section details .detail-body {
+    padding: 6px 8px;
+    font-size: 0.75rem;
+}
+
+/* ===== 土地物件 ===== */
+.land-listing-item:hover { background: #1a2332 !important; }
+
+#building-plans-table table th {
+    color: #81d4fa;
+    font-weight: 600;
+}
+
+#building-plans-table table td,
+#building-plans-table table th {
+    border-bottom: 1px solid #263238;
+}
+
+/* ===== 地図レイヤー凡例 ===== */
+.map-legend {
+    backdrop-filter: blur(6px);
+    max-width: 280px;
+    pointer-events: auto;
+}
+
+/* ツールチップ改善 */
+.leaflet-tooltip {
+    background: rgba(10, 20, 40, 0.92) !important;
+    color: #eceff1 !important;
+    border: 1px solid rgba(255,255,255,0.1) !important;
+    border-radius: 6px !important;
+    padding: 6px 10px !important;
+    font-size: 0.78rem !important;
+    line-height: 1.5 !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4) !important;
+}
+.leaflet-tooltip-top:before { border-top-color: rgba(10,20,40,0.92) !important; }
+.leaflet-tooltip-bottom:before { border-bottom-color: rgba(10,20,40,0.92) !important; }
+.leaflet-tooltip-left:before { border-left-color: rgba(10,20,40,0.92) !important; }
+.leaflet-tooltip-right:before { border-right-color: rgba(10,20,40,0.92) !important; }

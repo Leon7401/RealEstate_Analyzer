@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>駅単位歪み分析 - 不動産投資判定</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="/static/css/style.css" />
+    <link rel="stylesheet" href="/static/css/analysis.css" />
+</head>
+<body>
+    <div id="sidebar">
+        <div class="sidebar-header">
+            <h1>駅単位 歪み分析</h1>
+            <a href="/" class="nav-link">< メインに戻る</a>
+        </div>
+
+        <!-- 操作パネル -->
+        <div class="panel">
+            <h3>分析設定</h3>
+            <div class="form-row">
+                <div class="form-group" style="flex:1">
+                    <label>都道府県</label>
+                    <select id="pref-select">
+                        <option value="13" selected>東京都</option>
+                        <option value="14">神奈川県</option>
+                        <option value="11">埼玉県</option>
+                        <option value="12">千葉県</option>
+                    </select>
+                </div>
+                <div class="form-group" style="flex:1">
+                    <label>表示モード</label>
+                    <select id="view-mode">
+                        <option value="distortion">歪みスコア</option>
+                        <option value="cap_rate">暗黙Cap Rate</option>
+                        <option value="land_price">地価水準</option>
+                        <option value="rent">賃料水準</option>
+                    </select>
+                </div>
+            </div>
+            <button id="btn-analyze" class="btn-primary">分析実行</button>
+            <button id="btn-batch" class="btn-secondary" style="margin-top:4px;">データ更新(バッチ)</button>
+        </div>
+
+        <!-- DB統計 -->
+        <div class="panel">
+            <h3>データベース</h3>
+            <div id="db-stats">読込中...</div>
+        </div>
+
+        <!-- ランキング -->
+        <div class="panel" id="ranking-panel" style="display:none;">
+            <h3>投資妙味ランキング <span id="ranking-subtitle"></span></h3>
+            <div class="form-group" style="margin-bottom:6px;">
+                <input type="text" id="station-search" placeholder="駅名・路線で検索..."
+                       style="width:100%;font-size:0.75rem;padding:4px 8px;">
+            </div>
+            <div class="ranking-legend">
+                <span class="legend-item"><span class="dot" style="background:#1a9641"></span>妙味大</span>
+                <span class="legend-item"><span class="dot" style="background:#fdd835"></span>普通</span>
+                <span class="legend-item"><span class="dot" style="background:#e53935"></span>妙味小</span>
+            </div>
+            <div id="ranking-list" style="max-height:400px;overflow-y:auto;"></div>
+        </div>
+
+        <!-- 駅詳細 -->
+        <div class="panel" id="detail-panel" style="display:none;">
+            <h3 id="detail-title">駅詳細</h3>
+            <div id="detail-content"></div>
+        </div>
+
+        <!-- バッチログ -->
+        <div class="panel" id="batch-panel" style="display:none;">
+            <h3>バッチ処理ログ</h3>
+            <div id="batch-logs"></div>
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/static/js/analysis.js"></script>
+    <script>
+        initAnalysisMap({{ center }}, {{ zoom }});
+    </script>
+</body>
+</html>

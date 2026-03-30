@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# Data/Output (large files)
+RealEstate/re_agent_team/output/
+RealEstate/re_agent_team/data/samples/
+*.db
+*.sqlite3
+
+# Cache
+RealEstate/re_agent_team/output/cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Context docs (private)
+RealEstate/context/

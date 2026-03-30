@@ -1,0 +1,188 @@
+/* エリア歪み分析ページ固有スタイル */
+
+.nav-link {
+    color: #4fc3f7;
+    text-decoration: none;
+    font-size: 0.75rem;
+}
+.nav-link:hover { text-decoration: underline; }
+
+/* ランキングアイテム */
+.distortion-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 6px;
+    border-bottom: 1px solid #1a2744;
+    cursor: pointer;
+    transition: background 0.15s;
+    font-size: 0.8rem;
+}
+
+.distortion-item:hover {
+    background: #1a2744;
+}
+
+.distortion-rank {
+    width: 22px;
+    font-weight: bold;
+    color: #4fc3f7;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.distortion-bubble {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 0.72rem;
+    color: white;
+    flex-shrink: 0;
+}
+
+.distortion-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.distortion-name {
+    font-weight: 600;
+    font-size: 0.82rem;
+}
+
+.distortion-stats {
+    font-size: 0.7rem;
+    color: #90a4ae;
+    line-height: 1.4;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0 8px;
+}
+
+.distortion-comparison {
+    font-size: 0.72rem;
+    font-weight: 600;
+    flex-shrink: 0;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.comp-cheap { background: #1b5e20; color: #a5d6a7; }
+.comp-slightly-cheap { background: #33691e; color: #c5e1a5; }
+.comp-fair { background: #37474f; color: #b0bec5; }
+.comp-slightly-expensive { background: #e65100; color: #ffe0b2; }
+.comp-expensive { background: #b71c1c; color: #ef9a9a; }
+
+/* レジェンド */
+.ranking-legend {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 8px;
+    font-size: 0.72rem;
+    color: #90a4ae;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+/* エリア詳細 */
+.detail-section {
+    margin-bottom: 10px;
+}
+
+.detail-section h4 {
+    font-size: 0.78rem;
+    color: #81d4fa;
+    margin-bottom: 4px;
+}
+
+.detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3px 10px;
+    font-size: 0.75rem;
+}
+
+.detail-grid .label { color: #78909c; }
+.detail-grid .value { color: #e0e0e0; text-align: right; }
+
+.station-table {
+    width: 100%;
+    font-size: 0.72rem;
+    border-collapse: collapse;
+}
+
+.station-table th {
+    text-align: left;
+    color: #78909c;
+    font-weight: normal;
+    padding: 2px 4px;
+    border-bottom: 1px solid #2a3a5e;
+}
+
+.station-table td {
+    padding: 3px 4px;
+    border-bottom: 1px solid #1a2744;
+}
+
+.station-table tr:hover { background: #1a2744; }
+
+/* 地図上のバブル */
+.area-bubble-label {
+    text-align: center;
+    font-weight: bold;
+    color: white;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+    line-height: 1.2;
+}
+
+.area-bubble-label .bubble-name {
+    font-size: 0.7rem;
+}
+
+.area-bubble-label .bubble-score {
+    font-size: 0.85rem;
+}
+
+/* Leaflet popup for analysis */
+.analysis-popup {
+    min-width: 220px;
+}
+
+.analysis-popup h4 {
+    margin: 0 0 6px;
+    font-size: 0.95rem;
+}
+
+.analysis-popup .metrics-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px 10px;
+    font-size: 0.8rem;
+}
+
+.analysis-popup .metric-label { color: #777; }
+.analysis-popup .metric-value { font-weight: 600; text-align: right; }
+
+.analysis-popup .comparison-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin-top: 6px;
+}
