@@ -2856,6 +2856,236 @@ async def layer_station_power(
     })
 
 
+# ===== 250mメッシュ統合 =====
+
+def _latlng_to_mesh250(lat: float, lng: float) -> str:
+    """緯度経度→250mメッシュID(10桁)変換 (JIS X 0410 5次メッシュ)"""
+    # 1次メッシュ
+    m1_lat = int(lat * 1.5)
+    m1_lng = int(lng) - 100
+    # 2次メッシュ
+    rlat = (lat * 1.5 - m1_lat) * 8
+    rlng = (lng - int(lng)) * 8
+    m2_lat = int(rlat)
+    m2_lng = int(rlng)
+    # 3次メッシュ
+    rlat2 = (rlat - m2_lat) * 10
+    rlng2 = (rlng - m2_lng) * 10
+    m3_lat = int(rlat2)
+    m3_lng = int(rlng2)
+    # 4次メッシュ (2分の1)
+    h_lat = int((rlat2 - m3_lat) * 2)
+    h_lng = int((rlng2 - m3_lng) * 2)
+    m4 = h_lat * 2 + h_lng + 1
+    # 5次メッシュ (4分の1 = 250m)
+    q_lat = int((rlat2 - m3_lat - h_lat * 0.5) * 4)
+    q_lng = int((rlng2 - m3_lng - h_lng * 0.5) * 4)
+    m5 = q_lat * 2 + q_lng + 1
+    return f"{m1_lat:02d}{m1_lng:02d}{m2_lat}{m2_lng}{m3_lat}{m3_lng}{m4}{m5}"
+
+
+def _mesh250_center(mesh_id: str):
+    """250mメッシュID→中心座標"""
+    if len(mesh_id) < 10:
+        return None, None
+    m1_lat = int(mesh_id[0:2])
+    m1_lng = int(mesh_id[2:4])
+    m2_lat = int(mesh_id[4])
+    m2_lng = int(mesh_id[5])
+    m3_lat = int(mesh_id[6])
+    m3_lng = int(mesh_id[7])
+    m4 = int(mesh_id[8])
+    m5 = int(mesh_id[9])
+
+    h_lat = (m4 - 1) // 2
+    h_lng = (m4 - 1) % 2
+    q_lat = (m5 - 1) // 2
+    q_lng = (m5 - 1) % 2
+
+    lat = (m1_lat + (m2_lat + (m3_lat + (h_lat + (q_lat + 0.5) / 2) / 2) / 10) / 8) / 1.5
+    lng = m1_lng + 100 + (m2_lng + (m3_lng + (h_lng + (q_lng + 0.5) / 2) / 2) / 10) / 8
+    return lat, lng
+
+
+@app.post("/api/mesh/compute")
+async def compute_mesh_250m():
+    """全データを250mメッシュに集約計算（バックグラウンド）"""
+    import threading
+
+    def _run():
+        import math
+        logging.info("=== 250mメッシュ集計開始 ===")
+        mesh_data = {}  # mesh_id -> {lp: [], rent: [], tx: [], ...}
+
+        with db._conn() as conn:
+            # 地価データ
+            for r in conn.execute("SELECT latitude, longitude, price_per_sqm FROM api_land_prices WHERE latitude IS NOT NULL AND price_per_sqm > 0").fetchall():
+                d = dict(r)
+                mid = _latlng_to_mesh250(d["latitude"], d["longitude"])
+                mesh_data.setdefault(mid, {"lp": [], "rent": [], "tx": []})
+                mesh_data[mid]["lp"].append(d["price_per_sqm"])
+
+            # 賃料データ
+            for r in conn.execute("SELECT latitude, longitude, rent_per_sqm FROM rental_comps WHERE latitude IS NOT NULL AND latitude > 0 AND rent_per_sqm > 0").fetchall():
+                d = dict(r)
+                mid = _latlng_to_mesh250(d["latitude"], d["longitude"])
+                mesh_data.setdefault(mid, {"lp": [], "rent": [], "tx": []})
+                mesh_data[mid]["rent"].append(d["rent_per_sqm"])
+
+            # 取引データ
+            for r in conn.execute("SELECT latitude, longitude, price_per_sqm FROM transactions WHERE latitude IS NOT NULL AND price_per_sqm > 0 AND price_per_sqm < 50000000").fetchall():
+                d = dict(r)
+                mid = _latlng_to_mesh250(d["latitude"], d["longitude"])
+                mesh_data.setdefault(mid, {"lp": [], "rent": [], "tx": []})
+                mesh_data[mid]["tx"].append(d["price_per_sqm"])
+
+            # 人口データ
+            pop_by_mesh = {}
+            for r in conn.execute("SELECT mesh_id, pop_current, pop_future, change_rate FROM api_population_mesh WHERE pop_current IS NOT NULL").fetchall():
+                d = dict(r)
+                pop_by_mesh[d["mesh_id"]] = d
+
+            # 施設データ
+            fac_counts = {}
+            for r in conn.execute("SELECT latitude, longitude, category FROM api_facilities WHERE latitude IS NOT NULL").fetchall():
+                d = dict(r)
+                mid = _latlng_to_mesh250(d["latitude"], d["longitude"])
+                fac_counts.setdefault(mid, {"school": 0, "medical": 0, "childcare": 0})
+                cat = d.get("category", "")
+                if cat in fac_counts[mid]:
+                    fac_counts[mid][cat] += 1
+
+            # 駅データ
+            stations_list = conn.execute("SELECT station_name, latitude, longitude FROM stations WHERE latitude IS NOT NULL").fetchall()
+            stations_coords = [(dict(r)["station_name"], dict(r)["latitude"], dict(r)["longitude"]) for r in stations_list]
+
+        # 集計してDB保存
+        import statistics
+        records = []
+        all_mids = set(mesh_data.keys()) | set(pop_by_mesh.keys())
+
+        for mid in all_mids:
+            clat, clng = _mesh250_center(mid)
+            if clat is None:
+                continue
+
+            md = mesh_data.get(mid, {"lp": [], "rent": [], "tx": []})
+            pop = pop_by_mesh.get(mid, {})
+            fac = fac_counts.get(mid, {})
+
+            # 最寄駅
+            nearest_st = ""
+            nearest_dist = 999
+            for sname, slat, slng in stations_coords:
+                d = math.sqrt((clat - slat) ** 2 + (clng - slng) ** 2) * 111
+                if d < nearest_dist:
+                    nearest_dist = d
+                    nearest_st = sname
+
+            records.append({
+                "mesh_id": mid,
+                "center_lat": clat,
+                "center_lng": clng,
+                "avg_land_price_sqm": statistics.mean(md["lp"]) if md["lp"] else None,
+                "land_price_count": len(md["lp"]),
+                "avg_rent_sqm": statistics.mean(md["rent"]) if md["rent"] else None,
+                "rent_count": len(md["rent"]),
+                "avg_tx_price_sqm": statistics.mean(md["tx"]) if md["tx"] else None,
+                "tx_count": len(md["tx"]),
+                "pop_current": pop.get("pop_current"),
+                "pop_future": pop.get("pop_future"),
+                "pop_change_rate": pop.get("change_rate"),
+                "school_count": fac.get("school", 0),
+                "medical_count": fac.get("medical", 0),
+                "childcare_count": fac.get("childcare", 0),
+                "nearest_station": nearest_st,
+                "station_dist_km": round(nearest_dist, 2),
+            })
+
+        # DB保存
+        with db._conn() as conn:
+            conn.execute("DELETE FROM mesh_250m")
+            for r in records:
+                conn.execute("""
+                    INSERT OR REPLACE INTO mesh_250m
+                    (mesh_id, center_lat, center_lng,
+                     avg_land_price_sqm, land_price_count,
+                     avg_rent_sqm, rent_count,
+                     avg_tx_price_sqm, tx_count,
+                     pop_current, pop_future, pop_change_rate,
+                     school_count, medical_count, childcare_count,
+                     nearest_station, station_dist_km)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    r["mesh_id"], r["center_lat"], r["center_lng"],
+                    r["avg_land_price_sqm"], r["land_price_count"],
+                    r["avg_rent_sqm"], r["rent_count"],
+                    r["avg_tx_price_sqm"], r["tx_count"],
+                    r["pop_current"], r["pop_future"], r["pop_change_rate"],
+                    r["school_count"], r["medical_count"], r["childcare_count"],
+                    r["nearest_station"], r["station_dist_km"],
+                ))
+
+        logging.info(f"=== 250mメッシュ集計完了: {len(records)}メッシュ ===")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return JSONResponse(content={"status": "started", "message": "250mメッシュ集計を開始しました"})
+
+
+@app.get("/api/layers/mesh-transactions")
+async def layer_mesh_transactions(
+    south: float = 35.5, west: float = 139.3,
+    north: float = 36.0, east: float = 140.2,
+):
+    """取引実績レイヤー（250mメッシュ粒度）: 座標付きtransactionsから直接GeoJSON"""
+    features = []
+    with db._conn() as conn:
+        # 250mメッシュで集計
+        rows = conn.execute("""
+            SELECT
+                CAST(latitude * 4000 AS INTEGER) AS lat_bin,
+                CAST(longitude * 3200 AS INTEGER) AS lng_bin,
+                AVG(latitude) clat, AVG(longitude) clng,
+                AVG(price_per_sqm) avg_psm,
+                MIN(price_per_sqm) min_psm,
+                MAX(price_per_sqm) max_psm,
+                COUNT(*) cnt,
+                AVG(transaction_price) avg_total,
+                property_type
+            FROM transactions
+            WHERE price_per_sqm > 0 AND price_per_sqm < 50000000
+            AND latitude IS NOT NULL
+            AND latitude BETWEEN ? AND ?
+            AND longitude BETWEEN ? AND ?
+            GROUP BY lat_bin, lng_bin, property_type
+            HAVING cnt >= 2
+            LIMIT 5000
+        """, (south, north, west, east)).fetchall()
+
+    for r in [dict(x) for x in rows]:
+        psm = round(r["avg_psm"])
+        color = ('#880e4f' if psm > 1000000 else '#d32f2f' if psm > 500000 else
+                 '#ff6f00' if psm > 300000 else '#fbc02d' if psm > 150000 else '#66bb6a')
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [r["clng"], r["clat"]]},
+            "properties": {
+                "avg_price_sqm": psm,
+                "min_price_sqm": round(r["min_psm"]),
+                "max_price_sqm": round(r["max_psm"]),
+                "avg_total": round(r["avg_total"]),
+                "count": r["cnt"],
+                "type": r.get("property_type", ""),
+                "color": color,
+            },
+        })
+
+    return JSONResponse(content={
+        "type": "FeatureCollection", "features": features,
+        "_meta": {"count": len(features)},
+    })
+
+
 # ===== 能動的データ収集（駅単位欠損補完） =====
 
 @app.get("/api/collection/gaps")

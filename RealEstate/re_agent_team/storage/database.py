@@ -416,6 +416,38 @@ class Database:
             # 人口メッシュ座標カラム
             self._migrate_add_column(conn, "api_population_mesh", "center_lat", "REAL")
             self._migrate_add_column(conn, "api_population_mesh", "center_lng", "REAL")
+
+            # 250mメッシュ統合テーブル
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS mesh_250m (
+                    mesh_id TEXT PRIMARY KEY,
+                    center_lat REAL NOT NULL,
+                    center_lng REAL NOT NULL,
+                    -- 地価
+                    avg_land_price_sqm REAL,
+                    land_price_count INTEGER DEFAULT 0,
+                    -- 賃料
+                    avg_rent_sqm REAL,
+                    rent_count INTEGER DEFAULT 0,
+                    -- 取引
+                    avg_tx_price_sqm REAL,
+                    tx_count INTEGER DEFAULT 0,
+                    -- 人口
+                    pop_current REAL,
+                    pop_future REAL,
+                    pop_change_rate REAL,
+                    -- 施設
+                    school_count INTEGER DEFAULT 0,
+                    medical_count INTEGER DEFAULT 0,
+                    childcare_count INTEGER DEFAULT 0,
+                    -- 最寄駅
+                    nearest_station TEXT,
+                    station_dist_km REAL,
+                    -- 集計時刻
+                    computed_at TEXT DEFAULT (datetime('now','localtime'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_m250_coords ON mesh_250m(center_lat, center_lng);
+            """)
             try:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_apm_coords ON api_population_mesh(center_lat, center_lng)")
             except Exception:

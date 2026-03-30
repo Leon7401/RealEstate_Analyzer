@@ -2870,27 +2870,37 @@ async function loadIVTransactions() {
     if (ivTransLayer) map.removeLayer(ivTransLayer);
     ivTransLayer = L.layerGroup();
     try {
-        const resp = await fetch(`/api/layers/transactions?${_mapBoundsParams()}`);
+        // ズームに応じてメッシュ粒度 or 市区町村集計
+        const zoom = map.getZoom();
+        const url = zoom >= 12
+            ? `/api/layers/mesh-transactions?${_mapBoundsParams()}`
+            : `/api/layers/transactions?${_mapBoundsParams()}`;
+        const resp = await fetch(url);
         const data = await resp.json();
+
         (data.features || []).forEach(f => {
             const p = f.properties, c = f.geometry.coordinates;
-            const psm = p.avg_price_sqm;
-            const color = psm > 1000000 ? '#880e4f' : psm > 500000 ? '#d32f2f' :
-                          psm > 300000 ? '#ff6f00' : psm > 150000 ? '#fbc02d' : '#66bb6a';
-            const r = Math.max(4, Math.min(14, Math.log10(p.count) * 4));
+            const psm = p.avg_price_sqm || p.avg_price_sqm;
+            const color = p.color || (psm > 1000000 ? '#880e4f' : psm > 500000 ? '#d32f2f' :
+                          psm > 300000 ? '#ff6f00' : psm > 150000 ? '#fbc02d' : '#66bb6a');
+            const r = Math.max(3, Math.min(12, Math.log10(Math.max(1, p.count)) * 3));
             const m = L.circleMarker([c[1], c[0]], {
-                radius: r, color: color, fillColor: color,
-                fillOpacity: 0.35, weight: 1.5, opacity: 0.7,
+                radius: r, color: '#fff', fillColor: color,
+                fillOpacity: 0.6, weight: 0.5, opacity: 0.4,
             });
-            let tip = `<b>${p.city_name}</b> (${p.property_type})`;
-            tip += `<br>平均単価: ¥${psm.toLocaleString()}/m²`;
-            tip += `<br>平均総額: ¥${(p.avg_total_price/10000).toFixed(0)}万円`;
-            tip += `<br>取引${p.count.toLocaleString()}件`;
+            const pType = p.type || p.property_type || '';
+            let tip = `<b>¥${psm.toLocaleString()}/m²</b>`;
+            if (pType) tip += ` <span style="color:#90a4ae">${pType}</span>`;
+            if (p.city_name) tip += `<br>${p.city_name}`;
+            if (p.min_price_sqm) tip += `<br>幅: ¥${p.min_price_sqm.toLocaleString()}~${p.max_price_sqm.toLocaleString()}`;
+            const total = p.avg_total || p.avg_total_price;
+            if (total) tip += `<br>平均総額: ¥${(total/10000).toFixed(0)}万円`;
+            tip += `<br>${p.count.toLocaleString()}件`;
             m.bindTooltip(tip, {sticky:true});
             ivTransLayer.addLayer(m);
         });
         ivTransLayer.addTo(map);
-        console.log(`取引: ${data.features?.length || 0}件`);
+        console.log(`取引(${zoom>=12?'mesh':'area'}): ${data.features?.length || 0}件`);
     } catch(e) { console.error('取引レイヤーエラー:', e); }
 }
 
