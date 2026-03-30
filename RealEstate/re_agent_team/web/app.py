@@ -3002,29 +3002,53 @@ async def compute_mesh_250m():
                 "station_dist_km": round(nearest_dist, 2),
             })
 
-        # DB保存
+        # DB保存（zoning/road列は保持）
         with db._conn() as conn:
-            conn.execute("DELETE FROM mesh_250m")
             for r in records:
-                conn.execute("""
-                    INSERT OR REPLACE INTO mesh_250m
-                    (mesh_id, center_lat, center_lng,
-                     avg_land_price_sqm, land_price_count,
-                     avg_rent_sqm, rent_count,
-                     avg_tx_price_sqm, tx_count,
-                     pop_current, pop_future, pop_change_rate,
-                     school_count, medical_count, childcare_count,
-                     nearest_station, station_dist_km)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (
-                    r["mesh_id"], r["center_lat"], r["center_lng"],
-                    r["avg_land_price_sqm"], r["land_price_count"],
-                    r["avg_rent_sqm"], r["rent_count"],
-                    r["avg_tx_price_sqm"], r["tx_count"],
-                    r["pop_current"], r["pop_future"], r["pop_change_rate"],
-                    r["school_count"], r["medical_count"], r["childcare_count"],
-                    r["nearest_station"], r["station_dist_km"],
-                ))
+                # 既存行のzoning等を保持するためUPSERT
+                existing = conn.execute("SELECT zoning, coverage_ratio, floor_area_ratio, front_road, road_width_m FROM mesh_250m WHERE mesh_id=?", (r["mesh_id"],)).fetchone()
+                if existing:
+                    conn.execute("""
+                        UPDATE mesh_250m SET
+                            center_lat=?, center_lng=?,
+                            avg_land_price_sqm=?, land_price_count=?,
+                            avg_rent_sqm=?, rent_count=?,
+                            avg_tx_price_sqm=?, tx_count=?,
+                            pop_current=?, pop_future=?, pop_change_rate=?,
+                            school_count=?, medical_count=?, childcare_count=?,
+                            nearest_station=?, station_dist_km=?,
+                            computed_at=datetime('now','localtime')
+                        WHERE mesh_id=?
+                    """, (
+                        r["center_lat"], r["center_lng"],
+                        r["avg_land_price_sqm"], r["land_price_count"],
+                        r["avg_rent_sqm"], r["rent_count"],
+                        r["avg_tx_price_sqm"], r["tx_count"],
+                        r["pop_current"], r["pop_future"], r["pop_change_rate"],
+                        r["school_count"], r["medical_count"], r["childcare_count"],
+                        r["nearest_station"], r["station_dist_km"],
+                        r["mesh_id"],
+                    ))
+                else:
+                    conn.execute("""
+                        INSERT INTO mesh_250m
+                        (mesh_id, center_lat, center_lng,
+                         avg_land_price_sqm, land_price_count,
+                         avg_rent_sqm, rent_count,
+                         avg_tx_price_sqm, tx_count,
+                         pop_current, pop_future, pop_change_rate,
+                         school_count, medical_count, childcare_count,
+                         nearest_station, station_dist_km)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """, (
+                        r["mesh_id"], r["center_lat"], r["center_lng"],
+                        r["avg_land_price_sqm"], r["land_price_count"],
+                        r["avg_rent_sqm"], r["rent_count"],
+                        r["avg_tx_price_sqm"], r["tx_count"],
+                        r["pop_current"], r["pop_future"], r["pop_change_rate"],
+                        r["school_count"], r["medical_count"], r["childcare_count"],
+                        r["nearest_station"], r["station_dist_km"],
+                    ))
 
         logging.info(f"=== 250mメッシュ集計完了: {len(records)}メッシュ ===")
 
