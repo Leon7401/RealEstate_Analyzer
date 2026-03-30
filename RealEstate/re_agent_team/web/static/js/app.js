@@ -106,6 +106,7 @@ function initMap(center, zoom) {
         'layer-mesh-yield':     'yield',
         'layer-mesh-pop':       'population',
         'layer-mesh-facility':  'facility',
+        'layer-mesh-zoning':    'zoning',
     };
     Object.entries(meshMetrics).forEach(([id, metric]) => {
         const el = document.getElementById(id);
@@ -2765,6 +2766,7 @@ function _meshColor(metric, value) {
         return value >= 5 ? '#1b5e20' : value >= 3 ? '#43a047' :
                value >= 2 ? '#66bb6a' : value >= 1 ? '#fbc02d' : '#78909c';
     }
+    if (metric === 'zoning') return '#78909c'; // 色はツールチップ内で用途地域別に変える
     return '#78909c';
 }
 
@@ -2794,8 +2796,23 @@ async function loadMeshLayer(metric) {
         (data.features || []).forEach(f => {
             const p = f.properties, c = f.geometry.coordinates;
             const v = p.value;
-            const color = _meshColor(metric, v);
-            const opacity = _meshOpacity(metric, v);
+            let color = _meshColor(metric, v);
+            let opacity = _meshOpacity(metric, v);
+
+            // 用途地域メトリクス: 用途種別で色分け
+            if (metric === 'zoning' && p.zoning) {
+                const z = p.zoning;
+                const zoningColors = {
+                    '第一種低層住居専用地域': '#81c784', '第二種低層住居専用地域': '#a5d6a7',
+                    '第一種中高層住居専用地域': '#4caf50', '第二種中高層住居専用地域': '#66bb6a',
+                    '第一種住居地域': '#26a69a', '第二種住居地域': '#4db6ac',
+                    '準住居地域': '#80cbc4',
+                    '近隣商業地域': '#ffb74d', '商業地域': '#ff9800',
+                    '準工業地域': '#90a4ae', '工業地域': '#78909c', '工業専用地域': '#546e7a',
+                };
+                color = zoningColors[z] || '#b0bec5';
+                opacity = 0.45;
+            }
 
             const bounds = [[c[1] - dLat, c[0] - dLng], [c[1] + dLat, c[0] + dLng]];
             const rect = L.rectangle(bounds, {
@@ -2823,6 +2840,10 @@ async function loadMeshLayer(metric) {
                 }
             }
             if (p.fac_total) tip += `<br>🏫${p.schools||0} 🏥${p.medical||0} 👶${p.childcare||0}`;
+            if (p.zoning) tip += `<br>📋 ${p.zoning}`;
+            if (p.coverage && p.far) tip += ` (建${p.coverage}/容${p.far})`;
+            if (p.front_road) tip += `<br>🛣️ ${p.front_road}`;
+            if (p.road_width) tip += ` 幅員${(p.road_width/10).toFixed(1)}m`;
             tip += `</div>`;
 
             rect.bindTooltip(tip, { sticky: true });
@@ -3404,6 +3425,11 @@ function updateLegend() {
         show = true;
         html += '<b>施設密度</b> 🏫学校 🏥医療 👶保育<br>';
     }
+    if (meshLayers['zoning'] && map.hasLayer(meshLayers['zoning'])) {
+        show = true;
+        html += '<b>用途地域</b><br>';
+        html += `${_sq('#81c784')}低層住専 ${_sq('#4caf50')}中高層 ${_sq('#26a69a')}住居 ${_sq('#ff9800')}商業 ${_sq('#78909c')}工業<br>`;
+    }
     // 駅レイヤー
     if (ivStationPowerLayer && map.hasLayer(ivStationPowerLayer)) {
         show = true;
@@ -3422,7 +3448,7 @@ function updateLegend() {
 function _hookLegendUpdate() {
     // 新レイヤーIDと旧レイヤーID両方フック
     ['layer-mesh-landprice','layer-mesh-rent','layer-mesh-tx','layer-mesh-yield',
-     'layer-mesh-pop','layer-mesh-facility',
+     'layer-mesh-pop','layer-mesh-facility','layer-mesh-zoning',
      'layer-iv-stationpower','layer-iv-yield'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('change', () => setTimeout(updateLegend, 500));

@@ -3133,7 +3133,9 @@ async def layer_mesh_250m(
                    avg_tx_price_sqm, tx_count,
                    pop_current, pop_future, pop_change_rate,
                    school_count, medical_count, childcare_count,
-                   nearest_station, station_dist_km
+                   nearest_station, station_dist_km,
+                   zoning, coverage_ratio, floor_area_ratio,
+                   front_road, road_width_m
             FROM mesh_250m
             WHERE center_lat BETWEEN ? AND ? AND center_lng BETWEEN ? AND ?
             LIMIT 8000
@@ -3179,6 +3181,8 @@ async def layer_mesh_250m(
             value = implied_yield or 0
         elif metric == "facility":
             value = fac_total
+        elif metric == "zoning":
+            value = 1 if r.get("zoning") else 0
 
         # データなしメッシュはスキップ（人口は0も有効）
         if value == 0 and metric not in ("population",):
@@ -3205,6 +3209,11 @@ async def layer_mesh_250m(
                 "fac_total": fac_total,
                 "station": r.get("nearest_station") or "",
                 "station_km": r.get("station_dist_km"),
+                "zoning": r.get("zoning") or "",
+                "coverage": r.get("coverage_ratio") or "",
+                "far": r.get("floor_area_ratio") or "",
+                "front_road": r.get("front_road") or "",
+                "road_width": r.get("road_width_m"),
             },
         })
 

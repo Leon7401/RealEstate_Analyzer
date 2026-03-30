@@ -416,6 +416,12 @@ class Database:
             # 人口メッシュ座標カラム
             self._migrate_add_column(conn, "api_population_mesh", "center_lat", "REAL")
             self._migrate_add_column(conn, "api_population_mesh", "center_lng", "REAL")
+            # メッシュ用途地域・道路
+            self._migrate_add_column(conn, "mesh_250m", "zoning", "TEXT")
+            self._migrate_add_column(conn, "mesh_250m", "coverage_ratio", "TEXT")
+            self._migrate_add_column(conn, "mesh_250m", "floor_area_ratio", "TEXT")
+            self._migrate_add_column(conn, "mesh_250m", "front_road", "TEXT")
+            self._migrate_add_column(conn, "mesh_250m", "road_width_m", "REAL")
 
             # 250mメッシュ統合テーブル
             conn.executescript("""
