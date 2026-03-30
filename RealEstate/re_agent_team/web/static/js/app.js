@@ -98,15 +98,28 @@ function initMap(center, zoom) {
         if (el) el.addEventListener('change', e => toggleHazardLayer(type, e.target.checked));
     });
 
-    // ===== 投資分析レイヤー =====
+    // ===== 250mメッシュレイヤー =====
+    const meshMetrics = {
+        'layer-mesh-landprice': 'land_price',
+        'layer-mesh-rent':      'rent',
+        'layer-mesh-tx':        'tx_price',
+        'layer-mesh-yield':     'yield',
+        'layer-mesh-pop':       'population',
+        'layer-mesh-facility':  'facility',
+    };
+    Object.entries(meshMetrics).forEach(([id, metric]) => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', e => {
+            if (e.target.checked) loadMeshLayer(metric);
+            else { if (meshLayers[metric]) { map.removeLayer(meshLayers[metric]); delete meshLayers[metric]; } }
+            setTimeout(updateLegend, 300);
+        });
+    });
+
+    // 駅・圏域分析レイヤー
     const ivLayers = {
-        'layer-iv-landprice':    { load: loadIVLandPrice,    layer: () => ivLandPriceLayer,    clear: () => { if(ivLandPriceLayer) map.removeLayer(ivLandPriceLayer); ivLandPriceLayer=null; } },
-        'layer-iv-rent':         { load: loadIVRent,         layer: () => ivRentLayer,         clear: () => { if(ivRentLayer) map.removeLayer(ivRentLayer); ivRentLayer=null; } },
-        'layer-iv-yield':        { load: loadIVYield,        layer: () => ivYieldLayer,        clear: () => { if(ivYieldLayer) map.removeLayer(ivYieldLayer); ivYieldLayer=null; } },
-        'layer-iv-transactions': { load: loadIVTransactions,  layer: () => ivTransLayer,        clear: () => { if(ivTransLayer) map.removeLayer(ivTransLayer); ivTransLayer=null; } },
-        'layer-iv-stationpower':{ load: loadIVStationPower, layer: () => ivStationPowerLayer, clear: () => { if(ivStationPowerLayer) map.removeLayer(ivStationPowerLayer); ivStationPowerLayer=null; } },
-        'layer-iv-population':   { load: loadIVPopulation,   layer: () => ivPopLayer,          clear: () => { if(ivPopLayer) map.removeLayer(ivPopLayer); ivPopLayer=null; } },
-        'layer-iv-facilities':   { load: loadIVFacilities,   layer: () => ivFacLayer,          clear: () => { if(ivFacLayer) map.removeLayer(ivFacLayer); ivFacLayer=null; } },
+        'layer-iv-stationpower':{ load: loadIVStationPower, clear: () => { if(ivStationPowerLayer) map.removeLayer(ivStationPowerLayer); ivStationPowerLayer=null; } },
+        'layer-iv-yield':        { load: loadIVYield,        clear: () => { if(ivYieldLayer) map.removeLayer(ivYieldLayer); ivYieldLayer=null; } },
     };
     Object.entries(ivLayers).forEach(([id, cfg]) => {
         const el = document.getElementById(id);
@@ -2680,6 +2693,7 @@ let ivTransLayer = null;
 let ivPopLayer = null;
 let ivFacLayer = null;
 let ivStationPowerLayer = null;
+let ivMesh250Layer = null;
 
 // --- 旧互換 ---
 let facilityLayer = null;
@@ -2730,7 +2744,93 @@ function _popChangeColor(rate) {
 
 
 // =====================================================
-// ===== 投資分析レイヤー描画関数 =====
+// ===== 250mメッシュ統合レイヤー =====
+// =====================================================
+
+let meshLayers = {};  // metric -> L.layerGroup
+
+function _meshColor(metric, value) {
+    if (metric === 'land_price' || metric === 'tx_price') return _priceColor(value);
+    if (metric === 'rent') {
+        return value > 6000 ? '#c62828' : value > 5000 ? '#e65100' :
+               value > 4000 ? '#f9a825' : value > 3000 ? '#43a047' :
+               value > 2500 ? '#1565c0' : '#5c6bc0';
+    }
+    if (metric === 'yield') {
+        return value > 8 ? '#1b5e20' : value > 6 ? '#43a047' : value > 5 ? '#66bb6a' :
+               value > 4 ? '#fbc02d' : value > 3 ? '#ff9800' : '#e53935';
+    }
+    if (metric === 'population') return _popChangeColor(value);
+    if (metric === 'facility') {
+        return value >= 5 ? '#1b5e20' : value >= 3 ? '#43a047' :
+               value >= 2 ? '#66bb6a' : value >= 1 ? '#fbc02d' : '#78909c';
+    }
+    return '#78909c';
+}
+
+function _meshOpacity(metric, value) {
+    if (metric === 'population') return value == null ? 0.08 : Math.min(0.5, 0.1 + Math.abs(value) / 40);
+    if (metric === 'facility') return Math.min(0.6, 0.15 + value * 0.08);
+    return 0.5;
+}
+
+async function loadMeshLayer(metric) {
+    if (meshLayers[metric]) map.removeLayer(meshLayers[metric]);
+    meshLayers[metric] = L.layerGroup();
+
+    try {
+        const resp = await fetch(`/api/layers/mesh-250m?${_mapBoundsParams()}&metric=${metric}`);
+        const data = await resp.json();
+
+        const dLat = 0.00208 / 2;
+        const dLng = 0.003125 / 2;
+
+        (data.features || []).forEach(f => {
+            const p = f.properties, c = f.geometry.coordinates;
+            const v = p.value;
+            const color = _meshColor(metric, v);
+            const opacity = _meshOpacity(metric, v);
+
+            const bounds = [[c[1] - dLat, c[0] - dLng], [c[1] + dLat, c[0] + dLng]];
+            const rect = L.rectangle(bounds, {
+                color: '#fff', fillColor: color,
+                fillOpacity: opacity, weight: 0.2, opacity: 0.1,
+            });
+
+            // 統合ツールチップ
+            let tip = `<div style="min-width:150px">`;
+            if (p.station) tip += `<b>${p.station}</b>`;
+            if (p.station_km != null) tip += ` <span style="color:#90a4ae">${p.station_km}km</span>`;
+
+            if (p.land_price) tip += `<br>💰 地価: ¥${p.land_price.toLocaleString()}/m²`;
+            if (p.rent) tip += `<br>🏠 賃料: ¥${p.rent.toLocaleString()}/m²`;
+            if (p.tx_price) tip += `<br>📊 取引: ¥${p.tx_price.toLocaleString()}/m² (${p.tx_count}件)`;
+            if (p.yield != null) {
+                const yc = p.yield > 6 ? '#4caf50' : p.yield > 4 ? '#fbc02d' : '#ef5350';
+                tip += `<br>📈 利回: <b style="color:${yc}">${p.yield}%</b>`;
+            }
+            if (p.pop) {
+                tip += `<br>👥 ${Math.round(p.pop)}人`;
+                if (p.pop_change != null) {
+                    const s = p.pop_change > 0 ? '+' : '';
+                    tip += ` (${s}${p.pop_change}%)`;
+                }
+            }
+            if (p.fac_total) tip += `<br>🏫${p.schools||0} 🏥${p.medical||0} 👶${p.childcare||0}`;
+            tip += `</div>`;
+
+            rect.bindTooltip(tip, { sticky: true });
+            meshLayers[metric].addLayer(rect);
+        });
+
+        meshLayers[metric].addTo(map);
+        console.log(`mesh ${metric}: ${data.features?.length || 0}件`);
+    } catch(e) { console.error(`mesh ${metric} error:`, e); }
+}
+
+
+// =====================================================
+// ===== 投資分析レイヤー描画関数（駅単位） =====
 // =====================================================
 
 async function loadIVLandPrice() {
@@ -3024,6 +3124,69 @@ async function loadIVStationPower() {
 }
 
 
+async function loadIVMesh250() {
+    if (ivMesh250Layer) map.removeLayer(ivMesh250Layer);
+    ivMesh250Layer = L.layerGroup();
+    try {
+        // 表示メトリクスはズームで自動選択: 遠い=地価、近い=利回り
+        const zoom = map.getZoom();
+        const metric = zoom >= 14 ? 'yield' : 'land_price';
+        const resp = await fetch(`/api/layers/mesh-250m?${_mapBoundsParams()}&metric=${metric}`);
+        const data = await resp.json();
+
+        (data.features || []).forEach(f => {
+            const p = f.properties, c = f.geometry.coordinates;
+            const v = p.value;
+
+            let color;
+            if (metric === 'yield') {
+                color = v > 8 ? '#1b5e20' : v > 6 ? '#43a047' : v > 5 ? '#66bb6a' :
+                        v > 4 ? '#fbc02d' : v > 3 ? '#ff9800' : '#e53935';
+            } else {
+                color = _priceColor(v);
+            }
+
+            // 250mメッシュ矩形（約250m四方）
+            const dLat = 0.00208 / 2;  // 250mメッシュ高さの半分
+            const dLng = 0.003125 / 2; // 250mメッシュ幅の半分
+            const bounds = [
+                [c[1] - dLat, c[0] - dLng],
+                [c[1] + dLat, c[0] + dLng],
+            ];
+            const rect = L.rectangle(bounds, {
+                color: '#fff', fillColor: color,
+                fillOpacity: 0.45, weight: 0.3, opacity: 0.15,
+            });
+
+            let tip = `<div style="min-width:160px">`;
+            tip += `<b style="font-size:0.75em;color:#78909c">${p.mesh_id}</b>`;
+            if (p.station) tip += ` ${p.station}`;
+            if (p.station_km) tip += ` <span style="color:#90a4ae">${p.station_km}km</span>`;
+
+            if (p.land_price) tip += `<br>💰 地価: ¥${p.land_price.toLocaleString()}/m² <span style="color:#78909c">(${p.lp_count}件)</span>`;
+            if (p.rent) tip += `<br>🏠 賃料: ¥${p.rent.toLocaleString()}/m² <span style="color:#78909c">(${p.rent_count}件)</span>`;
+            if (p.tx_price) tip += `<br>📊 取引: ¥${p.tx_price.toLocaleString()}/m² <span style="color:#78909c">(${p.tx_count}件)</span>`;
+            if (p.yield) {
+                const yColor = p.yield > 6 ? '#4caf50' : p.yield > 4 ? '#fbc02d' : '#ef5350';
+                tip += `<br>📈 利回り: <b style="color:${yColor}">${p.yield}%</b>`;
+            }
+            if (p.pop) tip += `<br>👥 人口: ${Math.round(p.pop)}人`;
+            if (p.pop_change != null) {
+                const sign = p.pop_change > 0 ? '+' : '';
+                tip += ` (${sign}${p.pop_change}%)`;
+            }
+            if (p.schools || p.medical) tip += `<br>🏫${p.schools} 🏥${p.medical}`;
+            tip += `</div>`;
+
+            rect.bindTooltip(tip, { sticky: true });
+            ivMesh250Layer.addLayer(rect);
+        });
+        ivMesh250Layer.addTo(map);
+        console.log(`250m mesh(${metric}): ${data.features?.length || 0}件`);
+    } catch(e) { console.error('250mメッシュエラー:', e); }
+}
+
+
 // ===== 人口動態レイヤー（旧互換） =====
 
 async function loadPopulationLayer(forceFetch) {
@@ -3205,41 +3368,45 @@ function updateLegend() {
     function _dot(c) { return `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${c};margin:0 2px;"></span>`; }
     function _sq(c)  { return `<span style="display:inline-block;width:9px;height:9px;background:${c};margin:0 2px;"></span>`; }
 
-    if ((ivLandPriceLayer && map.hasLayer(ivLandPriceLayer)) ||
-        (officialLandPriceLayer && map.hasLayer(officialLandPriceLayer))) {
+    // メッシュレイヤー凡例
+    if (meshLayers['land_price'] && map.hasLayer(meshLayers['land_price'])) {
         show = true;
         html += '<b>地価 (円/m²)</b><br>';
-        html += `${_dot('#4285f4')}~5万 ${_dot('#4caf50')}~15万 ${_dot('#ffeb3b')}~30万 ${_dot('#ff9800')}~50万 ${_dot('#f44336')}~100万 ${_dot('#880e4f')}100万~<br>`;
+        html += `${_sq('#4285f4')}~5万 ${_sq('#4caf50')}~15万 ${_sq('#ffeb3b')}~30万 ${_sq('#ff9800')}~50万 ${_sq('#f44336')}~100万 ${_sq('#880e4f')}100万~<br>`;
     }
-    if (ivRentLayer && map.hasLayer(ivRentLayer)) {
+    if (meshLayers['rent'] && map.hasLayer(meshLayers['rent'])) {
         show = true;
         html += '<b>賃料 (円/m²)</b><br>';
-        html += `${_dot('#42a5f5')}~3千 ${_dot('#66bb6a')}~4千 ${_dot('#fbc02d')}~5千 ${_dot('#ff6f00')}~6千 ${_dot('#d32f2f')}6千~<br>`;
+        html += `${_sq('#5c6bc0')}~2.5千 ${_sq('#1565c0')}~3千 ${_sq('#43a047')}~4千 ${_sq('#f9a825')}~5千 ${_sq('#e65100')}~6千 ${_sq('#c62828')}6千~<br>`;
     }
-    if (ivYieldLayer && map.hasLayer(ivYieldLayer)) {
+    if (meshLayers['tx_price'] && map.hasLayer(meshLayers['tx_price'])) {
+        show = true;
+        html += '<b>取引単価 (円/m²)</b><br>';
+        html += `${_sq('#66bb6a')}~15万 ${_sq('#fbc02d')}~30万 ${_sq('#ff6f00')}~50万 ${_sq('#d32f2f')}~100万 ${_sq('#880e4f')}100万~<br>`;
+    }
+    if (meshLayers['yield'] && map.hasLayer(meshLayers['yield'])) {
         show = true;
         html += '<b>想定利回り</b><br>';
-        html += `${_dot('#1b5e20')}8%~ ${_dot('#43a047')}6~8% ${_dot('#66bb6a')}5~6% ${_dot('#fbc02d')}4~5% ${_dot('#ff9800')}3~4% ${_dot('#e53935')}~3%<br>`;
+        html += `${_sq('#1b5e20')}8%~ ${_sq('#43a047')}6~8% ${_sq('#66bb6a')}5~6% ${_sq('#fbc02d')}4~5% ${_sq('#ff9800')}3~4% ${_sq('#e53935')}~3%<br>`;
     }
-    if (ivTransLayer && map.hasLayer(ivTransLayer)) {
+    if (meshLayers['population'] && map.hasLayer(meshLayers['population'])) {
         show = true;
-        html += '<b>取引単価</b> 円大=件数多<br>';
+        html += '<b>人口増減率</b><br>';
+        html += `${_sq('#1b5e20')}+10%~ ${_sq('#43a047')}+2~10% ${_sq('#66bb6a')}0~+2% ${_sq('#fff176')}0~-2% ${_sq('#ff7043')}-5~-10% ${_sq('#e53935')}-10%~<br>`;
     }
+    if (meshLayers['facility'] && map.hasLayer(meshLayers['facility'])) {
+        show = true;
+        html += '<b>施設密度</b> 🏫学校 🏥医療 👶保育<br>';
+    }
+    // 駅レイヤー
     if (ivStationPowerLayer && map.hasLayer(ivStationPowerLayer)) {
         show = true;
         html += '<b>駅力</b> ';
         html += `${_dot('hsl(0,80%,50%)')}高 ${_dot('hsl(60,80%,50%)')}中 ${_dot('hsl(120,80%,50%)')}中低 ${_dot('hsl(240,80%,50%)')}低<br>`;
     }
-    if ((ivPopLayer && map.hasLayer(ivPopLayer)) ||
-        (populationLayer && map.hasLayer(populationLayer))) {
+    if (ivYieldLayer && map.hasLayer(ivYieldLayer)) {
         show = true;
-        html += '<b>人口増減率</b><br>';
-        html += `${_sq('#1b5e20')}+10%~ ${_sq('#43a047')}+2~10% ${_sq('#66bb6a')}0~+2% ${_sq('#fff176')}0~-2% ${_sq('#ff7043')}-5~-10% ${_sq('#e53935')}-10%~<br>`;
-    }
-    if ((ivFacLayer && map.hasLayer(ivFacLayer)) ||
-        (facilityLayer && map.hasLayer(facilityLayer))) {
-        show = true;
-        html += '🏫学校 🏥医療 👶保育<br>';
+        html += '<b>駅別利回り</b><br>';
     }
 
     div.innerHTML = html;
@@ -3248,9 +3415,9 @@ function updateLegend() {
 
 function _hookLegendUpdate() {
     // 新レイヤーIDと旧レイヤーID両方フック
-    ['layer-iv-landprice','layer-iv-rent','layer-iv-yield','layer-iv-transactions',
-     'layer-iv-stationpower','layer-iv-population','layer-iv-facilities',
-     'layer-official-land-price','layer-population','layer-facilities'].forEach(id => {
+    ['layer-mesh-landprice','layer-mesh-rent','layer-mesh-tx','layer-mesh-yield',
+     'layer-mesh-pop','layer-mesh-facility',
+     'layer-iv-stationpower','layer-iv-yield'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('change', () => setTimeout(updateLegend, 500));
     });

@@ -3086,6 +3086,95 @@ async def layer_mesh_transactions(
     })
 
 
+@app.get("/api/layers/mesh-250m")
+async def layer_mesh_250m(
+    south: float = 35.5, west: float = 139.3,
+    north: float = 36.0, east: float = 140.2,
+    metric: str = "land_price",
+):
+    """250mメッシュ統合レイヤー: 地価/賃料/取引/人口を1メッシュで比較表示
+
+    metric: land_price / rent / tx_price / population / yield（想定利回り）
+    """
+    features = []
+    with db._conn() as conn:
+        rows = conn.execute("""
+            SELECT mesh_id, center_lat, center_lng,
+                   avg_land_price_sqm, land_price_count,
+                   avg_rent_sqm, rent_count,
+                   avg_tx_price_sqm, tx_count,
+                   pop_current, pop_future, pop_change_rate,
+                   school_count, medical_count, childcare_count,
+                   nearest_station, station_dist_km
+            FROM mesh_250m
+            WHERE center_lat BETWEEN ? AND ? AND center_lng BETWEEN ? AND ?
+            LIMIT 8000
+        """, (south, north, west, east)).fetchall()
+
+    for r in [dict(x) for x in rows]:
+        lp = r.get("avg_land_price_sqm") or 0
+        rent = r.get("avg_rent_sqm") or 0
+        tx = r.get("avg_tx_price_sqm") or 0
+        pop = r.get("pop_current") or 0
+        pop_cr = r.get("pop_change_rate")
+
+        # 想定利回り = 賃料×12 / 地価 (地価と賃料が両方あるメッシュのみ)
+        implied_yield = None
+        if lp > 0 and rent > 0:
+            implied_yield = round(rent * 12 / lp * 100, 1)
+
+        # 施設密度
+        fac_total = (r.get("school_count") or 0) + (r.get("medical_count") or 0) + (r.get("childcare_count") or 0)
+
+        # 表示値とカラー計算
+        value = 0
+        if metric == "land_price":
+            value = lp
+        elif metric == "rent":
+            value = rent
+        elif metric == "tx_price":
+            value = tx
+        elif metric == "population":
+            value = pop_cr if pop_cr is not None else 0
+        elif metric == "yield":
+            value = implied_yield or 0
+        elif metric == "facility":
+            value = fac_total
+
+        # データなしメッシュはスキップ（人口は0も有効）
+        if value == 0 and metric not in ("population",):
+            continue
+
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [r["center_lng"], r["center_lat"]]},
+            "properties": {
+                "mesh_id": r["mesh_id"],
+                "value": value,
+                "land_price": round(lp) if lp else None,
+                "rent": round(rent) if rent else None,
+                "tx_price": round(tx) if tx else None,
+                "yield": implied_yield,
+                "pop": round(pop) if pop else None,
+                "pop_change": pop_cr,
+                "lp_count": r["land_price_count"],
+                "rent_count": r["rent_count"],
+                "tx_count": r["tx_count"],
+                "schools": r["school_count"],
+                "medical": r["medical_count"],
+                "childcare": r.get("childcare_count", 0),
+                "fac_total": fac_total,
+                "station": r.get("nearest_station") or "",
+                "station_km": r.get("station_dist_km"),
+            },
+        })
+
+    return JSONResponse(content={
+        "type": "FeatureCollection", "features": features,
+        "_meta": {"count": len(features), "metric": metric},
+    })
+
+
 # ===== 能動的データ収集（駅単位欠損補完） =====
 
 @app.get("/api/collection/gaps")
