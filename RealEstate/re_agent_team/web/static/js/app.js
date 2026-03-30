@@ -2779,7 +2779,13 @@ async function loadMeshLayer(metric) {
     meshLayers[metric] = L.layerGroup();
 
     try {
-        const resp = await fetch(`/api/layers/mesh-250m?${_mapBoundsParams()}&metric=${metric}`);
+        let url = `/api/layers/mesh-250m?${_mapBoundsParams()}&metric=${metric}`;
+        // 賃料間取りフィルタ
+        if (metric === 'rent' || metric === 'yield') {
+            const layoutEl = document.getElementById('mesh-rent-layout');
+            if (layoutEl && layoutEl.value) url += `&layout=${encodeURIComponent(layoutEl.value)}`;
+        }
+        const resp = await fetch(url);
         const data = await resp.json();
 
         const dLat = 0.00208 / 2;
@@ -3084,16 +3090,16 @@ async function loadIVStationPower() {
             const ratio = Math.min(1, score / Math.max(maxScore, 1));
             const hue = (1 - ratio) * 240; // 240(青)→0(赤)
             const color = `hsl(${hue}, 80%, 50%)`;
-            // 圏域サイズ: スコアに比例（300m～800m）
-            const radius = 300 + ratio * 500;
+            // 圏域サイズ: スコアに比例（150m～400m）
+            const radius = 150 + ratio * 250;
 
             const circle = L.circle([c[1], c[0]], {
                 radius: radius,
                 color: color,
                 fillColor: color,
-                fillOpacity: 0.18 + ratio * 0.15,
-                weight: 0.5,
-                opacity: 0.3,
+                fillOpacity: 0.25 + ratio * 0.2,
+                weight: 1,
+                opacity: 0.5,
             });
 
             let tip = `<div style="min-width:170px">`;

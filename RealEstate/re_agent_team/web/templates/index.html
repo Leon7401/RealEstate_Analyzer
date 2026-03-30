@@ -63,6 +63,14 @@
                 <div style="font-size:0.72rem;color:#78909c;margin-bottom:4px;">市場ヒートマップ</div>
                 <label><input type="checkbox" id="layer-mesh-landprice"> 地価</label>
                 <label><input type="checkbox" id="layer-mesh-rent"> 賃料</label>
+                <select id="mesh-rent-layout" style="font-size:0.68rem;margin-left:18px;width:calc(100% - 18px);margin-top:-2px;margin-bottom:2px;" onchange="if(document.getElementById('layer-mesh-rent').checked) loadMeshLayer('rent')">
+                    <option value="">全間取り</option>
+                    <option value="1K">1K（投資用）</option>
+                    <option value="1DK">1DK</option>
+                    <option value="1LDK">1LDK</option>
+                    <option value="2K,2DK">2K/2DK</option>
+                    <option value="2LDK,3LDK">2LDK+</option>
+                </select>
                 <label><input type="checkbox" id="layer-mesh-tx"> 取引実績</label>
                 <label><input type="checkbox" id="layer-mesh-yield"> 利回り</label>
                 <label><input type="checkbox" id="layer-mesh-pop"> 人口動態</label>

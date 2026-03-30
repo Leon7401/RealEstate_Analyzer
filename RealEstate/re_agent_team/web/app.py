@@ -3091,12 +3091,40 @@ async def layer_mesh_250m(
     south: float = 35.5, west: float = 139.3,
     north: float = 36.0, east: float = 140.2,
     metric: str = "land_price",
+    layout: str = "",
 ):
     """250mメッシュ統合レイヤー: 地価/賃料/取引/人口を1メッシュで比較表示
 
-    metric: land_price / rent / tx_price / population / yield（想定利回り）
+    metric: land_price / rent / tx_price / population / yield / facility
+    layout: 賃料間取りフィルタ（1K, 1LDK等。カンマ区切り可）
     """
     features = []
+
+    # 間取りフィルタ付き賃料: rental_compsから動的集計
+    rent_override = {}
+    if layout and metric in ("rent", "yield"):
+        layout_patterns = [l.strip() for l in layout.split(",")]
+        with db._conn() as conn:
+            where_clauses = " OR ".join(["rc.layout LIKE ?" for _ in layout_patterns])
+            params = [f"%{lp}%" for lp in layout_patterns]
+            params.extend([south, north, west, east])
+            rows_rc = conn.execute(f"""
+                SELECT CAST(rc.latitude * 4000 AS INTEGER) AS lat_bin,
+                       CAST(rc.longitude * 3200 AS INTEGER) AS lng_bin,
+                       AVG(rc.latitude) clat, AVG(rc.longitude) clng,
+                       AVG(rc.rent_per_sqm) avg_r, COUNT(*) cnt
+                FROM rental_comps rc
+                WHERE rc.rent_per_sqm > 0 AND rc.latitude > 0
+                AND ({where_clauses})
+                AND rc.latitude BETWEEN ? AND ? AND rc.longitude BETWEEN ? AND ?
+                GROUP BY lat_bin, lng_bin HAVING cnt >= 1
+            """, params).fetchall()
+            for r in rows_rc:
+                d = dict(r)
+                key = f"{d['lat_bin']}_{d['lng_bin']}"
+                rent_override[key] = {"rent": d["avg_r"], "cnt": d["cnt"],
+                                      "lat": d["clat"], "lng": d["clng"]}
+
     with db._conn() as conn:
         rows = conn.execute("""
             SELECT mesh_id, center_lat, center_lng,
@@ -3114,6 +3142,17 @@ async def layer_mesh_250m(
     for r in [dict(x) for x in rows]:
         lp = r.get("avg_land_price_sqm") or 0
         rent = r.get("avg_rent_sqm") or 0
+
+        # 間取りフィルタoverride
+        if rent_override:
+            lat_bin = int(r["center_lat"] * 4000)
+            lng_bin = int(r["center_lng"] * 3200)
+            key = f"{lat_bin}_{lng_bin}"
+            ov = rent_override.get(key)
+            if ov:
+                rent = ov["rent"]
+            elif metric == "rent":
+                continue  # フィルタ指定時はデータなしメッシュをスキップ
         tx = r.get("avg_tx_price_sqm") or 0
         pop = r.get("pop_current") or 0
         pop_cr = r.get("pop_change_rate")
