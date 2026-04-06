@@ -104,17 +104,54 @@ function initMap(center, zoom) {
         'layer-mesh-rent':      'rent',
         'layer-mesh-tx':        'tx_price',
         'layer-mesh-yield':     'yield',
-        'layer-mesh-pop':       'population',
+        // layer-mesh-pop is handled separately with dropdown
         'layer-mesh-facility':  'facility',
-        'layer-mesh-zoning':    'zoning',
+        // 'layer-mesh-zoning' removed: 事実ベースレイヤーに移行
     };
     Object.entries(meshMetrics).forEach(([id, metric]) => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('change', e => {
-            if (e.target.checked) loadMeshLayer(metric);
-            else { if (meshLayers[metric]) { map.removeLayer(meshLayers[metric]); delete meshLayers[metric]; } }
+            if (e.target.checked) loadMeshLayer(metric, true);
+            else {
+                if (meshLayers[metric]) { map.removeLayer(meshLayers[metric]); }
+                delete meshLayers[metric];
+                delete meshCache[metric];
+                delete meshRectCache[metric];
+            }
             setTimeout(updateLegend, 300);
         });
+    });
+
+    // 人口レイヤー（密度/増減率 切替）
+    const popEl = document.getElementById('layer-mesh-pop');
+    if (popEl) popEl.addEventListener('change', e => {
+        const popMetric = document.getElementById('pop-metric-select').value;
+        if (e.target.checked) {
+            loadMeshLayer(popMetric, true);
+        } else {
+            ['population', 'pop_density'].forEach(m => {
+                if (meshLayers[m]) { map.removeLayer(meshLayers[m]); }
+                delete meshLayers[m]; delete meshCache[m]; delete meshRectCache[m];
+            });
+        }
+        setTimeout(updateLegend, 300);
+    });
+
+    // 事実ベースレイヤー（用途地域ポイント・路線別駅）
+    const zpEl = document.getElementById('layer-zoning-points');
+    if (zpEl) zpEl.addEventListener('change', e => {
+        if (e.target.checked) loadZoningPoints();
+        else if (zoningPointsLayer) { map.removeLayer(zoningPointsLayer); zoningPointsLayer = null; }
+    });
+    const rlEl = document.getElementById('layer-railway-lines');
+    if (rlEl) rlEl.addEventListener('change', e => {
+        if (e.target.checked) loadRailwayLines();
+        else if (railwayLinesLayer) { map.removeLayer(railwayLinesLayer); railwayLinesLayer = null; }
+    });
+    const rdEl = document.getElementById('layer-road-type');
+    if (rdEl) rdEl.addEventListener('change', e => {
+        toggleRoadTypeLayer(e.target.checked);
+        setTimeout(updateLegend, 500);
     });
 
     // 駅・圏域分析レイヤー
@@ -130,6 +167,9 @@ function initMap(center, zoom) {
             setTimeout(updateLegend, 300);
         });
     });
+
+    // メッシュ自動リロード (パン/ズーム時)
+    _setupMeshAutoReload();
 
     // 凡例
     try { addLegendControl(); _hookLegendUpdate(); } catch(e) {}
@@ -601,6 +641,14 @@ async function analyzeProperty() {
         if (sp.land_shape) propData.land_shape = sp.land_shape;
     }
 
+    const analysisInputBefore = {
+        asking_price: propData.asking_price || null,
+        price_per_sqm: propData.price_per_sqm || null,
+        current_rent_annual: propData.current_rent_annual || null,
+        nearest_station: propData.nearest_station || null,
+        station_distance_min: propData.station_distance_min || null,
+    };
+
     try {
         const resp = await fetch('/api/analyze-full', {
             method: 'POST',
@@ -608,7 +656,16 @@ async function analyzeProperty() {
             body: JSON.stringify(propData),
         });
         const data = await resp.json();
-        showJudgmentResult(data.judgment, data.valuation, data.simulation, data.critic_review);
+        showJudgmentResult(
+            data.judgment,
+            data.valuation,
+            data.simulation,
+            data.critic_review,
+            data.market_context,
+            data.auto_filled,
+            data.analysis_input_before || analysisInputBefore,
+            data.analysis_input_after || null
+        );
         if (data.asset_score) showAssetScoreInResult(data.asset_score);
         switchTab('tab-property');
     } catch (err) {
@@ -643,7 +700,16 @@ async function batchAnalyze() {
 
 // ===== 結果表示 =====
 
-function showJudgmentResult(judgment, valuation, simulation, critic) {
+function showJudgmentResult(
+    judgment,
+    valuation,
+    simulation,
+    critic,
+    marketContext,
+    autoFilled,
+    analysisInputBefore,
+    analysisInputAfter
+) {
     const panel = document.getElementById('result-panel');
     panel.style.display = 'block';
 
@@ -682,6 +748,66 @@ function showJudgmentResult(judgment, valuation, simulation, critic) {
                     <div class="hs-item"><span class="hs-label">トータルリターン</span><span class="hs-val">${fmt(s.hold_sell_total_return_65)}</span></div>
                     <div class="hs-item"><span class="hs-label">ROI</span><span class="hs-val">${roiFmt(s.hold_sell_roi_65)}</span></div>
                 </div>
+            </div>
+        `;
+    }
+
+    // --- Heatmap連携コンテキスト ---
+    let marketHtml = '';
+    if (marketContext) {
+        const lp = marketContext.land_price_sqm
+            ? `¥${Math.round(marketContext.land_price_sqm).toLocaleString()}/㎡`
+            : '-';
+        const rent = marketContext.rent_sqm
+            ? `¥${Math.round(marketContext.rent_sqm).toLocaleString()}/㎡`
+            : '-';
+        const tx = marketContext.tx_price_sqm
+            ? `¥${Math.round(marketContext.tx_price_sqm).toLocaleString()}/㎡`
+            : '-';
+        const st = marketContext.nearest_station || marketContext.station_name || '-';
+        const src = marketContext.source || '-';
+        const autoKeys = autoFilled ? Object.keys(autoFilled) : [];
+        const before = analysisInputBefore || {};
+        const after = analysisInputAfter || {};
+        const fmtYen = (v) => (v != null && v !== '' && !Number.isNaN(Number(v)))
+            ? `¥${Math.round(Number(v)).toLocaleString()}`
+            : '-';
+        const fmtUnit = (v) => (v != null && v !== '' && !Number.isNaN(Number(v)))
+            ? `¥${Math.round(Number(v)).toLocaleString()}/㎡`
+            : '-';
+        const fmtMin = (v) => (v != null && v !== '' && !Number.isNaN(Number(v))) ? `${Math.round(Number(v))}分` : '-';
+
+        const compareRows = [
+            { label: '売出価格', before: fmtYen(before.asking_price), after: fmtYen(after.asking_price), changed: before.asking_price !== after.asking_price },
+            { label: '地価単価', before: fmtUnit(before.price_per_sqm), after: fmtUnit(after.price_per_sqm), changed: before.price_per_sqm !== after.price_per_sqm },
+            { label: '年額賃料', before: fmtYen(before.current_rent_annual), after: fmtYen(after.current_rent_annual), changed: before.current_rent_annual !== after.current_rent_annual },
+            { label: '最寄駅', before: before.nearest_station || '-', after: after.nearest_station || '-', changed: (before.nearest_station || '') !== (after.nearest_station || '') },
+            { label: '駅距離', before: fmtMin(before.station_distance_min), after: fmtMin(after.station_distance_min), changed: before.station_distance_min !== after.station_distance_min },
+        ];
+
+        marketHtml = `
+            <div class="hold-sell-section" style="margin-top:8px;">
+                <div class="hs-title">ヒートマップ連動（分析入力補完）</div>
+                <div style="font-size:0.72rem;color:#b0bec5;">
+                    参照元: <b>${src}</b> / 最寄駅: <b>${st}</b>
+                </div>
+                <div class="hold-sell-grid" style="margin-top:6px;">
+                    <div class="hs-item"><span class="hs-label">地価</span><span class="hs-val">${lp}</span></div>
+                    <div class="hs-item"><span class="hs-label">賃料</span><span class="hs-val">${rent}</span></div>
+                    <div class="hs-item"><span class="hs-label">取引単価</span><span class="hs-val">${tx}</span></div>
+                    <div class="hs-item"><span class="hs-label">自動補完</span><span class="hs-val">${autoKeys.length}項目</span></div>
+                </div>
+                <div style="margin-top:8px;font-size:0.68rem;">
+                    <div style="color:#90a4ae;margin-bottom:3px;">補完前 / 補完後</div>
+                    ${compareRows.map(r => `
+                        <div style="display:grid;grid-template-columns:72px 1fr 1fr;gap:6px;border-bottom:1px solid #1a2744;padding:2px 0;">
+                            <span style="color:#78909c;">${r.label}</span>
+                            <span style="color:#b0bec5;">${r.before}</span>
+                            <span style="color:${r.changed ? '#4fc3f7' : '#90a4ae'};font-weight:${r.changed ? 'bold' : 'normal'};">${r.after}</span>
+                        </div>
+                    `).join('')}
+                </div>
+                ${autoKeys.length ? `<div style="font-size:0.68rem;color:#78909c;margin-top:4px;">${autoKeys.join(', ')}</div>` : ''}
             </div>
         `;
     }
@@ -774,7 +900,7 @@ function showJudgmentResult(judgment, valuation, simulation, critic) {
     detailsHtml += '</div>';
 
     // Assemble: holdSell goes into result-metrics, collapsible details into result-swot
-    document.getElementById('result-metrics').innerHTML = holdSellHtml;
+    document.getElementById('result-metrics').innerHTML = holdSellHtml + marketHtml;
     document.getElementById('result-swot').innerHTML = detailsHtml;
 
     // Scroll to results
@@ -1499,15 +1625,15 @@ async function batchGeneratePlans() {
     try {
         const resp = await fetch('/api/land-listings/batch-analyze', { method: 'POST' });
         const data = await resp.json();
-        document.getElementById('plan-generate-result').innerHTML =
+        document.getElementById('batch-action-result').innerHTML =
             `<span style="color:#66bb6a">${data.plans_generated}プラン生成</span>`;
         loadLandListings();
     } catch (e) {
-        document.getElementById('plan-generate-result').innerHTML =
+        document.getElementById('batch-action-result').innerHTML =
             `<span style="color:#ef5350">エラー: ${e.message}</span>`;
     } finally {
         btn.disabled = false;
-        btn.textContent = 'プラン一括生成';
+        btn.textContent = 'プラン生成';
     }
 }
 
@@ -2364,7 +2490,7 @@ async function loadCompareTable() {
                 : '<span style="color:#546e7a;">-</span>';
             const clickFn = r.type === 'land'
                 ? `showLandDetail(${r.id});switchTab('tab-property');`
-                : `selectProperty('${r.id}');switchTab('tab-property');`;
+                : `selectPropertyById('${r.id}');switchTab('tab-property');`;
 
             html += `<tr style="border-bottom:1px solid #1a2744;cursor:pointer;" onclick="${clickFn}"
                          onmouseover="this.style.background='#1a2744'" onmouseout="this.style.background=''">
@@ -2463,6 +2589,19 @@ async function loadUnifiedData(offset) {
     } catch (e) {
         el.innerHTML = `<span style="color:#ef5350;">エラー: ${e.message}</span>`;
     }
+}
+
+function selectPropertyById(propertyId) {
+    const idx = sampleProperties.findIndex(p => String(p.id) === String(propertyId));
+    if (idx >= 0) {
+        selectProperty(idx);
+        return;
+    }
+    // 最新データに未読込のIDがある場合は再読込後に再解決
+    loadSampleProperties().then(() => {
+        const reIdx = sampleProperties.findIndex(p => String(p.id) === String(propertyId));
+        if (reIdx >= 0) selectProperty(reIdx);
+    }).catch(() => {});
 }
 
 // =====================================================
@@ -2705,42 +2844,50 @@ function _mapBoundsParams() {
     return `south=${b.getSouth()}&west=${b.getWest()}&north=${b.getNorth()}&east=${b.getEast()}`;
 }
 
-// 価格→連続グラデーション色
+// 価格→連続グラデーション色 (10段階)
 function _priceColor(price) {
-    // 青(安)→緑→黄→橙→赤(高) の連続グラデーション
-    const stops = [
-        [50000,   [66, 133, 244]],   // 5万: 青
-        [150000,  [76, 175, 80]],    // 15万: 緑
-        [300000,  [255, 235, 59]],   // 30万: 黄
-        [500000,  [255, 152, 0]],    // 50万: 橙
-        [1000000, [244, 67, 54]],    // 100万: 赤
-        [5000000, [136, 14, 79]],    // 500万: 暗赤
-    ];
-    if (price <= stops[0][0]) return `rgb(${stops[0][1].join(',')})`;
-    if (price >= stops[stops.length-1][0]) return `rgb(${stops[stops.length-1][1].join(',')})`;
+    return _interpolateColor(price, [
+        [30000,   [66, 133, 244]],    // 3万: 青
+        [80000,   [41, 182, 246]],    // 8万: 水色
+        [150000,  [76, 175, 80]],     // 15万: 緑
+        [220000,  [156, 204, 101]],   // 22万: 黄緑
+        [300000,  [255, 235, 59]],    // 30万: 黄
+        [400000,  [255, 193, 7]],     // 40万: 琥珀
+        [550000,  [255, 152, 0]],     // 55万: 橙
+        [800000,  [244, 67, 54]],     // 80万: 赤
+        [1500000, [183, 28, 28]],     // 150万: 暗赤
+        [5000000, [136, 14, 79]],     // 500万: 暗紫
+    ]);
+}
+
+// 汎用連続グラデーション補間
+function _interpolateColor(value, stops) {
+    if (value <= stops[0][0]) return `rgb(${stops[0][1].join(',')})`;
+    if (value >= stops[stops.length-1][0]) return `rgb(${stops[stops.length-1][1].join(',')})`;
     for (let i = 1; i < stops.length; i++) {
-        if (price <= stops[i][0]) {
-            const t = (price - stops[i-1][0]) / (stops[i][0] - stops[i-1][0]);
+        if (value <= stops[i][0]) {
+            const t = (value - stops[i-1][0]) / (stops[i][0] - stops[i-1][0]);
             const c = stops[i-1][1].map((v, j) => Math.round(v + (stops[i][1][j] - v) * t));
             return `rgb(${c.join(',')})`;
         }
     }
-    return '#880e4f';
+    return `rgb(${stops[stops.length-1][1].join(',')})`;
 }
 
-// 人口変動率→色
+// 人口変動率→色 (連続グラデーション)
 function _popChangeColor(rate) {
     if (rate == null) return '#546e7a';
-    if (rate > 15)  return '#00600f';
-    if (rate > 10)  return '#1b5e20';
-    if (rate > 5)   return '#2e7d32';
-    if (rate > 2)   return '#43a047';
-    if (rate > 0)   return '#66bb6a';
-    if (rate > -2)  return '#fff176';
-    if (rate > -5)  return '#ffb74d';
-    if (rate > -10) return '#ff7043';
-    if (rate > -15) return '#e53935';
-    return '#b71c1c';
+    return _interpolateColor(rate, [
+        [-20, [183, 28, 28]],    // -20%: 暗赤
+        [-10, [229, 57, 53]],    // -10%: 赤
+        [-5,  [255, 112, 67]],   // -5%: 赤橙
+        [-2,  [255, 183, 77]],   // -2%: 橙
+        [0,   [255, 241, 118]],  //  0%: 黄
+        [2,   [102, 187, 106]],  // +2%: 黄緑
+        [5,   [67, 160, 71]],    // +5%: 緑
+        [10,  [46, 125, 50]],    // +10%: 濃緑
+        [20,  [0, 96, 15]],      // +20%: 暗緑
+    ]);
 }
 
 
@@ -2748,41 +2895,177 @@ function _popChangeColor(rate) {
 // ===== 250mメッシュ統合レイヤー =====
 // =====================================================
 
-let meshLayers = {};  // metric -> L.layerGroup
+let meshLayers = {};       // metric -> L.layerGroup
+let meshCache = {};        // metric -> { meshId -> featureData }
+let meshRectCache = {};    // metric -> { meshId -> L.rectangle }
+let meshLoadingLock = {};  // metric -> boolean (debounce)
+const MESH_CACHE_MAX = 8000;  // メッシュキャッシュ上限
 
 function _meshColor(metric, value) {
     if (metric === 'land_price' || metric === 'tx_price') return _priceColor(value);
     if (metric === 'rent') {
-        return value > 6000 ? '#c62828' : value > 5000 ? '#e65100' :
-               value > 4000 ? '#f9a825' : value > 3000 ? '#43a047' :
-               value > 2500 ? '#1565c0' : '#5c6bc0';
+        // 賃料: 10段階 (円/m²月)
+        return _interpolateColor(value, [
+            [1500, [66, 133, 244]],    // 1500: 青
+            [2000, [41, 182, 246]],    // 2000: 水色
+            [2500, [38, 166, 154]],    // 2500: 青緑
+            [3000, [76, 175, 80]],     // 3000: 緑
+            [3500, [156, 204, 101]],   // 3500: 黄緑
+            [4000, [255, 235, 59]],    // 4000: 黄
+            [4500, [255, 152, 0]],     // 4500: 橙
+            [5000, [244, 67, 54]],     // 5000: 赤
+            [6000, [183, 28, 28]],     // 6000: 暗赤
+            [8000, [136, 14, 79]],     // 8000+: 暗紫
+        ]);
     }
     if (metric === 'yield') {
-        return value > 8 ? '#1b5e20' : value > 6 ? '#43a047' : value > 5 ? '#66bb6a' :
-               value > 4 ? '#fbc02d' : value > 3 ? '#ff9800' : '#e53935';
+        // 利回り: 10段階 (%) 低=赤(割高)→高=緑(割安)
+        return _interpolateColor(value, [
+            [2.0, [136, 14, 79]],     // 2%: 暗紫
+            [2.5, [183, 28, 28]],     // 2.5%: 暗赤
+            [3.0, [229, 57, 53]],     // 3%: 赤
+            [3.5, [255, 152, 0]],     // 3.5%: 橙
+            [4.0, [255, 193, 7]],     // 4%: 琥珀
+            [5.0, [255, 235, 59]],    // 5%: 黄
+            [6.0, [156, 204, 101]],   // 6%: 黄緑
+            [7.0, [76, 175, 80]],     // 7%: 緑
+            [8.5, [46, 125, 50]],     // 8.5%: 濃緑
+            [10,  [27, 94, 32]],      // 10%+: 暗緑
+        ]);
     }
     if (metric === 'population') return _popChangeColor(value);
-    if (metric === 'facility') {
-        return value >= 5 ? '#1b5e20' : value >= 3 ? '#43a047' :
-               value >= 2 ? '#66bb6a' : value >= 1 ? '#fbc02d' : '#78909c';
+    if (metric === 'pop_density') {
+        // 人口密度: 10段階 (人/km²)
+        return _interpolateColor(value, [
+            [0,     [224, 224, 224]],   // 0: 薄灰
+            [1000,  [187, 222, 251]],   // 1千: 薄青
+            [3000,  [100, 181, 246]],   // 3千: 青
+            [5000,  [30, 136, 229]],    // 5千: 濃青
+            [8000,  [76, 175, 80]],     // 8千: 緑
+            [12000, [255, 235, 59]],    // 1.2万: 黄
+            [16000, [255, 152, 0]],     // 1.6万: 橙
+            [22000, [244, 67, 54]],     // 2.2万: 赤
+            [35000, [183, 28, 28]],     // 3.5万: 暗赤
+            [60000, [136, 14, 79]],     // 6万+: 暗紫
+        ]);
     }
-    if (metric === 'zoning') return '#78909c'; // 色はツールチップ内で用途地域別に変える
+    if (metric === 'facility') {
+        // 施設密度: 10段階
+        return _interpolateColor(value, [
+            [0,   [120, 144, 156]],   // 0: グレー
+            [1,   [176, 190, 197]],   // 1: 薄グレー
+            [2,   [255, 235, 59]],    // 2: 黄
+            [3,   [255, 193, 7]],     // 3: 琥珀
+            [4,   [156, 204, 101]],   // 4: 黄緑
+            [5,   [102, 187, 106]],   // 5: 緑
+            [6,   [76, 175, 80]],     // 6: 濃緑
+            [8,   [56, 142, 60]],     // 8: 深緑
+            [10,  [46, 125, 50]],     // 10: 暗緑
+            [15,  [27, 94, 32]],      // 15+: 最暗緑
+        ]);
+    }
     return '#78909c';
 }
 
-function _meshOpacity(metric, value) {
-    if (metric === 'population') return value == null ? 0.08 : Math.min(0.5, 0.1 + Math.abs(value) / 40);
-    if (metric === 'facility') return Math.min(0.6, 0.15 + value * 0.08);
-    return 0.5;
+function _meshOpacity(metric, value, estimated) {
+    const base = estimated ? 0.30 : 0.55;
+    if (metric === 'population') {
+        if (value == null) return 0.08;
+        return Math.min(base, 0.12 + Math.abs(value) / 25);
+    }
+    if (metric === 'pop_density') {
+        if (!value) return 0.06;
+        return Math.min(0.6, 0.15 + value / 50000);
+    }
+    if (metric === 'facility') return Math.min(base + 0.05, 0.18 + value * 0.06);
+    return base;
 }
 
-async function loadMeshLayer(metric) {
-    if (meshLayers[metric]) map.removeLayer(meshLayers[metric]);
-    meshLayers[metric] = L.layerGroup();
+function _buildMeshRect(metric, f) {
+    const p = f.properties, c = f.geometry.coordinates;
+    const v = p.value;
+    const est = p.estimated || false;
+    const dLat = 0.00208 / 2;
+    const dLng = 0.003125 / 2;
+
+    let color = _meshColor(metric, v);
+    let opacity = _meshOpacity(metric, v, est);
+
+    // 用途地域メトリクス: 用途種別で色分け
+    if (metric === 'zoning' && p.zoning) {
+        const z = p.zoning;
+        const zoningColors = {
+            '第一種低層住居専用地域': '#81c784', '第二種低層住居専用地域': '#a5d6a7',
+            '第一種中高層住居専用地域': '#4caf50', '第二種中高層住居専用地域': '#66bb6a',
+            '第一種住居地域': '#26a69a', '第二種住居地域': '#4db6ac',
+            '準住居地域': '#80cbc4',
+            '近隣商業地域': '#ffb74d', '商業地域': '#ff9800',
+            '準工業地域': '#90a4ae', '工業地域': '#78909c', '工業専用地域': '#546e7a',
+        };
+        color = zoningColors[z] || '#b0bec5';
+        opacity = 0.45;
+    }
+
+    const bounds = [[c[1] - dLat, c[0] - dLng], [c[1] + dLat, c[0] + dLng]];
+    const rect = L.rectangle(bounds, {
+        color: '#fff', fillColor: color,
+        fillOpacity: opacity, weight: 0.2, opacity: 0.1,
+    });
+
+    // 統合ツールチップ
+    let tip = `<div style="min-width:150px">`;
+    if (p.station) tip += `<b>${p.station}</b>`;
+    if (p.station_km != null) tip += ` <span style="color:#90a4ae">${p.station_km}km</span>`;
+    if (est) tip += ` <span style="color:#ef6c00;font-size:10px">推定</span>`;
+
+    if (p.land_price) tip += `<br>💰 地価: ¥${p.land_price.toLocaleString()}/m²`;
+    if (p.rent) tip += `<br>🏠 賃料: ¥${p.rent.toLocaleString()}/m²`;
+    if (p.tx_price) tip += `<br>📊 取引: ¥${p.tx_price.toLocaleString()}/m² (${p.tx_count > 0 ? p.tx_count + '件' : '推定'})`;
+    if (p.yield != null) {
+        const yc = p.yield > 6 ? '#4caf50' : p.yield > 4 ? '#fbc02d' : '#ef5350';
+        tip += `<br>📈 利回: <b style="color:${yc}">${p.yield}%</b>`;
+    }
+    if (p.pop) {
+        tip += `<br>👥 ${Math.round(p.pop)}人`;
+        if (p.pop_density) tip += ` (${p.pop_density.toLocaleString()}人/km²)`;
+        if (p.pop_change != null) {
+            const s = p.pop_change > 0 ? '+' : '';
+            tip += ` <span style="color:${p.pop_change>0?'#4caf50':'#ef5350'}">${s}${p.pop_change}%</span>`;
+        }
+        if (p.pop_future) tip += `<br>将来: ${Math.round(p.pop_future)}人`;
+    }
+    if (p.fac_total) tip += `<br>🏫${p.schools||0} 🏥${p.medical||0} 👶${p.childcare||0}`;
+    if (p.zoning) tip += `<br>📋 ${p.zoning}`;
+    if (p.coverage && p.far) tip += ` (建${p.coverage}/容${p.far})`;
+    if (p.front_road) tip += `<br>🛣️ ${p.front_road}`;
+    if (p.road_width) tip += ` 幅員${(p.road_width/10).toFixed(1)}m`;
+    tip += `</div>`;
+
+    rect.bindTooltip(tip, { sticky: true });
+    return rect;
+}
+
+async function loadMeshLayer(metric, forceRefresh) {
+    // キャッシュ初期化
+    if (!meshCache[metric]) meshCache[metric] = {};
+    if (!meshRectCache[metric]) meshRectCache[metric] = {};
+
+    // デバウンス: 高速パン中の連続呼び出しを抑制
+    if (meshLoadingLock[metric]) return;
+    meshLoadingLock[metric] = true;
+    setTimeout(() => { meshLoadingLock[metric] = false; }, 150);
 
     try {
-        let url = `/api/layers/mesh-250m?${_mapBoundsParams()}&metric=${metric}`;
-        // 賃料間取りフィルタ
+        // 広域bounds取得 (現ビューポート + マージン20%で先読み)
+        const b = map.getBounds();
+        const latPad = (b.getNorth() - b.getSouth()) * 0.2;
+        const lngPad = (b.getEast() - b.getWest()) * 0.2;
+        const south = b.getSouth() - latPad;
+        const north = b.getNorth() + latPad;
+        const west = b.getWest() - lngPad;
+        const east = b.getEast() + lngPad;
+
+        let url = `/api/layers/mesh-250m?south=${south}&west=${west}&north=${north}&east=${east}&metric=${metric}`;
         if (metric === 'rent' || metric === 'yield') {
             const layoutEl = document.getElementById('mesh-rent-layout');
             if (layoutEl && layoutEl.value) url += `&layout=${encodeURIComponent(layoutEl.value)}`;
@@ -2790,69 +3073,309 @@ async function loadMeshLayer(metric) {
         const resp = await fetch(url);
         const data = await resp.json();
 
-        const dLat = 0.00208 / 2;
-        const dLng = 0.003125 / 2;
+        // レイヤー未作成 or 強制更新時は作り直し
+        if (!meshLayers[metric] || forceRefresh) {
+            if (meshLayers[metric]) map.removeLayer(meshLayers[metric]);
+            meshLayers[metric] = L.layerGroup();
+            meshRectCache[metric] = {};
+            meshLayers[metric].addTo(map);
+        }
 
+        let newCount = 0;
         (data.features || []).forEach(f => {
-            const p = f.properties, c = f.geometry.coordinates;
-            const v = p.value;
-            let color = _meshColor(metric, v);
-            let opacity = _meshOpacity(metric, v);
+            const mid = f.properties.mesh_id;
+            // 既存キャッシュにあればスキップ
+            if (meshRectCache[metric][mid]) return;
 
-            // 用途地域メトリクス: 用途種別で色分け
-            if (metric === 'zoning' && p.zoning) {
-                const z = p.zoning;
-                const zoningColors = {
-                    '第一種低層住居専用地域': '#81c784', '第二種低層住居専用地域': '#a5d6a7',
-                    '第一種中高層住居専用地域': '#4caf50', '第二種中高層住居専用地域': '#66bb6a',
-                    '第一種住居地域': '#26a69a', '第二種住居地域': '#4db6ac',
-                    '準住居地域': '#80cbc4',
-                    '近隣商業地域': '#ffb74d', '商業地域': '#ff9800',
-                    '準工業地域': '#90a4ae', '工業地域': '#78909c', '工業専用地域': '#546e7a',
-                };
-                color = zoningColors[z] || '#b0bec5';
-                opacity = 0.45;
-            }
-
-            const bounds = [[c[1] - dLat, c[0] - dLng], [c[1] + dLat, c[0] + dLng]];
-            const rect = L.rectangle(bounds, {
-                color: '#fff', fillColor: color,
-                fillOpacity: opacity, weight: 0.2, opacity: 0.1,
-            });
-
-            // 統合ツールチップ
-            let tip = `<div style="min-width:150px">`;
-            if (p.station) tip += `<b>${p.station}</b>`;
-            if (p.station_km != null) tip += ` <span style="color:#90a4ae">${p.station_km}km</span>`;
-
-            if (p.land_price) tip += `<br>💰 地価: ¥${p.land_price.toLocaleString()}/m²`;
-            if (p.rent) tip += `<br>🏠 賃料: ¥${p.rent.toLocaleString()}/m²`;
-            if (p.tx_price) tip += `<br>📊 取引: ¥${p.tx_price.toLocaleString()}/m² (${p.tx_count}件)`;
-            if (p.yield != null) {
-                const yc = p.yield > 6 ? '#4caf50' : p.yield > 4 ? '#fbc02d' : '#ef5350';
-                tip += `<br>📈 利回: <b style="color:${yc}">${p.yield}%</b>`;
-            }
-            if (p.pop) {
-                tip += `<br>👥 ${Math.round(p.pop)}人`;
-                if (p.pop_change != null) {
-                    const s = p.pop_change > 0 ? '+' : '';
-                    tip += ` (${s}${p.pop_change}%)`;
-                }
-            }
-            if (p.fac_total) tip += `<br>🏫${p.schools||0} 🏥${p.medical||0} 👶${p.childcare||0}`;
-            if (p.zoning) tip += `<br>📋 ${p.zoning}`;
-            if (p.coverage && p.far) tip += ` (建${p.coverage}/容${p.far})`;
-            if (p.front_road) tip += `<br>🛣️ ${p.front_road}`;
-            if (p.road_width) tip += ` 幅員${(p.road_width/10).toFixed(1)}m`;
-            tip += `</div>`;
-
-            rect.bindTooltip(tip, { sticky: true });
+            // キャッシュに追加 & レイヤーに描画
+            meshCache[metric][mid] = f;
+            const rect = _buildMeshRect(metric, f);
+            meshRectCache[metric][mid] = rect;
             meshLayers[metric].addLayer(rect);
+            newCount++;
         });
 
-        meshLayers[metric].addTo(map);
-        console.log(`mesh ${metric}: ${data.features?.length || 0}件`);
+        // キャッシュ上限超過時: ビューポート外のメッシュを削除
+        const cacheSize = Object.keys(meshRectCache[metric]).length;
+        if (cacheSize > MESH_CACHE_MAX) {
+            const bounds = map.getBounds();
+            const toRemove = [];
+            for (const [mid, rect] of Object.entries(meshRectCache[metric])) {
+                if (!bounds.intersects(rect.getBounds())) toRemove.push(mid);
+            }
+            toRemove.slice(0, cacheSize - MESH_CACHE_MAX + 500).forEach(mid => {
+                meshLayers[metric].removeLayer(meshRectCache[metric][mid]);
+                delete meshRectCache[metric][mid];
+                delete meshCache[metric][mid];
+            });
+        }
+
+        console.log(`mesh ${metric}: +${newCount}件 (cache ${Object.keys(meshRectCache[metric]).length}件)`);
     } catch(e) { console.error(`mesh ${metric} error:`, e); }
+}
+
+// ビューポート変更時にアクティブなメッシュレイヤーを自動更新
+function _setupMeshAutoReload() {
+    let reloadTimer = null;
+    map.on('moveend', () => {
+        clearTimeout(reloadTimer);
+        reloadTimer = setTimeout(() => {
+            // メッシュレイヤー
+            Object.keys(meshLayers).forEach(metric => {
+                if (meshLayers[metric] && map.hasLayer(meshLayers[metric])) {
+                    loadMeshLayer(metric);
+                }
+            });
+            // 事実ベースレイヤーも自動リロード
+            if (zoningPointsLayer && map.hasLayer(zoningPointsLayer)) loadZoningPoints();
+            if (railwayLinesLayer && map.hasLayer(railwayLinesLayer)) loadRailwayLines();
+            if (roadTypeLayer && map.hasLayer(roadTypeLayer)) loadRoadTypeLayer();
+        }, 300);
+    });
+}
+
+
+// =====================================================
+// ===== 事実ベースレイヤー（用途地域ポイント・路線別駅） =====
+// =====================================================
+
+let zoningPointsLayer = null;
+let railwayLinesLayer = null;
+
+async function loadZoningPoints() {
+    if (zoningPointsLayer) map.removeLayer(zoningPointsLayer);
+    zoningPointsLayer = L.layerGroup();
+    try {
+        const resp = await fetch(`/api/layers/zoning-points?${_mapBoundsParams()}`);
+        const data = await resp.json();
+        const zoom = map.getZoom();
+        const r = zoom >= 15 ? 8 : zoom >= 13 ? 5 : 3;
+        (data.features || []).forEach(f => {
+            const p = f.properties, c = f.geometry.coordinates;
+            const m = L.circleMarker([c[1], c[0]], {
+                radius: r, color: '#fff', fillColor: p.color,
+                fillOpacity: 0.75, weight: 0.8, opacity: 0.5,
+            });
+            let tip = `<div style="min-width:140px">`;
+            tip += `<b style="color:${p.color}">${p.zoning}</b>`;
+            if (p.coverage && p.far) tip += `<br>建蔽率 ${p.coverage} / 容積率 ${p.far}`;
+            if (p.fire_prevention) tip += `<br>防火: ${p.fire_prevention}`;
+            if (p.price) tip += `<br>地価: ¥${p.price.toLocaleString()}/m²`;
+            if (p.station) tip += `<br>最寄駅: ${p.station}`;
+            if (p.place) tip += `<br>${p.place}`;
+            tip += `</div>`;
+            m.bindTooltip(tip, {sticky: true});
+            zoningPointsLayer.addLayer(m);
+        });
+        zoningPointsLayer.addTo(map);
+        console.log(`用途地域ポイント: ${data.features?.length || 0}件`);
+    } catch(e) { console.error('用途地域ポイントエラー:', e); }
+}
+
+async function loadRailwayLines() {
+    if (railwayLinesLayer) map.removeLayer(railwayLinesLayer);
+    railwayLinesLayer = L.layerGroup();
+    try {
+        const resp = await fetch(`/api/layers/railway-lines?${_mapBoundsParams()}`);
+        const data = await resp.json();
+        const zoom = map.getZoom();
+        const r = zoom >= 14 ? 7 : zoom >= 12 ? 5 : 3;
+
+        // サーバー返却の segment / station を分離
+        const segmentFeatures = (data.features || []).filter(f => f.properties?.feature_kind === 'segment');
+        const stationFeatures = (data.features || []).filter(f => !f.properties?.feature_kind || f.properties?.feature_kind === 'station');
+
+        // 同一路線の駅を線で結ぶ
+        const lineStations = {};
+        stationFeatures.forEach(f => {
+            const p = f.properties, c = f.geometry.coordinates;
+            const line = p.line || '不明';
+            if (!lineStations[line]) lineStations[line] = {color: p.color, points: []};
+            lineStations[line].points.push({
+                lat: c[1],
+                lng: c[0],
+                name: p.name,
+                color: p.color,
+                order: p.order || 99999,
+                is_transfer: !!p.is_transfer,
+                transfer_count: p.transfer_count || 0,
+                transfer_lines: p.transfer_lines || [],
+            });
+        });
+
+        // まずAPI側で構築済みセグメントを描画
+        segmentFeatures.forEach(f => {
+            const p = f.properties || {};
+            const coords = (f.geometry?.coordinates || []).map(c => [c[1], c[0]]);
+            if (coords.length < 2) return;
+            const polyline = L.polyline(coords, {
+                color: p.color || '#90a4ae',
+                weight: 3,
+                opacity: 0.75,
+            });
+            polyline.bindTooltip(`<b>${p.line || '路線'}</b>`, {sticky: true});
+            railwayLinesLayer.addLayer(polyline);
+        });
+
+        // 各路線の駅を最近傍チェーンで正しい順序に並べて線で結ぶ
+        Object.entries(lineStations).forEach(([lineName, info]) => {
+            const pts = info.points;
+            if (pts.length < 2) {
+                // 駅1つだけならマーカーのみ
+                pts.forEach(pt => {
+                    const m = L.circleMarker([pt.lat, pt.lng], {
+                        radius: pt.is_transfer ? r + 2 : r,
+                        color: pt.is_transfer ? '#ffd54f' : '#fff',
+                        fillColor: pt.color,
+                        fillOpacity: 0.9, weight: 1.2, opacity: 0.8,
+                    });
+                    const transferTag = pt.is_transfer ? `<br><span style="color:#ffd54f;">乗換 ${pt.transfer_count}路線</span>` : '';
+                    const transferLines = pt.is_transfer && pt.transfer_lines.length
+                        ? `<br><span style="color:#90a4ae">${pt.transfer_lines.join(' / ')}</span>`
+                        : '';
+                    m.bindTooltip(`<b>${pt.name}</b><br><span style="color:${pt.color}">${lineName}</span>${transferTag}${transferLines}`, {sticky: true});
+                    railwayLinesLayer.addLayer(m);
+                });
+                return;
+            }
+
+            // 駅順序の決定: order値（station_masterの定義順）がある場合はそれを使い、
+            // なければ最近傍チェーンでつなぐ
+            const hasOrder = pts.some(p => p.order < 99999);
+            let ordered;
+
+            if (hasOrder) {
+                // station_masterの定義順（路線の正しい駅順）
+                ordered = [...pts].sort((a, b) => a.order - b.order);
+            } else {
+                // Nearest Neighbor Chain: 端点から最近傍を順に接続
+                ordered = [];
+                const used = new Set();
+                let startIdx = 0;
+                let minSum = Infinity;
+                for (let i = 0; i < pts.length; i++) {
+                    const s = pts[i].lat + pts[i].lng;
+                    if (s < minSum) { minSum = s; startIdx = i; }
+                }
+                ordered.push(pts[startIdx]);
+                used.add(startIdx);
+
+                while (ordered.length < pts.length) {
+                    const last = ordered[ordered.length - 1];
+                    let bestIdx = -1, bestDist = Infinity;
+                    for (let i = 0; i < pts.length; i++) {
+                        if (used.has(i)) continue;
+                        const d = (last.lat - pts[i].lat) ** 2 + (last.lng - pts[i].lng) ** 2;
+                        if (d < bestDist) { bestDist = d; bestIdx = i; }
+                    }
+                    if (bestIdx < 0) break;
+                    ordered.push(pts[bestIdx]);
+                    used.add(bestIdx);
+                }
+            }
+
+            // サーバーからセグメントが無い路線のみ、クライアント側で補完描画
+            const hasServerSegments = segmentFeatures.some(f => (f.properties?.line || '') === lineName);
+            if (!hasServerSegments) {
+                const latlngs = ordered.map(p => [p.lat, p.lng]);
+                const polyline = L.polyline(latlngs, {
+                    color: info.color, weight: 2.5, opacity: 0.55,
+                    dashArray: '4 3',
+                });
+                polyline.bindTooltip(`<b>${lineName}</b> (${ordered.length}駅)`, {sticky: true});
+                railwayLinesLayer.addLayer(polyline);
+            }
+
+            // 各駅マーカー
+            ordered.forEach(pt => {
+                const m = L.circleMarker([pt.lat, pt.lng], {
+                    radius: pt.is_transfer ? r + 2 : r,
+                    color: pt.is_transfer ? '#ffd54f' : '#fff',
+                    fillColor: pt.color,
+                    fillOpacity: 0.92,
+                    weight: pt.is_transfer ? 2.2 : 1.2,
+                    opacity: 0.85,
+                });
+                const transferTag = pt.is_transfer ? `<br><span style="color:#ffd54f;">乗換 ${pt.transfer_count}路線</span>` : '';
+                const transferLines = pt.is_transfer && pt.transfer_lines.length
+                    ? `<br><span style="color:#90a4ae">${pt.transfer_lines.join(' / ')}</span>`
+                    : '';
+                m.bindTooltip(`<b>${pt.name}</b><br><span style="color:${pt.color}">${lineName}</span>${transferTag}${transferLines}`, {sticky: true});
+                railwayLinesLayer.addLayer(m);
+            });
+        });
+
+        railwayLinesLayer.addTo(map);
+        const lineCount = Object.keys(lineStations).length;
+        console.log(`路線表示: ${lineCount}路線, ${stationFeatures.length}駅, ${segmentFeatures.length}接続`);
+    } catch(e) { console.error('路線表示エラー:', e); }
+}
+
+
+// =====================================================
+// ===== 道路種別レイヤー（国土地理院タイル） =====
+// =====================================================
+
+let roadTypeLayer = null;
+let roadLoadingLock = false;
+
+async function loadRoadTypeLayer() {
+    if (roadLoadingLock) return;
+    roadLoadingLock = true;
+    setTimeout(() => { roadLoadingLock = false; }, 500);
+
+    if (!roadTypeLayer) {
+        roadTypeLayer = L.layerGroup();
+        roadTypeLayer.addTo(map);
+    }
+
+    // ズーム14以上のみ取得（広域は重い）
+    if (map.getZoom() < 14) {
+        console.log('道路種別: zoom < 14 のため非表示');
+        roadTypeLayer.clearLayers();
+        return;
+    }
+
+    try {
+        const resp = await fetch(`/api/layers/roads?${_mapBoundsParams()}`);
+        const data = await resp.json();
+        roadTypeLayer.clearLayers();
+
+        (data.features || []).forEach(f => {
+            const p = f.properties;
+            const coords = f.geometry.coordinates.map(c => [c[1], c[0]]);
+
+            const polyline = L.polyline(coords, {
+                color: p.color,
+                weight: p.weight,
+                opacity: 0.85,
+            });
+
+            let tip = `<div style="min-width:140px">`;
+            tip += `<b style="color:${p.color}">${p.road_type}</b>`;
+            if (p.legal) tip += `<br>📋 <b>${p.legal}</b>`;
+            if (p.name) tip += `<br>${p.name}`;
+            if (p.ref) tip += ` <span style="color:#90a4ae">(${p.ref})</span>`;
+            if (p.width) tip += `<br>幅員: ${p.width}m`;
+            else tip += `<br>幅員: 不明`;
+            if (p.lanes) tip += ` (${p.lanes}車線)`;
+            if (p.surface) tip += `<br>路面: ${p.surface}`;
+            tip += `</div>`;
+            polyline.bindTooltip(tip, {sticky: true});
+
+            roadTypeLayer.addLayer(polyline);
+        });
+
+        console.log(`道路種別: ${data.features?.length || 0}本`);
+    } catch(e) { console.error('道路種別エラー:', e); }
+}
+
+function toggleRoadTypeLayer(show) {
+    if (!show) {
+        if (roadTypeLayer) { map.removeLayer(roadTypeLayer); roadTypeLayer = null; }
+        return;
+    }
+    loadRoadTypeLayer();
 }
 
 
@@ -3421,6 +3944,11 @@ function updateLegend() {
         html += '<b>人口増減率</b><br>';
         html += `${_sq('#1b5e20')}+10%~ ${_sq('#43a047')}+2~10% ${_sq('#66bb6a')}0~+2% ${_sq('#fff176')}0~-2% ${_sq('#ff7043')}-5~-10% ${_sq('#e53935')}-10%~<br>`;
     }
+    if (meshLayers['pop_density'] && map.hasLayer(meshLayers['pop_density'])) {
+        show = true;
+        html += '<b>人口密度 (人/km²)</b><br>';
+        html += `${_sq('#e0e0e0')}~1千 ${_sq('#64b5f6')}~5千 ${_sq('#4caf50')}~1万 ${_sq('#ffeb3b')}~1.5万 ${_sq('#ff9800')}~2万 ${_sq('#f44336')}~3万 ${_sq('#880e4f')}3万~<br>`;
+    }
     if (meshLayers['facility'] && map.hasLayer(meshLayers['facility'])) {
         show = true;
         html += '<b>施設密度</b> 🏫学校 🏥医療 👶保育<br>';
@@ -3439,6 +3967,14 @@ function updateLegend() {
     if (ivYieldLayer && map.hasLayer(ivYieldLayer)) {
         show = true;
         html += '<b>駅別利回り</b><br>';
+    }
+    // 道路種別
+    if (roadTypeLayer && map.hasLayer(roadTypeLayer)) {
+        show = true;
+        html += '<b>道路種別(建築基準法)</b><br>';
+        function _ln(c,w) { return `<span style="display:inline-block;width:18px;height:${w}px;background:${c};margin:0 2px;vertical-align:middle;border:${c==='#fdd835'||c==='#b0bec5'?'0.5px solid #666':'none'}"></span>`; }
+        html += `${_ln('#e53935',4)}1項1号(国道) ${_ln('#fb8c00',3)}1項1号(都道府県道) ${_ln('#fdd835',2)}1項1号(市道)<br>`;
+        html += `${_ln('#b0bec5',2)}1項1号(生活道路4m+) ${_ln('#ff6f00',2)}2項道路(4m未満) ${_ln('#7e57c2',1)}1項5号(位置指定) ${_ln('#d32f2f',1)}建築不可<br>`;
     }
 
     div.innerHTML = html;

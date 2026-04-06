@@ -142,6 +142,19 @@ class ValuationAgent(BaseAgent):
                 "official_price_per_sqm": 0,
                 "ratio_to_official": 0,
             }
+
+        # 物件入力に㎡単価が与えられていれば最優先（ヒートマップ連携値を含む）
+        if prop.price_per_sqm and prop.price_per_sqm > 0:
+            est_price = int(prop.price_per_sqm * prop.land_area)
+            return {
+                "estimated_price": est_price,
+                "price_per_sqm": prop.price_per_sqm,
+                "official_price_per_sqm": prop.price_per_sqm,
+                "ratio_to_official": 1.0,
+                "sample_count": 1,
+                "method": "input_price_per_sqm",
+            }
+
         return self.land_agent.estimate_land_value(
             address=prop.address,
             land_area=prop.land_area,
