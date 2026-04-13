@@ -384,6 +384,39 @@ label:has(input[type="checkbox"]) {
 .ranking-name { font-weight: 600; }
 .ranking-detail { font-size: 0.72rem; color: #90a4ae; }
 
+/* ランキングパネル（画面右下固定でUI非占有化） */
+#ranking-panel {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    width: clamp(280px, 32vw, 420px);
+    max-height: 52vh;
+    overflow: hidden;
+    z-index: 1500;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.ranking-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.ranking-mini-btn {
+    width: auto;
+    padding: 4px 8px;
+    font-size: 0.7rem;
+    margin: 0;
+}
+
+#ranking-list-wrap {
+    max-height: calc(52vh - 52px);
+    overflow-y: auto;
+    padding-right: 2px;
+}
+
 /* レポート一覧 */
 .report-item {
     padding: 6px 0;
@@ -589,3 +622,15 @@ label:has(input[type="checkbox"]) {
 .leaflet-tooltip-bottom:before { border-bottom-color: rgba(10,20,40,0.92) !important; }
 .leaflet-tooltip-left:before { border-left-color: rgba(10,20,40,0.92) !important; }
 .leaflet-tooltip-right:before { border-right-color: rgba(10,20,40,0.92) !important; }
+
+/* ランク順表示用の小型バッジ */
+.rank-tooltip {
+    background: rgba(38, 50, 56, 0.95) !important;
+    color: #fff !important;
+    border: 1px solid rgba(255,255,255,0.18) !important;
+    border-radius: 12px !important;
+    padding: 1px 6px !important;
+    font-size: 0.66rem !important;
+    font-weight: 700 !important;
+    line-height: 1.2 !important;
+}

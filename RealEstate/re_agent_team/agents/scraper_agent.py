@@ -8,6 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .base_agent import BaseAgent
+from .url_scraper_agent import UrlScraperAgent
 from models.property import Property
 
 
@@ -23,6 +24,8 @@ class ScraperAgent(BaseAgent):
 
     RAKUMACHI_BASE = "https://www.rakumachi.jp"
     RAKUMACHI_SEARCH = "https://www.rakumachi.jp/syuuekibukken/area/"
+    KENBIYA_SEARCH = "https://www.kenbiya.com/pp0/s/{pref_slug}/"
+    RALS_SEARCH = "https://www.rals.co.jp/invest/index.php"
 
     # 対象物件種別（タイトル先頭で判定）
     ALLOWED_PROPERTY_TYPES = ["1棟アパート", "1棟マンション", "一棟アパート", "一棟マンション", "1棟商業ビル", "土地"]
@@ -46,13 +49,57 @@ class ScraperAgent(BaseAgent):
             "itabashi": "sc_itabashi", "nerima": "sc_nerima",
             "adachi": "sc_adachi", "katsushika": "sc_katsushika",
             "edogawa": "sc_edogawa",
+            # 多摩地区
+            "hachioji": "sc_hachioji", "machida": "sc_machida",
+            "tachikawa": "sc_tachikawa", "musashino": "sc_musashino",
+            "mitaka": "sc_mitaka", "fuchu": "sc_fuchu",
+            "chofu": "sc_chofu", "koganei": "sc_koganei",
+            "kodaira": "sc_kodaira", "hino": "sc_hino",
+            "tama": "sc_tama", "kokubunji": "sc_kokubunji",
         },
-        "14": {"yokohama": "sc_yokohama", "kawasaki": "sc_kawasaki"},
-        "11": {"saitama": "sc_saitamashi"},
-        "12": {"chiba": "sc_chibashi", "funabashi": "sc_funabashi"},
+        "14": {
+            "yokohama_tsurumi": "sc_yokohamashitsurumi",
+            "yokohama_naka": "sc_yokohamashinaka",
+            "yokohama_kanagawa": "sc_yokohamashikanagawa",
+            "yokohama_nishi": "sc_yokohamashinishi",
+            "yokohama_hodogaya": "sc_yokohamashihodogaya",
+            "yokohama_kohoku": "sc_yokohamashikohoku",
+            "kawasaki_kawasaki": "sc_kawasakishikawasaki",
+            "kawasaki_nakahara": "sc_kawasakishinakahara",
+            "kawasaki_takatsu": "sc_kawasakishitakatsu",
+            "fujisawa": "sc_fujisawa",
+        },
+        "11": {
+            "kawaguchi": "sc_kawaguchi",
+            "kawagoe": "sc_kawagoe",
+            "tokorozawa": "sc_tokorozawa",
+            "saitama_omiya": "sc_saitamashiomiya",
+            "saitama_urawa": "sc_saitamashiurawa",
+            "saitama_minami": "sc_saitamashiminami",
+            "saitama_chuo": "sc_saitamashichuo",
+            "koshigaya": "sc_koshigaya",
+            "soka": "sc_soka",
+            "yashio": "sc_yashio",
+        },
+        "12": {
+            "funabashi": "sc_funabashi",
+            "ichikawa": "sc_ichikawa",
+            "matsudo": "sc_matsudo",
+            "chiba_chuo": "sc_chibashichuo",
+            "kashiwa": "sc_kashiwa",
+            "urayasu": "sc_urayasu",
+            "chiba_inage": "sc_chibashiinage",
+            "chiba_hanamigawa": "sc_chibashihanamigawa",
+            "nagareyama": "sc_nagareyama",
+            "narashino": "sc_narashino",
+            "noda": "sc_noda",
+        },
     }
 
     RAKUMACHI_PREF_MAP = {
+        "13": "tokyo", "14": "kanagawa", "11": "saitama", "12": "chiba",
+    }
+    KENBIYA_PREF_MAP = {
         "13": "tokyo", "14": "kanagawa", "11": "saitama", "12": "chiba",
     }
 
@@ -71,6 +118,7 @@ class ScraperAgent(BaseAgent):
         self.session.headers.update(self.HEADERS)
         self._rate_limit = 3.0
         self._last_request = 0.0
+        self.url_scraper = UrlScraperAgent()
 
     # ================================================================
     # 収益物件スクレイピング (楽待)
@@ -87,37 +135,49 @@ class ScraperAgent(BaseAgent):
         split_by_price: bool = False,
     ) -> List[Property]:
         """
-        楽待から収益物件をスクレイピング
+        複数ポータルから収益物件をスクレイピング
 
         Args:
             prefecture_code: 都道府県コード
-            sources: 互換性のため残すが楽待のみ使用
-            max_pages: 最大ページ数（楽待は1ページ約50件）
+            sources: 対象ソース（rakumachi/kenbiya/rals）
+            max_pages: 最大ページ数
         """
+        _ = (price_min, price_max, yield_min, split_by_price)
+        srcs = [s.lower() for s in (sources or ["rakumachi"])]
         self.logger.info(
-            f"収益物件スクレイピング開始: pref={prefecture_code}, pages={max_pages}"
+            f"収益物件スクレイピング開始: pref={prefecture_code}, pages={max_pages}, sources={srcs}"
         )
 
         all_properties = []
         seen_urls = set()
+        source_handlers = {
+            "rakumachi": self._scrape_rakumachi_page,
+            "kenbiya": self._scrape_kenbiya_page,
+            "rals": self._scrape_rals_page,
+        }
 
-        # 楽待をスクレイピング
-        for page in range(1, max_pages + 1):
-            self.logger.info(f"  [楽待] ページ {page}/{max_pages}...")
-            try:
-                props = self._scrape_rakumachi_page(prefecture_code, page)
-                if not props:
-                    self.logger.info(f"  [楽待] ページ {page}: 0件、終了")
+        for src in srcs:
+            handler = source_handlers.get(src)
+            if not handler:
+                self.logger.info(f"  [{src}] 未対応ソースのためスキップ")
+                continue
+            for page in range(1, max_pages + 1):
+                self.logger.info(f"  [{src}] ページ {page}/{max_pages}...")
+                try:
+                    props = handler(prefecture_code, page)
+                    if not props:
+                        if page == 1:
+                            self.logger.info(f"  [{src}] 取得0件")
+                        break
+                    for p in props:
+                        url = p.source_url or ""
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            all_properties.append(p)
+                    self.logger.info(f"  [{src}] ページ {page}: {len(props)}件")
+                except Exception as e:
+                    self.logger.warning(f"  [{src}] ページ {page} エラー: {e}")
                     break
-                for p in props:
-                    url = p.source_url or ""
-                    if url not in seen_urls:
-                        seen_urls.add(url)
-                        all_properties.append(p)
-                self.logger.info(f"  [楽待] ページ {page}: {len(props)}件")
-            except Exception as e:
-                self.logger.warning(f"  [楽待] ページ {page} エラー: {e}")
-                break
 
         self.logger.info(f"収益物件スクレイピング完了: {len(all_properties)}件")
         return all_properties
@@ -334,6 +394,91 @@ class ScraperAgent(BaseAgent):
             source_url=source_url,
         )
 
+    def _scrape_kenbiya_page(self, pref_code: str, page: int = 1) -> List[Property]:
+        """健美家の一覧から詳細URLを収集して構造化"""
+        self._throttle()
+        pref_slug = self.KENBIYA_PREF_MAP.get(pref_code, "tokyo")
+        url = self.KENBIYA_SEARCH.format(pref_slug=pref_slug)
+        params = {"page": str(page)}
+        return self._crawl_detail_urls(
+            source_name="健美家",
+            list_url=url,
+            params=params,
+            url_pattern=r"kenbiya\.com/.+/(?:detail|view|bukken|estate)",
+        )
+
+    def _scrape_rals_page(self, pref_code: str, page: int = 1) -> List[Property]:
+        """不動産投資★連合隊の一覧から詳細URLを収集して構造化"""
+        self._throttle()
+        pref_map = {"13": "tokyo", "14": "kanagawa", "11": "saitama", "12": "chiba"}
+        params = {
+            "p": str(page),
+            "area": pref_map.get(pref_code, "tokyo"),
+        }
+        return self._crawl_detail_urls(
+            source_name="不動産投資連合隊",
+            list_url=self.RALS_SEARCH,
+            params=params,
+            url_pattern=r"(rals\.co\.jp|fudosan\.cbiz\.ne\.jp).*(?:detail|index|invest)",
+        )
+
+    def _crawl_detail_urls(
+        self,
+        source_name: str,
+        list_url: str,
+        params: Dict[str, str],
+        url_pattern: str,
+    ) -> List[Property]:
+        """一覧ページから候補URLを抽出し、詳細ページを構造化"""
+        try:
+            resp = self.session.get(list_url, params=params, timeout=20)
+            resp.raise_for_status()
+            resp.encoding = resp.apparent_encoding or "utf-8"
+        except requests.RequestException as e:
+            self.logger.warning(f"[{source_name}] 一覧取得失敗: {e}")
+            return []
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        urls = []
+        for a in soup.select("a[href]"):
+            href = (a.get("href") or "").strip()
+            if not href:
+                continue
+            if href.startswith("//"):
+                href = "https:" + href
+            elif href.startswith("/"):
+                href = urljoin(list_url, href)
+            elif not href.startswith("http"):
+                href = urljoin(list_url, href)
+            if not re.search(url_pattern, href):
+                continue
+            if "login" in href or "member" in href:
+                continue
+            urls.append(href.split("#")[0])
+
+        # 重複除去 + 上限（一覧1pあたりの過剰アクセスを抑える）
+        uniq_urls = list(dict.fromkeys(urls))[:25]
+        properties: List[Property] = []
+        for detail_url in uniq_urls:
+            try:
+                prop = self.url_scraper.run(url=detail_url, use_ocr=False, use_browser=False)
+                if not prop:
+                    continue
+                # 既存フィルタに寄せる
+                title = (prop.name or "").strip()
+                if any(kw in title for kw in self.EXCLUDED_KEYWORDS):
+                    continue
+                if not any(t in title for t in self.ALLOWED_PROPERTY_TYPES):
+                    # タイトルに種別が無い場合は利回り付き物件のみ採用
+                    if not prop.gross_yield:
+                        continue
+                prop.source = source_name
+                properties.append(prop)
+            except Exception as e:
+                self.logger.debug(f"[{source_name}] 詳細解析失敗: {detail_url} ({e})")
+                continue
+        return properties
+
     # ================================================================
     # 賃料スクレイピング (SUUMO賃貸)
     # ================================================================
@@ -414,6 +559,10 @@ class ScraperAgent(BaseAgent):
 
                 addr_el = card.select_one(".cassetteitem_detail-col1")
                 address = addr_el.get_text(strip=True) if addr_el else ""
+                if not address:
+                    # 稀に構造違いで所在地が別クラスに入る
+                    alt_addr = card.select_one(".cassetteitem_detail-text")
+                    address = alt_addr.get_text(strip=True) if alt_addr else ""
 
                 station_el = card.select_one(".cassetteitem_detail-col2")
                 station_text = station_el.get_text(strip=True) if station_el else ""
@@ -457,11 +606,14 @@ class ScraperAgent(BaseAgent):
                     if not area or area < 5:
                         continue
 
-                    # 間取り
-                    layout = None
-                    m = re.search(r"(\d[SLDK]+)", area_text)
-                    if m:
-                        layout = m.group(1)
+                    # 間取り（1R/ワンルーム/1K/1LDK 等を正規化）
+                    layout = self._extract_layout(area_text or " ".join(texts))
+                    if not layout:
+                        # 最低限の品質担保: 間取りが取れない部屋は除外
+                        continue
+                    if not address or len(address) < 3:
+                        # 所在地欠落レコードは蓄積しない
+                        continue
 
                     rentals.append({
                         "address": address,
@@ -581,6 +733,20 @@ class ScraperAgent(BaseAgent):
         if m:
             return (m.group(1), int(m.group(2)))
         return (None, None)
+
+    def _extract_layout(self, text: str) -> Optional[str]:
+        """SUUMO表記ゆれを含む間取り抽出"""
+        if not text:
+            return None
+        normalized = text.replace("ワンルーム", "1R").replace("ﾜﾝﾙｰﾑ", "1R")
+        m = re.search(r"((?:\d+)?[SLDK]+|1R|[2-9]R)", normalized)
+        if m:
+            layout = m.group(1).upper()
+            # SUUMOの "R" 単独を "1R" に寄せる
+            if layout == "R":
+                layout = "1R"
+            return layout
+        return None
 
     def _extract_area(self, text: str, prefix: str) -> Optional[float]:
         pattern = prefix + r"[面積]?\s*[:：]?\s*([\d,.]+)\s*(?:m2|㎡|平米)"

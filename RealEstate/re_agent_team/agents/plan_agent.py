@@ -4,9 +4,12 @@ from typing import List, Optional
 
 from .base_agent import BaseAgent
 from .rental_agent import RentalAgent
+from data.reinfolib_client import ReinfolibClient
+from data.construction_cost_master import load_construction_cost_profiles
 from models.land_listing import LandListing
 from models.building_plan import BuildingPlan, LandPlanSummary
 from config.settings import (
+    BASE_DIR,
     PLAN_UNIT_SIZES,
     CONSTRUCTION_COST_PER_SQM,
     STRUCTURE_MAX_FLOORS,
@@ -47,6 +50,82 @@ class PlanAgent(BaseAgent):
     def __init__(self):
         super().__init__("PlanAgent")
         self.rental_agent = RentalAgent()
+        self.api_client = ReinfolibClient()
+        self._cost_profiles = load_construction_cost_profiles(BASE_DIR)
+
+    @staticmethod
+    def _to_ratio(value) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            num = float(str(value).replace("%", "").strip())
+            return num / 100 if num > 1 else num
+        except (ValueError, TypeError):
+            return None
+
+    def _normalize_zoning_name(self, zoning: str) -> str:
+        if not zoning:
+            return zoning
+        aliases = {
+            "1種低層": "第一種低層住居専用地域",
+            "１種低層": "第一種低層住居専用地域",
+            "2種低層": "第二種低層住居専用地域",
+            "２種低層": "第二種低層住居専用地域",
+            "1種中高層": "第一種中高層住居専用地域",
+            "１種中高層": "第一種中高層住居専用地域",
+            "2種中高層": "第二種中高層住居専用地域",
+            "２種中高層": "第二種中高層住居専用地域",
+            "1種住居": "第一種住居地域",
+            "１種住居": "第一種住居地域",
+            "2種住居": "第二種住居地域",
+            "２種住居": "第二種住居地域",
+            "近商": "近隣商業地域",
+            "準工": "準工業地域",
+        }
+        for src, dst in aliases.items():
+            if src in zoning:
+                return dst
+        return zoning
+
+    def _auto_fill_regulations(self, land_listing: LandListing):
+        """
+        用途地域・建蔽率・容積率・準防火をAPIから自動補完。
+        座標がある場合のみ実行し、既存値は優先する。
+        """
+        has_missing = (
+            not land_listing.zoning
+            or land_listing.building_coverage_ratio is None
+            or land_listing.floor_area_ratio is None
+        )
+        if not has_missing:
+            return
+        if not self.api_client.is_configured():
+            return
+        if land_listing.latitude is None or land_listing.longitude is None:
+            return
+        try:
+            enriched = self.api_client.enrich_land_listing(
+                land_listing.latitude,
+                land_listing.longitude,
+            )
+        except Exception as e:
+            self.logger.debug(f"規制補完APIエラー: {e}")
+            return
+        if not enriched:
+            return
+
+        if not land_listing.zoning and enriched.get("zoning"):
+            land_listing.zoning = self._normalize_zoning_name(str(enriched["zoning"]))
+        if land_listing.building_coverage_ratio is None and enriched.get("building_coverage_ratio") is not None:
+            ratio = self._to_ratio(enriched.get("building_coverage_ratio"))
+            if ratio is not None:
+                land_listing.building_coverage_ratio = ratio
+        if land_listing.floor_area_ratio is None and enriched.get("floor_area_ratio") is not None:
+            ratio = self._to_ratio(enriched.get("floor_area_ratio"))
+            if ratio is not None:
+                land_listing.floor_area_ratio = ratio
+        if enriched.get("quasi_fireproof"):
+            land_listing.quasi_fireproof = True
 
     def run(
         self,
@@ -70,6 +149,7 @@ class PlanAgent(BaseAgent):
             f"建蔽率{(land_listing.building_coverage_ratio or 0)*100:.0f}%, "
             f"容積率{(land_listing.floor_area_ratio or 0)*100:.0f}%)"
         )
+        self._auto_fill_regulations(land_listing)
 
         empty_summary = LandPlanSummary(
             land_listing_id=land_listing.id or 0,
@@ -122,6 +202,13 @@ class PlanAgent(BaseAgent):
 
         for structure_type, allowed_floors in STRUCTURE_MAX_FLOORS.items():
             cost_per_sqm = CONSTRUCTION_COST_PER_SQM[structure_type]
+            overhead_rate = self.CONSTRUCTION_OVERHEAD_RATE
+            fixed_project_cost = 0
+            profile = self._cost_profiles.get(structure_type)
+            if profile:
+                cost_per_sqm = profile.cost_per_sqm or cost_per_sqm
+                overhead_rate = profile.overhead_rate or overhead_rate
+                fixed_project_cost = profile.fixed_cost or 0
 
             # 準防火地域での木造コスト増
             if structure_type == "木造" and land_listing.quasi_fireproof:
@@ -182,7 +269,7 @@ class PlanAgent(BaseAgent):
                     # 総投資額 = 土地代 + 土地取得諸費用 + 建築費 + 付帯費用 + セットバック増分
                     land_price = land_listing.land_price or 0
                     land_acq_cost = int(land_price * self.LAND_ACQUISITION_COST_RATE)
-                    construction_overhead = int(construction_cost * self.CONSTRUCTION_OVERHEAD_RATE)
+                    construction_overhead = int(construction_cost * overhead_rate) + fixed_project_cost
                     total_inv = (land_price + land_acq_cost + construction_cost
                                  + construction_overhead + setback_premium)
                     est_yield = annual_income / total_inv if total_inv > 0 else 0

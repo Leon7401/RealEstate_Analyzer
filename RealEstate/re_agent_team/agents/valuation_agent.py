@@ -6,6 +6,7 @@ from .land_price_agent import LandPriceAgent
 from .rental_agent import RentalAgent
 from models.property import Property
 from models.valuation import ValuationResult
+from storage.database import Database
 from config.settings import (
     VACANCY_RATE,
     MANAGEMENT_FEE_RATE,
@@ -48,6 +49,7 @@ class ValuationAgent(BaseAgent):
         super().__init__("ValuationAgent")
         self.land_agent = LandPriceAgent()
         self.rental_agent = RentalAgent()
+        self.db = Database()
 
     def run(self, property: Property) -> ValuationResult:
         """物件のバリュエーションを実行"""
@@ -64,6 +66,7 @@ class ValuationAgent(BaseAgent):
 
         # 4. 利回り計算
         yields = self._calculate_yields(property, rent_est)
+        cap_rate_area_avg = self._estimate_exit_cap_rate(property, yields)
 
         # 5. 土地値比率（サニティチェック付き）
         land_ratio = (
@@ -117,6 +120,7 @@ class ValuationAgent(BaseAgent):
             ),
             gross_yield=yields.get("gross_yield"),
             net_yield=yields.get("net_yield"),
+            cap_rate_area_avg=cap_rate_area_avg,
             price_assessment=assessment,
             price_deviation_pct=deviation * 100,
             scores=scores,
@@ -131,6 +135,42 @@ class ValuationAgent(BaseAgent):
             f"判定={assessment}"
         )
         return result
+
+    def _estimate_exit_cap_rate(self, prop: Property, yields: dict) -> Optional[float]:
+        """周辺類似取引・駅メトリクスから売却CapRateを推定"""
+        candidates = []
+
+        # 1) 駅別の実勢利回り（取引・賃料サンプルありのみ）
+        try:
+            metrics = self.db.get_station_metrics(prefecture_code=prop.prefecture_code)
+            for m in metrics:
+                implied = m.get("implied_yield")
+                if implied is None:
+                    continue
+                if not (0.015 <= float(implied) <= 0.18):
+                    continue
+                if (m.get("sample_count_land") or 0) >= 3 and (m.get("sample_count_rent") or 0) >= 5:
+                    candidates.append(float(implied))
+        except Exception:
+            pass
+
+        # 2) 物件自体の正味利回りを弱い候補として加える
+        ny = yields.get("net_yield")
+        if ny and 0.01 <= ny <= 0.15:
+            candidates.append(float(ny))
+
+        if not candidates:
+            return None
+
+        candidates.sort()
+        median = candidates[len(candidates) // 2]
+
+        # 駅距離が遠い・築古ほど出口利回りを保守化
+        dist = float(prop.station_distance_min or 8)
+        age = float(prop.building_age or 15)
+        premium = max(0.0, dist - 8) * 0.0007 + max(0.0, age - 20) * 0.0005
+        cap = median + min(0.015, premium)
+        return max(0.035, min(0.12, cap))
 
     # ===== 内部メソッド =====
 

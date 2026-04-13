@@ -11,6 +11,82 @@ let heatmapLayer = null;
 let stationLayer = null;
 let stationsData = [];
 let sampleProperties = [];
+const ANALYSIS_CACHE_KEY = 're_analysis_cache_v1';
+let analysisCache = {};
+let rankingPanelCollapsed = false;
+
+function _safeLower(v) {
+    return (v || '').toString().trim().toLowerCase();
+}
+
+function getPropertyCacheKeys(p) {
+    const keys = [];
+    if (p && p.id != null) keys.push(`id:${p.id}`);
+    if (p && p.source_url) keys.push(`url:${_safeLower(p.source_url)}`);
+    if (p && p.address) keys.push(`addr:${_safeLower(p.address)}`);
+    if (p && p.name && p.address) keys.push(`nameaddr:${_safeLower(p.name)}|${_safeLower(p.address)}`);
+    return keys;
+}
+
+function loadAnalysisCache() {
+    try {
+        const raw = localStorage.getItem(ANALYSIS_CACHE_KEY);
+        analysisCache = raw ? JSON.parse(raw) : {};
+    } catch (e) {
+        console.warn('分析キャッシュ読込失敗:', e);
+        analysisCache = {};
+    }
+}
+
+function saveAnalysisCache() {
+    try {
+        localStorage.setItem(ANALYSIS_CACHE_KEY, JSON.stringify(analysisCache));
+    } catch (e) {
+        console.warn('分析キャッシュ保存失敗:', e);
+    }
+}
+
+function applyCachedAnalysisToProperty(p) {
+    const keys = getPropertyCacheKeys(p);
+    let cached = null;
+    for (const k of keys) {
+        if (analysisCache[k]) {
+            cached = analysisCache[k];
+            break;
+        }
+    }
+    if (!cached) return;
+
+    if (cached.grade) p.grade = cached.grade;
+    if (cached.gross_yield != null) p.gross_yield = cached.gross_yield;
+    if (cached.net_yield != null) p.net_yield = cached.net_yield;
+    if (cached.score != null) p._analysis_score = cached.score;
+    if (cached.recommendation) p._analysis_recommendation = cached.recommendation;
+    if (cached.scenario) p._analysis_scenario = cached.scenario;
+    if (cached.confidence != null) p._analysis_confidence = cached.confidence;
+    if (cached.as_is) p._scenario_as_is = cached.as_is;
+    if (cached.rebuild) p._scenario_rebuild = cached.rebuild;
+    if (cached.updated_at) p._analysis_updated_at = cached.updated_at;
+}
+
+function persistPropertyAnalysisResult(p, row) {
+    if (!p || !row) return;
+    const selected = row.selected || {};
+    const payload = {
+        grade: selected.grade || p.grade || null,
+        gross_yield: selected.gross_yield ?? p.gross_yield ?? null,
+        net_yield: selected.net_yield ?? p.net_yield ?? null,
+        score: selected.score ?? p._analysis_score ?? null,
+        recommendation: selected.recommendation ?? p._analysis_recommendation ?? null,
+        scenario: selected.scenario ?? p._analysis_scenario ?? null,
+        confidence: selected.confidence ?? p._analysis_confidence ?? null,
+        as_is: row.as_is || p._scenario_as_is || null,
+        rebuild: row.rebuild || p._scenario_rebuild || null,
+        updated_at: new Date().toISOString(),
+    };
+    const keys = getPropertyCacheKeys(p);
+    keys.forEach(k => { analysisCache[k] = payload; });
+}
 
 // ===== スクレイパー切替 =====
 
@@ -31,6 +107,7 @@ function gradeColor(grade) {
 
 function initMap(center, zoom) {
     map = L.map('map').setView(center, zoom);
+    loadAnalysisCache();
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors',
@@ -47,6 +124,12 @@ function initMap(center, zoom) {
     document.getElementById('btn-load-data').addEventListener('click', loadAreaData);
     document.getElementById('btn-analyze').addEventListener('click', analyzeProperty);
     document.getElementById('btn-batch-analyze').addEventListener('click', batchAnalyze);
+    const autoAnalyzeBtn = document.getElementById('btn-auto-analyze-map');
+    if (autoAnalyzeBtn) autoAnalyzeBtn.addEventListener('click', autoAnalyzeAndReflect);
+    const rankingCloseBtn = document.getElementById('ranking-close-btn');
+    if (rankingCloseBtn) rankingCloseBtn.addEventListener('click', hideRankingPanel);
+    const rankingToggleBtn = document.getElementById('ranking-toggle-btn');
+    if (rankingToggleBtn) rankingToggleBtn.addEventListener('click', toggleRankingPanel);
     document.getElementById('btn-upload-csv').addEventListener('click', uploadCSV);
     document.getElementById('btn-scrape').addEventListener('click', scrapeProperties);
     document.getElementById('btn-scrape-url').addEventListener('click', scrapeUrl);
@@ -75,6 +158,8 @@ function initMap(center, zoom) {
     // 歪み分析
     const distBtn = document.getElementById('btn-run-distortion');
     if (distBtn) distBtn.addEventListener('click', runDistortionAnalysis);
+    const quickLandBtn = document.getElementById('btn-quick-land-eval');
+    if (quickLandBtn) quickLandBtn.addEventListener('click', quickEvaluateLand);
 
     // レイヤートグル（旧互換）
     const lpEl = document.getElementById('layer-land-price');
@@ -228,22 +313,31 @@ async function loadSampleProperties() {
     const stationFilter = (document.getElementById('prop-filter-station')?.value || '').trim();
     const typeFilter = document.getElementById('prop-filter-type')?.value || '';
     const sortBy = document.getElementById('prop-sort')?.value || 'yield_desc';
+    const includeRebuild = document.getElementById('auto-include-rebuild')?.checked !== false;
 
-    let url = `/api/sample-properties?sort_by=${sortBy}&include_land=true`;
+    // ランク系はクライアント側で自動分析後に並べる
+    const apiSortBy = (sortBy === 'rank_desc' || sortBy === 'rank_asc') ? 'updated_at' : sortBy;
+    let url = `/api/sample-properties?sort_by=${apiSortBy}&include_land=true`;
     if (stationFilter) url += `&station_filter=${encodeURIComponent(stationFilter)}`;
 
     try {
         const resp = await fetch(url);
         const data = await resp.json();
         sampleProperties = data.properties || [];
+        sampleProperties.forEach(applyCachedAnalysisToProperty);
 
         // クライアントサイド種別フィルタ
-        let filtered = sampleProperties;
-        if (typeFilter) {
-            filtered = sampleProperties.filter(p => (p._type || 'property') === typeFilter);
-        }
+        let filtered = getFilteredProperties(sampleProperties, typeFilter);
 
-        if (countEl) countEl.textContent = `(${filtered.length}/${data.total || sampleProperties.length}件)`;
+        if (sortBy === 'rank_desc' || sortBy === 'rank_asc') {
+            // ランクソート時は未分析分を自動分析してから並べる
+            await analyzePropertiesForRanking(filtered, includeRebuild, null);
+            filtered = getFilteredProperties(sampleProperties, typeFilter);
+        }
+        const sorted = sortPropertiesForView(filtered, sortBy);
+        applyRankOrderToProperties(sorted);
+
+        if (countEl) countEl.textContent = `(${sorted.length}/${data.total || sampleProperties.length}件)`;
 
         // hidden preset select（後方互換用）
         const sel = document.getElementById('preset-select');
@@ -258,12 +352,134 @@ async function loadSampleProperties() {
         }
 
         // リスト表示
-        renderPropertyList(filtered);
+        renderPropertyList(sorted);
         // 地図プロット
-        plotSampleProperties(filtered);
+        plotSampleProperties(sorted);
+        showRanking(buildRankingFromProperties(sorted));
     } catch (e) {
         console.error('物件取得エラー:', e);
         if (listEl) listEl.innerHTML = '<div style="padding:8px;color:#ef5350;">読込エラー</div>';
+    }
+}
+
+function getFilteredProperties(source, typeFilter = null) {
+    const tf = typeFilter != null ? typeFilter : (document.getElementById('prop-filter-type')?.value || '');
+    let filtered = source || [];
+    if (tf) {
+        filtered = filtered.filter(p => (p._type || 'property') === tf);
+    }
+    return filtered;
+}
+
+function gradeScore(grade) {
+    const order = { S: 6, A: 5, B: 4, C: 3, D: 2, F: 1 };
+    return order[String(grade || '').toUpperCase()] || 0;
+}
+
+function sortPropertiesForView(props, sortBy) {
+    const rows = [...(props || [])];
+    const key = sortBy || 'yield_desc';
+    rows.sort((a, b) => {
+        const ay = Number(a.net_yield ?? a.gross_yield ?? 0);
+        const by = Number(b.net_yield ?? b.gross_yield ?? 0);
+        const ap = Number(a.asking_price ?? 0);
+        const bp = Number(b.asking_price ?? 0);
+        const as = Number(a._analysis_score ?? 0);
+        const bs = Number(b._analysis_score ?? 0);
+        const ag = gradeScore(a.grade);
+        const bg = gradeScore(b.grade);
+        const ad = Number(a.station_distance_min ?? 999);
+        const bd = Number(b.station_distance_min ?? 999);
+        const au = String(a.updated_at || a.fetched_at || '');
+        const bu = String(b.updated_at || b.fetched_at || '');
+
+        if (key === 'rank_desc') return (bg - ag) || (bs - as) || (by - ay) || (ap - bp);
+        if (key === 'rank_asc') return (ag - bg) || (as - bs) || (ay - by) || (bp - ap);
+        if (key === 'yield_desc') return (by - ay) || (bg - ag);
+        if (key === 'price_asc') return (ap - bp) || (bg - ag);
+        if (key === 'price_desc') return (bp - ap) || (bg - ag);
+        if (key === 'grade') return (bg - ag) || (bs - as);
+        if (key === 'station_near') return (ad - bd) || (bg - ag);
+        return bu.localeCompare(au);
+    });
+    return rows;
+}
+
+function applyRankOrderToProperties(sortedProps) {
+    sampleProperties.forEach(p => { delete p._rank_order; });
+    (sortedProps || []).forEach((p, idx) => {
+        p._rank_order = idx + 1;
+    });
+}
+
+function buildRankingFromProperties(props) {
+    return (props || [])
+        .filter(p => p.grade || p._analysis_score != null)
+        .map(p => ({
+            name: p.name || p.address || '物件',
+            grade: p.grade || '?',
+            score: Number(p._analysis_score || 0),
+            recommendation: p._analysis_recommendation || '',
+            net_yield: p.net_yield ?? null,
+            hold_sell_roi: p._scenario_as_is?.simulation?.hold_sell_roi ?? p._scenario_rebuild?.simulation?.hold_sell_roi ?? null,
+            exit_cap_rate: p._scenario_as_is?.valuation?.exit_cap_rate ?? p._scenario_rebuild?.valuation?.exit_cap_rate ?? null,
+            scenario: p._analysis_scenario || null,
+        }));
+}
+
+async function analyzePropertiesForRanking(targets, includeRebuild = true, btn = null) {
+    const pending = (targets || []).filter(p => p && (!p.grade || p._analysis_score == null));
+    if (!pending.length) return;
+    const payloadProps = pending.map(p => ({
+        ...p,
+        _client_index: sampleProperties.indexOf(p),
+    })).filter(p => p._client_index >= 0);
+    if (!payloadProps.length) return;
+
+    const oldText = btn ? btn.textContent : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = `自動分析中... (${payloadProps.length}件)`;
+    }
+    try {
+        const resp = await fetch('/api/properties/auto-analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                properties: payloadProps,
+                include_rebuild: includeRebuild,
+                limit: 500,
+            }),
+        });
+        const data = await resp.json();
+        const rows = data.results || [];
+        rows.forEach(r => {
+            if (r.error) return;
+            const idx = Number(r.client_index);
+            if (Number.isNaN(idx) || !sampleProperties[idx]) return;
+            const p = sampleProperties[idx];
+            const selected = r.selected || {};
+            p.grade = selected.grade || p.grade;
+            p.gross_yield = selected.gross_yield || p.gross_yield;
+            if (selected.net_yield != null) p.net_yield = selected.net_yield;
+            p._analysis_score = selected.score;
+            p._analysis_recommendation = selected.recommendation;
+            p._analysis_scenario = selected.scenario;
+            p._analysis_confidence = selected.confidence;
+            p._scenario_as_is = r.as_is || null;
+            p._scenario_rebuild = r.rebuild || null;
+            p._analysis_updated_at = new Date().toISOString();
+            persistPropertyAnalysisResult(p, r);
+        });
+        saveAnalysisCache();
+    } catch (err) {
+        console.error('自動分析エラー:', err);
+        throw err;
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = oldText || '自動分析→ランク反映';
+        }
     }
 }
 
@@ -283,9 +499,11 @@ function renderPropertyList(props) {
         const price = p.asking_price ? (p.asking_price >= 1e8
             ? (p.asking_price / 1e8).toFixed(1) + '億'
             : Math.round(p.asking_price / 1e4).toLocaleString() + '万') : '?';
-        const yld = p.gross_yield ? (p.gross_yield * 100).toFixed(1) + '%' : '?';
+        const yldVal = p.net_yield || p.gross_yield || 0;
+        const yld = yldVal ? (yldVal * 100).toFixed(1) + '%' : '?';
         const grade = p.grade || '';
         const isLand = (p._type === 'land');
+        const scenario = p._analysis_scenario === 'rebuild' ? '建替' : (p._analysis_scenario === 'as_is' ? '現況' : '');
         const gradeColors = {S:'#4caf50',A:'#66bb6a',B:'#ffd54f',C:'#ffa726',D:'#ef5350',F:'#b71c1c'};
         const gc = gradeColors[grade] || '#546e7a';
         const typeBadge = isLand
@@ -293,13 +511,16 @@ function renderPropertyList(props) {
             : '<span style="background:#2e7d32;color:#fff;padding:0 4px;border-radius:2px;font-size:0.6rem;margin-right:4px;">収益</span>';
         const station = p.nearest_station ? `${p.nearest_station}${p.station_distance_min ? ' ' + p.station_distance_min + '分' : ''}` : '';
         const selected = realIdx === _selectedPropIdx ? 'background:#1a3a5f;' : '';
+        const rankTag = p._rank_order ? `<span style="background:#263238;color:#fff;padding:0 5px;border-radius:10px;font-size:0.58rem;">#${p._rank_order}</span>` : '';
 
         html += `<div onclick="selectProperty(${realIdx})" style="padding:5px 8px;border-bottom:1px solid #1a2744;cursor:pointer;font-size:0.72rem;${selected}display:flex;align-items:center;gap:6px;"
                       onmouseover="this.style.background='#1a3a5f'" onmouseout="this.style.background='${realIdx === _selectedPropIdx ? '#1a3a5f' : ''}'">
             <div style="flex:1;min-width:0;">
                 <div style="display:flex;align-items:center;gap:2px;">
+                    ${rankTag}
                     ${typeBadge}
                     ${grade ? `<span style="color:${gc};font-weight:bold;font-size:0.7rem;">${grade}</span>` : ''}
+                    ${scenario ? `<span style="background:#455a64;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">${scenario}</span>` : ''}
                     <span style="color:#e0e0e0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.name || p.address || '物件'}</span>
                 </div>
                 <div style="color:#78909c;font-size:0.65rem;margin-top:1px;">
@@ -345,13 +566,15 @@ function plotSampleProperties(propsToPlot) {
 
         const realIdx = sampleProperties.indexOf(p);
         const price = p.asking_price ? `${(p.asking_price/10000).toLocaleString()}万円` : '?';
-        const yld = p.gross_yield ? `${(p.gross_yield*100).toFixed(1)}%` : (p.current_rent_annual && p.asking_price ? `${(p.current_rent_annual/p.asking_price*100).toFixed(1)}%` : '?');
+        const yldBase = p.net_yield || p.gross_yield || (p.current_rent_annual && p.asking_price ? (p.current_rent_annual / p.asking_price) : 0);
+        const yld = yldBase ? `${(yldBase*100).toFixed(1)}%` : '?';
         const grade = p.grade || '?';
         const source = p.source || '';
         const sourceLink = p.source_url ? `<a href="${p.source_url}" target="_blank" rel="noopener" style="color:#4fc3f7;">物件ページ</a>` : '';
         const structure = p.structure || '';
         const age = p.building_age != null && p.building_age > 0 ? `築${p.building_age}年` : p._type === 'land' ? '新築' : '';
         const isLand = (p._type === 'land');
+        const rankNo = p._rank_order || null;
 
         const gradeColor = grade === 'S' ? '#4caf50' : grade === 'A' ? '#66bb6a' : grade === 'B' ? '#ffd54f' : grade === 'C' ? '#ffa726' : grade === 'D' ? '#ef5350' : grade === 'F' ? '#b71c1c' : (isLand ? '#42a5f5' : '#78909c');
         const markerShape = isLand ? { radius: 7, weight: 2, dashArray: '3' } : { radius: 8, weight: 2 };
@@ -362,11 +585,17 @@ function plotSampleProperties(propsToPlot) {
 
         const estimated = p._coords_estimated ? '<span style="color:#ffa726;font-size:0.6rem;">(推定位置)</span>' : '';
         const typeBadge = isLand ? '<span style="background:#1565c0;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;margin-left:4px;">土地</span>' : '';
+        const scenarioBadge = p._analysis_scenario === 'rebuild'
+            ? '<span style="background:#455a64;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.62rem;margin-left:4px;">建替案採用</span>'
+            : (p._analysis_scenario === 'as_is'
+                ? '<span style="background:#37474f;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.62rem;margin-left:4px;">現況採用</span>'
+                : '');
         marker.bindPopup(`
             <div style="min-width:220px;font-size:0.8rem;">
                 <strong>${p.name || p.address || '物件'}</strong>
+                ${rankNo ? `<span style="background:#263238;color:#fff;padding:1px 6px;border-radius:10px;font-size:0.65rem;margin-left:4px;">#${rankNo}</span>` : ''}
                 ${source ? `<span style="background:#1e3a5f;color:#4fc3f7;padding:1px 5px;border-radius:3px;font-size:0.65rem;margin-left:4px;">${source}</span>` : ''}
-                ${typeBadge} ${estimated}
+                ${typeBadge} ${scenarioBadge} ${estimated}
                 <br>
                 <span style="color:#888;">${p.address || ''}</span><br>
                 <table style="margin:4px 0;font-size:0.75rem;">
@@ -381,6 +610,14 @@ function plotSampleProperties(propsToPlot) {
                 <button onclick="selectProperty(${realIdx})" style="margin-top:4px;padding:3px 10px;background:#4fc3f7;color:#000;border:none;border-radius:3px;cursor:pointer;font-size:0.72rem;">選択して分析</button>
             </div>
         `);
+        if (rankNo && rankNo <= 50) {
+            marker.bindTooltip(`#${rankNo}`, {
+                permanent: true,
+                direction: 'top',
+                className: 'rank-tooltip',
+                offset: [0, -6],
+            });
+        }
 
         propertyLayer.addLayer(marker);
     });
@@ -393,7 +630,7 @@ function plotSampleProperties(propsToPlot) {
     _propertyHeatData = props
         .filter(p => p.latitude && p.longitude)
         .map(p => {
-            const yld = p.gross_yield || (p.current_rent_annual && p.asking_price ? p.current_rent_annual / p.asking_price : 0);
+            const yld = p.net_yield || p.gross_yield || (p.current_rent_annual && p.asking_price ? p.current_rent_annual / p.asking_price : 0);
             return [p.latitude, p.longitude, Math.min(yld * 10, 1.0)];
         })
         .filter(d => d[2] > 0);
@@ -662,6 +899,7 @@ async function analyzeProperty() {
             data.simulation,
             data.critic_review,
             data.market_context,
+            data.market_benchmark,
             data.auto_filled,
             data.analysis_input_before || analysisInputBefore,
             data.analysis_input_after || null
@@ -698,6 +936,33 @@ async function batchAnalyze() {
     }
 }
 
+async function autoAnalyzeAndReflect() {
+    const btn = document.getElementById('btn-auto-analyze-map');
+    if (!btn) return;
+    const includeRebuild = document.getElementById('auto-include-rebuild')?.checked !== false;
+    const typeFilter = document.getElementById('prop-filter-type')?.value || '';
+    const sortBy = document.getElementById('prop-sort')?.value || 'rank_desc';
+    const targets = getFilteredProperties(sampleProperties, typeFilter);
+
+    if (!targets.length) {
+        alert('分析対象の物件がありません');
+        return;
+    }
+
+    try {
+        await analyzePropertiesForRanking(targets, includeRebuild, btn);
+        const refreshed = getFilteredProperties(sampleProperties, typeFilter);
+        const sorted = sortPropertiesForView(refreshed, sortBy);
+        applyRankOrderToProperties(sorted);
+        renderPropertyList(sorted);
+        plotSampleProperties(sorted);
+        showRanking(buildRankingFromProperties(sorted));
+    } catch (err) {
+        console.error('自動分析エラー:', err);
+        alert('自動分析に失敗しました');
+    }
+}
+
 // ===== 結果表示 =====
 
 function showJudgmentResult(
@@ -706,6 +971,7 @@ function showJudgmentResult(
     simulation,
     critic,
     marketContext,
+    marketBenchmark,
     autoFilled,
     analysisInputBefore,
     analysisInputAfter
@@ -739,12 +1005,13 @@ function showJudgmentResult(
         const s = simulation;
         const fmt = (v) => v != null ? `${(v/10000).toLocaleString()}万` : '-';
         const roiFmt = (v) => v != null ? `${(v*100).toFixed(0)}%` : '-';
+        const capBase = s.hold_sell_exit_cap_base != null ? `${(s.hold_sell_exit_cap_base * 100).toFixed(1)}%` : '動的';
         holdSellHtml = `
             <div class="hold-sell-section">
                 <div class="hs-title">8年保有 → 売却シミュレーション</div>
                 <div class="hold-sell-grid">
                     <div class="hs-item"><span class="hs-label">8年累積CF</span><span class="hs-val">${fmt(s.hold_sell_cumulative_cf)}</span></div>
-                    <div class="hs-item"><span class="hs-label">売却価格(6.5%)</span><span class="hs-val">${fmt(s.hold_sell_exit_price_65)}</span></div>
+                    <div class="hs-item"><span class="hs-label">売却価格(${capBase})</span><span class="hs-val">${fmt(s.hold_sell_exit_price_65)}</span></div>
                     <div class="hs-item"><span class="hs-label">トータルリターン</span><span class="hs-val">${fmt(s.hold_sell_total_return_65)}</span></div>
                     <div class="hs-item"><span class="hs-label">ROI</span><span class="hs-val">${roiFmt(s.hold_sell_roi_65)}</span></div>
                 </div>
@@ -763,6 +1030,9 @@ function showJudgmentResult(
             : '-';
         const tx = marketContext.tx_price_sqm
             ? `¥${Math.round(marketContext.tx_price_sqm).toLocaleString()}/㎡`
+            : '-';
+        const yld = marketContext.implied_yield
+            ? `${(Number(marketContext.implied_yield) * 100).toFixed(1)}%`
             : '-';
         const st = marketContext.nearest_station || marketContext.station_name || '-';
         const src = marketContext.source || '-';
@@ -795,8 +1065,15 @@ function showJudgmentResult(
                     <div class="hs-item"><span class="hs-label">地価</span><span class="hs-val">${lp}</span></div>
                     <div class="hs-item"><span class="hs-label">賃料</span><span class="hs-val">${rent}</span></div>
                     <div class="hs-item"><span class="hs-label">取引単価</span><span class="hs-val">${tx}</span></div>
+                    <div class="hs-item"><span class="hs-label">想定利回り</span><span class="hs-val">${yld}</span></div>
                     <div class="hs-item"><span class="hs-label">自動補完</span><span class="hs-val">${autoKeys.length}項目</span></div>
                 </div>
+                ${marketBenchmark && marketBenchmark.market_net_yield != null && marketBenchmark.property_net_yield != null ? `
+                <div style="margin-top:6px;font-size:0.7rem;color:#b0bec5;">
+                    市場正味利回り ${((marketBenchmark.market_net_yield||0)*100).toFixed(1)}%
+                    / 物件正味利回り ${((marketBenchmark.property_net_yield||0)*100).toFixed(1)}%
+                    / 乖離 ${((marketBenchmark.net_yield_gap||0)*100).toFixed(1)}%
+                </div>` : ''}
                 <div style="margin-top:8px;font-size:0.68rem;">
                     <div style="color:#90a4ae;margin-bottom:3px;">補完前 / 補完後</div>
                     ${compareRows.map(r => `
@@ -834,6 +1111,7 @@ function showJudgmentResult(
     }
     if (simulation) {
         const s = simulation;
+        const capStress = s.hold_sell_exit_cap_stress != null ? `${(s.hold_sell_exit_cap_stress * 100).toFixed(1)}%` : '保守';
         const simItems = [
             ['売出価格', s.purchase_price ? `${(s.purchase_price/10000).toLocaleString()}万` : '-'],
             ['総投資額(諸費用込)', s.initial_investment ? `${(s.initial_investment/10000).toLocaleString()}万` : '-'],
@@ -846,7 +1124,7 @@ function showJudgmentResult(
             ['投資回収', s.payback_years ? `${s.payback_years}年` : '回収不能'],
             ['損益分岐稼働率', s.break_even_occupancy ? `${(s.break_even_occupancy*100).toFixed(0)}%` : '-'],
             ['10年後売却益', s.exit_profit != null ? `${(s.exit_profit/10000).toLocaleString()}万` : '-'],
-            ['8年後売却(7.0%)', s.hold_sell_exit_price_70 ? `${(s.hold_sell_exit_price_70/10000).toLocaleString()}万` : '-'],
+            [`8年後売却(${capStress})`, s.hold_sell_exit_price_70 ? `${(s.hold_sell_exit_price_70/10000).toLocaleString()}万` : '-'],
         ];
         simItems.forEach(([l, val]) => {
             financeBody += `<div style="display:flex;justify-content:space-between;padding:2px 4px;border-bottom:1px solid #1a2744;"><span style="color:#78909c;">${l}</span><span>${val}</span></div>`;
@@ -951,22 +1229,43 @@ function showAssetScoreInResult(data) {
 
 function showRanking(ranking) {
     const panel = document.getElementById('ranking-panel');
+    const wrap = document.getElementById('ranking-list-wrap');
+    const toggleBtn = document.getElementById('ranking-toggle-btn');
+    if (toggleBtn) toggleBtn.textContent = rankingPanelCollapsed ? '展開' : '折りたたむ';
+    if (wrap) wrap.style.display = rankingPanelCollapsed ? 'none' : 'block';
     panel.style.display = 'block';
 
     let html = '';
     ranking.forEach((r, i) => {
+        const scenarioLabel = r.scenario === 'rebuild' ? '建替案' : (r.scenario === 'as_is' ? '現況案' : '');
+        const netY = r.net_yield != null ? ` / 正味${(r.net_yield * 100).toFixed(1)}%` : '';
+        const holdRoi = r.hold_sell_roi != null ? ` / 8年ROI${(r.hold_sell_roi * 100).toFixed(0)}%` : '';
+        const exitCap = r.exit_cap_rate != null ? ` / 出口Cap${(r.exit_cap_rate * 100).toFixed(1)}%` : '';
         html += `
             <div class="ranking-item">
                 <span class="ranking-rank">#${i + 1}</span>
                 <span class="ranking-grade grade-badge grade-${r.grade}" style="width:28px;height:28px;font-size:0.85rem;border-radius:6px;">${r.grade}</span>
                 <div class="ranking-info">
                     <div class="ranking-name">${r.name}</div>
-                    <div class="ranking-detail">${r.recommendation} | Score: ${r.score.toFixed(1)}</div>
+                    <div class="ranking-detail">${r.recommendation} | Score: ${r.score.toFixed(1)}${netY}${holdRoi}${exitCap}${scenarioLabel ? ` | ${scenarioLabel}` : ''}</div>
                 </div>
             </div>`;
     });
     document.getElementById('ranking-list').innerHTML = html;
-    panel.scrollIntoView({ behavior: 'smooth' });
+}
+
+function hideRankingPanel() {
+    const panel = document.getElementById('ranking-panel');
+    if (!panel) return;
+    panel.style.display = 'none';
+}
+
+function toggleRankingPanel() {
+    rankingPanelCollapsed = !rankingPanelCollapsed;
+    const wrap = document.getElementById('ranking-list-wrap');
+    const toggleBtn = document.getElementById('ranking-toggle-btn');
+    if (wrap) wrap.style.display = rankingPanelCollapsed ? 'none' : 'block';
+    if (toggleBtn) toggleBtn.textContent = rankingPanelCollapsed ? '展開' : '折りたたむ';
 }
 
 // ===== CSV取込 =====
@@ -1102,10 +1401,10 @@ async function scrapeProperties() {
 
     // マルチソース選択
     const sources = [];
-    if (document.getElementById('scrape-suumo')?.checked) sources.push('suumo');
     if (document.getElementById('scrape-rakumachi')?.checked) sources.push('rakumachi');
-    if (document.getElementById('scrape-athome')?.checked) sources.push('athome');
-    if (sources.length === 0) sources.push('suumo');
+    if (document.getElementById('scrape-kenbiya')?.checked) sources.push('kenbiya');
+    if (document.getElementById('scrape-rals')?.checked) sources.push('rals');
+    if (sources.length === 0) sources.push('rakumachi');
     const splitPrice = document.getElementById('scrape-split-price')?.checked ? '&split_by_price=true' : '';
 
     try {
@@ -1131,6 +1430,81 @@ async function scrapeProperties() {
     } finally {
         btn.disabled = false;
         btn.textContent = '収益物件スクレイピング';
+    }
+}
+
+async function quickEvaluateLand() {
+    const btn = document.getElementById('btn-quick-land-eval');
+    const resultEl = document.getElementById('quick-land-result');
+    const address = (document.getElementById('quick-land-address')?.value || '').trim();
+    const landArea = parseFloat(document.getElementById('quick-land-area')?.value || '0');
+    const landPriceRaw = document.getElementById('quick-land-price')?.value || '';
+    const bcrRaw = document.getElementById('quick-land-bcr')?.value || '';
+    const farRaw = document.getElementById('quick-land-far')?.value || '';
+
+    if (!address || !landArea) {
+        resultEl.innerHTML = '<span style="color:#ef5350">住所と土地面積を入力してください</span>';
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '算出中...';
+    resultEl.innerHTML = '<div class="loading">市場データ・建築プランから診断中...</div>';
+
+    try {
+        const payload = {
+            address: address,
+            land_area_sqm: landArea,
+        };
+        if (landPriceRaw) payload.land_price = Number(landPriceRaw);
+        if (bcrRaw) payload.building_coverage_ratio = Number(bcrRaw);
+        if (farRaw) payload.floor_area_ratio = Number(farRaw);
+
+        const resp = await fetch('/api/land/quick-evaluate', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            throw new Error(data.error || '算出に失敗しました');
+        }
+
+        const p = data.profitability || {};
+        const fair = data.fair_price_line || {};
+        const m = data.market_context || {};
+        const yld = p.gross_yield ? (p.gross_yield * 100).toFixed(2) + '%' : 'N/A';
+        const fmt = v => (v == null ? 'N/A' : Number(v).toLocaleString());
+        const implied = m.implied_yield ? (m.implied_yield * 100).toFixed(2) + '%' : 'N/A';
+
+        resultEl.innerHTML = `
+            <div style="border:1px solid #1e3a5f;border-radius:6px;padding:8px;background:#0e1829;">
+                <div style="color:#90caf9;font-weight:600;margin-bottom:4px;">収益性</div>
+                <div>推奨プラン: ${p.plan_label || 'プラン生成なし'}</div>
+                <div>想定表面利回り: <span style="color:#66bb6a">${yld}</span></div>
+                <div>想定年収: ${fmt(p.annual_income)} 円</div>
+                <div style="margin-top:6px;color:#90caf9;font-weight:600;">価格妥当ライン</div>
+                <div>下限: ${fmt(fair.low)} 円 / 中央: ${fmt(fair.mid)} 円 / 上限: ${fmt(fair.high)} 円</div>
+                <div>判定: <span style="color:#ffd54f">${fair.judgment || 'N/A'}</span></div>
+                <div style="margin-top:6px;color:#78909c;font-size:0.72rem;">
+                    市場基準: 地価 ${fmt(m.land_price_sqm)} 円/㎡, 取引 ${fmt(m.tx_price_sqm)} 円/㎡, 想定利回り ${implied}
+                </div>
+            </div>
+        `;
+
+        const coords = data.coordinates || {};
+        if (coords.lat && coords.lng && map) {
+            map.setView([coords.lat, coords.lng], Math.max(map.getZoom(), 15));
+            L.popup()
+                .setLatLng([coords.lat, coords.lng])
+                .setContent(`<b>クイック診断地点</b><br>${address}`)
+                .openOn(map);
+        }
+    } catch (e) {
+        resultEl.innerHTML = `<span style="color:#ef5350">エラー: ${e.message}</span>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '収益性・価格ライン算出';
     }
 }
 
@@ -2845,19 +3219,64 @@ function _mapBoundsParams() {
 }
 
 // 価格→連続グラデーション色 (10段階)
+const UNIFIED_COLOR_PALETTE_10 = [
+    [66, 133, 244],   // blue
+    [41, 182, 246],   // light blue
+    [38, 166, 154],   // teal
+    [76, 175, 80],    // green
+    [156, 204, 101],  // light green
+    [255, 235, 59],   // yellow
+    [255, 193, 7],    // amber
+    [255, 152, 0],    // orange
+    [244, 67, 54],    // red
+    [136, 14, 79],    // deep purple
+];
+
+function _buildStopsFromThresholds(thresholds) {
+    return thresholds.map((t, i) => [t, UNIFIED_COLOR_PALETTE_10[Math.min(i, UNIFIED_COLOR_PALETTE_10.length - 1)]]);
+}
+
+const MESH_COLOR_SCALES = {
+    land_price: {
+        label: '地価',
+        unit: '円/m²',
+        stops: _buildStopsFromThresholds([30000, 80000, 150000, 220000, 300000, 400000, 550000, 800000, 1500000, 5000000]),
+    },
+    tx_price: {
+        label: '取引単価',
+        unit: '円/m²',
+        // 地価と同レンジで統一
+        stops: _buildStopsFromThresholds([30000, 80000, 150000, 220000, 300000, 400000, 550000, 800000, 1500000, 5000000]),
+    },
+    rent: {
+        label: '賃料',
+        unit: '円/m²',
+        stops: _buildStopsFromThresholds([1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 6000, 8000]),
+    },
+    yield: {
+        label: '想定利回り',
+        unit: '%',
+        stops: _buildStopsFromThresholds([2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.5, 10.0]),
+    },
+    population: {
+        label: '人口増減率',
+        unit: '%',
+        stops: _buildStopsFromThresholds([-20, -12, -8, -4, -2, 0, 2, 5, 10, 20]),
+    },
+    pop_density: {
+        label: '人口密度',
+        unit: '人/km²',
+        stops: _buildStopsFromThresholds([0, 1000, 3000, 5000, 8000, 12000, 16000, 22000, 35000, 60000]),
+    },
+    facility: {
+        label: '施設密度',
+        unit: '件/mesh',
+        stops: _buildStopsFromThresholds([0, 1, 2, 3, 4, 5, 6, 8, 10, 15]),
+    },
+};
+
 function _priceColor(price) {
-    return _interpolateColor(price, [
-        [30000,   [66, 133, 244]],    // 3万: 青
-        [80000,   [41, 182, 246]],    // 8万: 水色
-        [150000,  [76, 175, 80]],     // 15万: 緑
-        [220000,  [156, 204, 101]],   // 22万: 黄緑
-        [300000,  [255, 235, 59]],    // 30万: 黄
-        [400000,  [255, 193, 7]],     // 40万: 琥珀
-        [550000,  [255, 152, 0]],     // 55万: 橙
-        [800000,  [244, 67, 54]],     // 80万: 赤
-        [1500000, [183, 28, 28]],     // 150万: 暗赤
-        [5000000, [136, 14, 79]],     // 500万: 暗紫
-    ]);
+    return _interpolateColor(price, MESH_COLOR_SCALES.land_price.stops);
 }
 
 // 汎用連続グラデーション補間
@@ -2877,17 +3296,7 @@ function _interpolateColor(value, stops) {
 // 人口変動率→色 (連続グラデーション)
 function _popChangeColor(rate) {
     if (rate == null) return '#546e7a';
-    return _interpolateColor(rate, [
-        [-20, [183, 28, 28]],    // -20%: 暗赤
-        [-10, [229, 57, 53]],    // -10%: 赤
-        [-5,  [255, 112, 67]],   // -5%: 赤橙
-        [-2,  [255, 183, 77]],   // -2%: 橙
-        [0,   [255, 241, 118]],  //  0%: 黄
-        [2,   [102, 187, 106]],  // +2%: 黄緑
-        [5,   [67, 160, 71]],    // +5%: 緑
-        [10,  [46, 125, 50]],    // +10%: 濃緑
-        [20,  [0, 96, 15]],      // +20%: 暗緑
-    ]);
+    return _interpolateColor(rate, MESH_COLOR_SCALES.population.stops);
 }
 
 
@@ -2902,68 +3311,9 @@ let meshLoadingLock = {};  // metric -> boolean (debounce)
 const MESH_CACHE_MAX = 8000;  // メッシュキャッシュ上限
 
 function _meshColor(metric, value) {
-    if (metric === 'land_price' || metric === 'tx_price') return _priceColor(value);
-    if (metric === 'rent') {
-        // 賃料: 10段階 (円/m²月)
-        return _interpolateColor(value, [
-            [1500, [66, 133, 244]],    // 1500: 青
-            [2000, [41, 182, 246]],    // 2000: 水色
-            [2500, [38, 166, 154]],    // 2500: 青緑
-            [3000, [76, 175, 80]],     // 3000: 緑
-            [3500, [156, 204, 101]],   // 3500: 黄緑
-            [4000, [255, 235, 59]],    // 4000: 黄
-            [4500, [255, 152, 0]],     // 4500: 橙
-            [5000, [244, 67, 54]],     // 5000: 赤
-            [6000, [183, 28, 28]],     // 6000: 暗赤
-            [8000, [136, 14, 79]],     // 8000+: 暗紫
-        ]);
-    }
-    if (metric === 'yield') {
-        // 利回り: 10段階 (%) 低=赤(割高)→高=緑(割安)
-        return _interpolateColor(value, [
-            [2.0, [136, 14, 79]],     // 2%: 暗紫
-            [2.5, [183, 28, 28]],     // 2.5%: 暗赤
-            [3.0, [229, 57, 53]],     // 3%: 赤
-            [3.5, [255, 152, 0]],     // 3.5%: 橙
-            [4.0, [255, 193, 7]],     // 4%: 琥珀
-            [5.0, [255, 235, 59]],    // 5%: 黄
-            [6.0, [156, 204, 101]],   // 6%: 黄緑
-            [7.0, [76, 175, 80]],     // 7%: 緑
-            [8.5, [46, 125, 50]],     // 8.5%: 濃緑
-            [10,  [27, 94, 32]],      // 10%+: 暗緑
-        ]);
-    }
     if (metric === 'population') return _popChangeColor(value);
-    if (metric === 'pop_density') {
-        // 人口密度: 10段階 (人/km²)
-        return _interpolateColor(value, [
-            [0,     [224, 224, 224]],   // 0: 薄灰
-            [1000,  [187, 222, 251]],   // 1千: 薄青
-            [3000,  [100, 181, 246]],   // 3千: 青
-            [5000,  [30, 136, 229]],    // 5千: 濃青
-            [8000,  [76, 175, 80]],     // 8千: 緑
-            [12000, [255, 235, 59]],    // 1.2万: 黄
-            [16000, [255, 152, 0]],     // 1.6万: 橙
-            [22000, [244, 67, 54]],     // 2.2万: 赤
-            [35000, [183, 28, 28]],     // 3.5万: 暗赤
-            [60000, [136, 14, 79]],     // 6万+: 暗紫
-        ]);
-    }
-    if (metric === 'facility') {
-        // 施設密度: 10段階
-        return _interpolateColor(value, [
-            [0,   [120, 144, 156]],   // 0: グレー
-            [1,   [176, 190, 197]],   // 1: 薄グレー
-            [2,   [255, 235, 59]],    // 2: 黄
-            [3,   [255, 193, 7]],     // 3: 琥珀
-            [4,   [156, 204, 101]],   // 4: 黄緑
-            [5,   [102, 187, 106]],   // 5: 緑
-            [6,   [76, 175, 80]],     // 6: 濃緑
-            [8,   [56, 142, 60]],     // 8: 深緑
-            [10,  [46, 125, 50]],     // 10: 暗緑
-            [15,  [27, 94, 32]],      // 15+: 最暗緑
-        ]);
-    }
+    const scale = MESH_COLOR_SCALES[metric];
+    if (scale) return _interpolateColor(value, scale.stops);
     return '#78909c';
 }
 
@@ -3144,32 +3494,36 @@ let railwayLinesLayer = null;
 
 async function loadZoningPoints() {
     if (zoningPointsLayer) map.removeLayer(zoningPointsLayer);
-    zoningPointsLayer = L.layerGroup();
     try {
         const resp = await fetch(`/api/layers/zoning-points?${_mapBoundsParams()}`);
         const data = await resp.json();
-        const zoom = map.getZoom();
-        const r = zoom >= 15 ? 8 : zoom >= 13 ? 5 : 3;
-        (data.features || []).forEach(f => {
-            const p = f.properties, c = f.geometry.coordinates;
-            const m = L.circleMarker([c[1], c[0]], {
-                radius: r, color: '#fff', fillColor: p.color,
-                fillOpacity: 0.75, weight: 0.8, opacity: 0.5,
-            });
-            let tip = `<div style="min-width:140px">`;
-            tip += `<b style="color:${p.color}">${p.zoning}</b>`;
-            if (p.coverage && p.far) tip += `<br>建蔽率 ${p.coverage} / 容積率 ${p.far}`;
-            if (p.fire_prevention) tip += `<br>防火: ${p.fire_prevention}`;
-            if (p.price) tip += `<br>地価: ¥${p.price.toLocaleString()}/m²`;
-            if (p.station) tip += `<br>最寄駅: ${p.station}`;
-            if (p.place) tip += `<br>${p.place}`;
-            tip += `</div>`;
-            m.bindTooltip(tip, {sticky: true});
-            zoningPointsLayer.addLayer(m);
+        zoningPointsLayer = L.geoJSON(data, {
+            style: (feature) => {
+                const p = feature.properties || {};
+                return {
+                    color: p.color || '#78909c',
+                    fillColor: p.color || '#90a4ae',
+                    weight: 1.1,
+                    opacity: 0.9,
+                    fillOpacity: 0.34,
+                };
+            },
+            onEachFeature: (feature, layer) => {
+                const p = feature.properties || {};
+                let tip = `<div style="min-width:170px">`;
+                tip += `<b style="color:${p.color || '#90a4ae'}">${p.zoning || '用途地域不明'}</b>`;
+                if (p.coverage || p.far) tip += `<br>建蔽率 ${p.coverage || '-'} / 容積率 ${p.far || '-'}`;
+                if (p.fire_prevention) tip += `<br>防火: ${p.fire_prevention}`;
+                if (p.price) tip += `<br>地価: ¥${Number(p.price).toLocaleString()}/m²`;
+                if (p.station) tip += `<br>最寄駅: ${p.station}`;
+                if (p.place) tip += `<br>${p.place}`;
+                tip += `</div>`;
+                layer.bindTooltip(tip, {sticky: true});
+            },
         });
         zoningPointsLayer.addTo(map);
-        console.log(`用途地域ポイント: ${data.features?.length || 0}件`);
-    } catch(e) { console.error('用途地域ポイントエラー:', e); }
+        console.log(`用途地域領域: ${data.features?.length || 0}件`);
+    } catch(e) { console.error('用途地域領域エラー:', e); }
 }
 
 async function loadRailwayLines() {
@@ -3181,29 +3535,8 @@ async function loadRailwayLines() {
         const zoom = map.getZoom();
         const r = zoom >= 14 ? 7 : zoom >= 12 ? 5 : 3;
 
-        // サーバー返却の segment / station を分離
-        const segmentFeatures = (data.features || []).filter(f => f.properties?.feature_kind === 'segment');
+        const segmentFeatures = (data.features || []).filter(f => ['segment', 'track'].includes(f.properties?.feature_kind));
         const stationFeatures = (data.features || []).filter(f => !f.properties?.feature_kind || f.properties?.feature_kind === 'station');
-
-        // 同一路線の駅を線で結ぶ
-        const lineStations = {};
-        stationFeatures.forEach(f => {
-            const p = f.properties, c = f.geometry.coordinates;
-            const line = p.line || '不明';
-            if (!lineStations[line]) lineStations[line] = {color: p.color, points: []};
-            lineStations[line].points.push({
-                lat: c[1],
-                lng: c[0],
-                name: p.name,
-                color: p.color,
-                order: p.order || 99999,
-                is_transfer: !!p.is_transfer,
-                transfer_count: p.transfer_count || 0,
-                transfer_lines: p.transfer_lines || [],
-            });
-        });
-
-        // まずAPI側で構築済みセグメントを描画
         segmentFeatures.forEach(f => {
             const p = f.properties || {};
             const coords = (f.geometry?.coordinates || []).map(c => [c[1], c[0]]);
@@ -3217,96 +3550,33 @@ async function loadRailwayLines() {
             railwayLinesLayer.addLayer(polyline);
         });
 
-        // 各路線の駅を最近傍チェーンで正しい順序に並べて線で結ぶ
-        Object.entries(lineStations).forEach(([lineName, info]) => {
-            const pts = info.points;
-            if (pts.length < 2) {
-                // 駅1つだけならマーカーのみ
-                pts.forEach(pt => {
-                    const m = L.circleMarker([pt.lat, pt.lng], {
-                        radius: pt.is_transfer ? r + 2 : r,
-                        color: pt.is_transfer ? '#ffd54f' : '#fff',
-                        fillColor: pt.color,
-                        fillOpacity: 0.9, weight: 1.2, opacity: 0.8,
-                    });
-                    const transferTag = pt.is_transfer ? `<br><span style="color:#ffd54f;">乗換 ${pt.transfer_count}路線</span>` : '';
-                    const transferLines = pt.is_transfer && pt.transfer_lines.length
-                        ? `<br><span style="color:#90a4ae">${pt.transfer_lines.join(' / ')}</span>`
-                        : '';
-                    m.bindTooltip(`<b>${pt.name}</b><br><span style="color:${pt.color}">${lineName}</span>${transferTag}${transferLines}`, {sticky: true});
-                    railwayLinesLayer.addLayer(m);
-                });
-                return;
-            }
-
-            // 駅順序の決定: order値（station_masterの定義順）がある場合はそれを使い、
-            // なければ最近傍チェーンでつなぐ
-            const hasOrder = pts.some(p => p.order < 99999);
-            let ordered;
-
-            if (hasOrder) {
-                // station_masterの定義順（路線の正しい駅順）
-                ordered = [...pts].sort((a, b) => a.order - b.order);
-            } else {
-                // Nearest Neighbor Chain: 端点から最近傍を順に接続
-                ordered = [];
-                const used = new Set();
-                let startIdx = 0;
-                let minSum = Infinity;
-                for (let i = 0; i < pts.length; i++) {
-                    const s = pts[i].lat + pts[i].lng;
-                    if (s < minSum) { minSum = s; startIdx = i; }
-                }
-                ordered.push(pts[startIdx]);
-                used.add(startIdx);
-
-                while (ordered.length < pts.length) {
-                    const last = ordered[ordered.length - 1];
-                    let bestIdx = -1, bestDist = Infinity;
-                    for (let i = 0; i < pts.length; i++) {
-                        if (used.has(i)) continue;
-                        const d = (last.lat - pts[i].lat) ** 2 + (last.lng - pts[i].lng) ** 2;
-                        if (d < bestDist) { bestDist = d; bestIdx = i; }
-                    }
-                    if (bestIdx < 0) break;
-                    ordered.push(pts[bestIdx]);
-                    used.add(bestIdx);
-                }
-            }
-
-            // サーバーからセグメントが無い路線のみ、クライアント側で補完描画
-            const hasServerSegments = segmentFeatures.some(f => (f.properties?.line || '') === lineName);
-            if (!hasServerSegments) {
-                const latlngs = ordered.map(p => [p.lat, p.lng]);
-                const polyline = L.polyline(latlngs, {
-                    color: info.color, weight: 2.5, opacity: 0.55,
-                    dashArray: '4 3',
-                });
-                polyline.bindTooltip(`<b>${lineName}</b> (${ordered.length}駅)`, {sticky: true});
-                railwayLinesLayer.addLayer(polyline);
-            }
-
-            // 各駅マーカー
-            ordered.forEach(pt => {
-                const m = L.circleMarker([pt.lat, pt.lng], {
-                    radius: pt.is_transfer ? r + 2 : r,
-                    color: pt.is_transfer ? '#ffd54f' : '#fff',
-                    fillColor: pt.color,
-                    fillOpacity: 0.92,
-                    weight: pt.is_transfer ? 2.2 : 1.2,
-                    opacity: 0.85,
-                });
-                const transferTag = pt.is_transfer ? `<br><span style="color:#ffd54f;">乗換 ${pt.transfer_count}路線</span>` : '';
-                const transferLines = pt.is_transfer && pt.transfer_lines.length
-                    ? `<br><span style="color:#90a4ae">${pt.transfer_lines.join(' / ')}</span>`
-                    : '';
-                m.bindTooltip(`<b>${pt.name}</b><br><span style="color:${pt.color}">${lineName}</span>${transferTag}${transferLines}`, {sticky: true});
-                railwayLinesLayer.addLayer(m);
+        stationFeatures.forEach(f => {
+            const p = f.properties || {};
+            const c = f.geometry?.coordinates || [];
+            if (c.length < 2) return;
+            const lat = c[1], lng = c[0];
+            const marker = L.circleMarker([lat, lng], {
+                radius: p.is_transfer ? r + 2 : r,
+                color: p.is_transfer ? '#ffd54f' : '#fff',
+                fillColor: p.color || '#90a4ae',
+                fillOpacity: 0.92,
+                weight: p.is_transfer ? 2.2 : 1.2,
+                opacity: 0.88,
             });
+            const lines = (p.transfer_lines && p.transfer_lines.length)
+                ? p.transfer_lines
+                : (p.lines && p.lines.length ? p.lines : [p.line || '不明']);
+            const lineHtml = lines.join(' / ');
+            const transferTag = p.is_transfer ? `<br><span style="color:#ffd54f;">乗換 ${p.transfer_count || lines.length}路線</span>` : '';
+            marker.bindTooltip(
+                `<b>${p.name || '駅'}</b><br><span style="color:${p.color || '#90a4ae'}">${lineHtml}</span>${transferTag}`,
+                {sticky: true}
+            );
+            railwayLinesLayer.addLayer(marker);
         });
 
         railwayLinesLayer.addTo(map);
-        const lineCount = Object.keys(lineStations).length;
+        const lineCount = Object.keys(data._meta?.lines || {}).length;
         console.log(`路線表示: ${lineCount}路線, ${stationFeatures.length}駅, ${segmentFeatures.length}接続`);
     } catch(e) { console.error('路線表示エラー:', e); }
 }
@@ -3909,6 +4179,43 @@ function addLegendControl() {
     legend.addTo(map);
 }
 
+function _formatLegendValue(metric, v) {
+    if (metric === 'yield' || metric === 'population') return `${Number(v).toFixed(1)}%`;
+    if (metric === 'land_price' || metric === 'tx_price' || metric === 'rent' || metric === 'pop_density') {
+        return Number(v).toLocaleString();
+    }
+    return `${v}`;
+}
+
+function _renderScaleLegend(metric) {
+    const scale = MESH_COLOR_SCALES[metric];
+    if (!scale) return '';
+    const stops = scale.stops || [];
+    if (!stops.length) return '';
+
+    const minV = stops[0][0];
+    const maxV = stops[stops.length - 1][0];
+    const range = Math.max(1e-9, maxV - minV);
+    const gradientStops = stops
+        .map(([v, rgb]) => {
+            const pct = ((v - minV) / range) * 100;
+            return `rgb(${rgb.join(',')}) ${pct.toFixed(2)}%`;
+        })
+        .join(', ');
+    const tickIdx = [0, 2, 4, 6, 8, stops.length - 1].filter((v, i, arr) => arr.indexOf(v) === i);
+    const tickHtml = tickIdx
+        .map(idx => `<span style="flex:1;text-align:${idx===0?'left':(idx===stops.length-1?'right':'center')};">${_formatLegendValue(metric, stops[idx][0])}</span>`)
+        .join('');
+
+    return `
+        <div style="margin-bottom:6px;">
+            <div><b>${scale.label}</b> <span style="color:#90a4ae;">(${scale.unit})</span></div>
+            <div style="height:8px;border-radius:5px;background:linear-gradient(to right, ${gradientStops});margin:2px 0 3px 0;border:1px solid rgba(255,255,255,0.2);"></div>
+            <div style="display:flex;gap:0;font-size:0.62rem;color:#b0bec5;line-height:1.2;">${tickHtml}</div>
+        </div>
+    `;
+}
+
 function updateLegend() {
     const div = document.getElementById('map-legend');
     if (!div) return;
@@ -3918,41 +4225,13 @@ function updateLegend() {
     function _dot(c) { return `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${c};margin:0 2px;"></span>`; }
     function _sq(c)  { return `<span style="display:inline-block;width:9px;height:9px;background:${c};margin:0 2px;"></span>`; }
 
-    // メッシュレイヤー凡例
-    if (meshLayers['land_price'] && map.hasLayer(meshLayers['land_price'])) {
-        show = true;
-        html += '<b>地価 (円/m²)</b><br>';
-        html += `${_sq('#4285f4')}~5万 ${_sq('#4caf50')}~15万 ${_sq('#ffeb3b')}~30万 ${_sq('#ff9800')}~50万 ${_sq('#f44336')}~100万 ${_sq('#880e4f')}100万~<br>`;
-    }
-    if (meshLayers['rent'] && map.hasLayer(meshLayers['rent'])) {
-        show = true;
-        html += '<b>賃料 (円/m²)</b><br>';
-        html += `${_sq('#5c6bc0')}~2.5千 ${_sq('#1565c0')}~3千 ${_sq('#43a047')}~4千 ${_sq('#f9a825')}~5千 ${_sq('#e65100')}~6千 ${_sq('#c62828')}6千~<br>`;
-    }
-    if (meshLayers['tx_price'] && map.hasLayer(meshLayers['tx_price'])) {
-        show = true;
-        html += '<b>取引単価 (円/m²)</b><br>';
-        html += `${_sq('#66bb6a')}~15万 ${_sq('#fbc02d')}~30万 ${_sq('#ff6f00')}~50万 ${_sq('#d32f2f')}~100万 ${_sq('#880e4f')}100万~<br>`;
-    }
-    if (meshLayers['yield'] && map.hasLayer(meshLayers['yield'])) {
-        show = true;
-        html += '<b>想定利回り</b><br>';
-        html += `${_sq('#1b5e20')}8%~ ${_sq('#43a047')}6~8% ${_sq('#66bb6a')}5~6% ${_sq('#fbc02d')}4~5% ${_sq('#ff9800')}3~4% ${_sq('#e53935')}~3%<br>`;
-    }
-    if (meshLayers['population'] && map.hasLayer(meshLayers['population'])) {
-        show = true;
-        html += '<b>人口増減率</b><br>';
-        html += `${_sq('#1b5e20')}+10%~ ${_sq('#43a047')}+2~10% ${_sq('#66bb6a')}0~+2% ${_sq('#fff176')}0~-2% ${_sq('#ff7043')}-5~-10% ${_sq('#e53935')}-10%~<br>`;
-    }
-    if (meshLayers['pop_density'] && map.hasLayer(meshLayers['pop_density'])) {
-        show = true;
-        html += '<b>人口密度 (人/km²)</b><br>';
-        html += `${_sq('#e0e0e0')}~1千 ${_sq('#64b5f6')}~5千 ${_sq('#4caf50')}~1万 ${_sq('#ffeb3b')}~1.5万 ${_sq('#ff9800')}~2万 ${_sq('#f44336')}~3万 ${_sq('#880e4f')}3万~<br>`;
-    }
-    if (meshLayers['facility'] && map.hasLayer(meshLayers['facility'])) {
-        show = true;
-        html += '<b>施設密度</b> 🏫学校 🏥医療 👶保育<br>';
-    }
+    // メッシュレイヤー凡例（色定義と完全同期）
+    ['land_price', 'rent', 'tx_price', 'yield', 'population', 'pop_density', 'facility'].forEach(metric => {
+        if (meshLayers[metric] && map.hasLayer(meshLayers[metric])) {
+            show = true;
+            html += _renderScaleLegend(metric);
+        }
+    });
     if (meshLayers['zoning'] && map.hasLayer(meshLayers['zoning'])) {
         show = true;
         html += '<b>用途地域</b><br>';

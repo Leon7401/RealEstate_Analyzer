@@ -213,7 +213,9 @@ class MaisokuAgent(BaseAgent):
             images = convert_from_path(str(path), dpi=300)
             texts = []
             for img in images:
-                text = pytesseract.image_to_string(img, lang="jpn")
+                gray = img.convert("L")
+                bw = gray.point(lambda x: 255 if x > 170 else 0)
+                text = pytesseract.image_to_string(bw, lang="jpn+eng", config="--psm 6")
                 if text:
                     texts.append(text)
             return "\n".join(texts) if texts else None
@@ -230,8 +232,11 @@ class MaisokuAgent(BaseAgent):
             return None
         try:
             img = Image.open(str(path))
-            text = pytesseract.image_to_string(img, lang="jpn")
-            return text
+            gray = img.convert("L")
+            bw = gray.point(lambda x: 255 if x > 170 else 0)
+            t1 = pytesseract.image_to_string(bw, lang="jpn+eng", config="--psm 6")
+            t2 = pytesseract.image_to_string(bw, lang="jpn+eng", config="--psm 11")
+            return t1 if len(t1 or "") >= len(t2 or "") else t2
         except Exception as e:
             self.logger.error(f"画像OCRエラー: {e}")
             return None

@@ -6,7 +6,7 @@ import logging
 import statistics
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -49,6 +49,12 @@ from config.settings import (
     ANALYZE_AUTOFILL_RENT_MAX_FACTOR,
     ANALYZE_AUTOFILL_RENT_NEAR_BONUS,
     ANALYZE_AUTOFILL_RENT_FAR_PENALTY,
+    VACANCY_RATE,
+    MANAGEMENT_FEE_RATE,
+    REPAIR_RESERVE_RATE,
+    INSURANCE_RATE,
+    PROPERTY_TAX_RATE,
+    CITY_PLANNING_TAX_RATE,
 )
 
 logging.basicConfig(
@@ -118,6 +124,12 @@ async def index(request: Request):
         "api_configured": bool(REINFOLIB_API_KEY),
         "cache_bust": cache_bust,
     })
+
+
+@app.get("/healthz")
+async def healthz():
+    """クラウド監視用の簡易ヘルスチェック"""
+    return JSONResponse(content={"status": "ok"})
 
 
 # ===== マスタデータAPI =====
@@ -522,6 +534,45 @@ def _load_market_context(lat: float, lng: float) -> Optional[dict]:
                 ctx["rent_sqm"] = float(statistics.median(vals))
                 ctx["sample_counts"]["rent"] = max(ctx["sample_counts"].get("rent", 0), len(vals))
 
+    # 利回り補完（分析連動用）
+    implied = ctx.get("implied_yield")
+    if (not implied) and ctx.get("land_price_sqm") and ctx.get("rent_sqm"):
+        try:
+            y = float(ctx["rent_sqm"]) * 12 / float(ctx["land_price_sqm"])
+            if 0.015 <= y <= 0.18:
+                ctx["implied_yield"] = y
+        except Exception:
+            pass
+
+    # 正味利回り基準（レイヤー/分析の共通参照）
+    if ctx.get("implied_yield"):
+        try:
+            expense = (
+                VACANCY_RATE + MANAGEMENT_FEE_RATE + REPAIR_RESERVE_RATE
+                + INSURANCE_RATE + PROPERTY_TAX_RATE + CITY_PLANNING_TAX_RATE
+            )
+            # 駅距離が遠いほど空室リスクを加算
+            dkm = float(ctx.get("station_dist_km") or 0)
+            if dkm > 0.8:
+                expense += min(0.06, (dkm - 0.8) * 0.03)
+            net_y = float(ctx["implied_yield"]) * max(0.55, (1 - expense))
+            if 0.005 <= net_y <= 0.15:
+                ctx["net_yield_ref"] = net_y
+            ctx["expense_rate_ref"] = expense
+        except Exception:
+            pass
+
+    # 片側欠損時に利回りから逆算して分析入力補完に使えるようにする
+    if ctx.get("implied_yield"):
+        try:
+            y = float(ctx["implied_yield"])
+            if not ctx.get("rent_sqm") and ctx.get("land_price_sqm"):
+                ctx["rent_sqm"] = float(ctx["land_price_sqm"]) * y / 12
+            if not ctx.get("land_price_sqm") and ctx.get("rent_sqm"):
+                ctx["land_price_sqm"] = float(ctx["rent_sqm"]) * 12 / max(y, 1e-6)
+        except Exception:
+            pass
+
     # データが何もなければNone
     if not ctx.get("land_price_sqm") and not ctx.get("rent_sqm") and not ctx.get("tx_price_sqm"):
         return None
@@ -598,6 +649,25 @@ def _apply_market_context_to_property(prop: Property, data: dict) -> tuple[Optio
         prop.current_rent_annual = est_annual_rent
         auto_filled["current_rent_annual"] = est_annual_rent
         auto_filled["rent_factor"] = rent_factor
+
+    # 利回りから年額賃料/売出価格を補完（建物面積不明でも分析反映）
+    implied_yield = ctx.get("implied_yield")
+    if implied_yield:
+        try:
+            y = float(implied_yield)
+            if 0.015 <= y <= 0.18:
+                if prop.asking_price and prop.asking_price > 0 and (not prop.current_rent_annual or prop.current_rent_annual <= 0):
+                    est_annual_rent = int(float(prop.asking_price) * y)
+                    prop.current_rent_annual = est_annual_rent
+                    auto_filled["current_rent_annual"] = est_annual_rent
+                    auto_filled["implied_yield_used"] = y
+                elif prop.current_rent_annual and prop.current_rent_annual > 0 and (not prop.asking_price or prop.asking_price <= 0):
+                    est_price = int(float(prop.current_rent_annual) / max(y, 1e-6))
+                    prop.asking_price = est_price
+                    auto_filled["asking_price"] = est_price
+                    auto_filled["implied_yield_used"] = y
+        except Exception:
+            pass
 
     # 駅情報補完
     if not prop.nearest_station and ctx.get("nearest_station"):
@@ -859,9 +929,42 @@ async def analyze_property(request: Request):
     """物件の投資判定を実行"""
     data = await request.json()
     prop = Property.from_dict(data)
+    market_context = None
+    if prop.latitude and prop.longitude:
+        market_context, _ = _apply_market_context_to_property(prop, data)
     result = orchestrator.run(prop)
     judgment = result["judgment"]
     critic = result.get("critic_review", {})
+
+    # 市場データ基準との整合を評価へ反映（要件: データ基準と投資評価の紐づけ）
+    market_benchmark = {}
+    try:
+        val = result.get("valuation")
+        prop_net = getattr(val, "net_yield", None)
+        prop_gross = getattr(val, "gross_yield", None)
+        m_net = (market_context or {}).get("net_yield_ref")
+        m_gross = (market_context or {}).get("implied_yield")
+        if m_net is not None or m_gross is not None:
+            market_benchmark = {
+                "market_net_yield": m_net,
+                "market_gross_yield": m_gross,
+                "property_net_yield": prop_net,
+                "property_gross_yield": prop_gross,
+                "source": (market_context or {}).get("source"),
+            }
+        if m_net is not None and prop_net is not None:
+            gap = float(prop_net) - float(m_net)
+            market_benchmark["net_yield_gap"] = gap
+            # key_metrics に明示して投資判断UIへ反映
+            judgment.key_metrics["市場正味利回り"] = f"{float(m_net)*100:.1f}%"
+            judgment.key_metrics["物件-市場乖離"] = f"{gap*100:+.1f}%"
+            if gap >= 0.006:
+                judgment.strengths.append("市場基準の正味利回りを有意に上回る")
+            elif gap <= -0.006:
+                judgment.weaknesses.append("市場基準の正味利回りを下回る")
+                judgment.risks.append("市場比で収益性が弱く、下振れ時の耐性が低い")
+    except Exception:
+        pass
     return JSONResponse(content={
         "judgment": judgment.to_dict(),
         "valuation": result["valuation"].to_dict(),
@@ -869,6 +972,226 @@ async def analyze_property(request: Request):
         "critic_review": critic,
         "summary": judgment.summary_text,
     })
+
+
+def _normalize_property_input(raw: dict, default_name: str = "物件") -> dict:
+    """分析API投入前の必須項目/型を正規化"""
+    d = dict(raw or {})
+    if not d.get("name"):
+        d["name"] = d.get("address") or default_name
+    if not d.get("address"):
+        d["address"] = d.get("name") or "住所不明"
+    if not d.get("prefecture_code"):
+        d["prefecture_code"] = "13"
+    if not d.get("city_code"):
+        pref = str(d.get("prefecture_code") or "13")
+        d["city_code"] = "13104" if pref == "13" else f"{pref}000"
+    if d.get("building_age") is None and d.get("built_year"):
+        try:
+            d["building_age"] = max(0, datetime.now().year - int(d["built_year"]))
+        except Exception:
+            pass
+    return d
+
+
+def _build_rebuild_scenario_input(base: dict, market_context: Optional[dict]) -> Optional[tuple[dict, dict]]:
+    """中古物件向け: PlanAgentで建替え最適プランを生成して分析入力化"""
+    land_area = base.get("land_area")
+    building_area = base.get("building_area")
+    building_age = base.get("building_age")
+    asking_price = base.get("asking_price")
+
+    if not land_area or not building_area or building_age is None:
+        return None
+    if float(building_age) <= 0:
+        return None
+
+    try:
+        # 建蔽率/容積率の正規化（0-1 or 0-100の両対応）
+        cov_raw = float(base.get("building_coverage") or 0.60)
+        far_raw = float(base.get("floor_area_ratio") or 2.00)
+        cov_ratio = cov_raw / 100.0 if cov_raw > 1 else cov_raw
+        far_ratio = far_raw / 100.0 if far_raw > 8 else far_raw
+        cov_ratio = max(0.30, min(0.90, cov_ratio))
+        far_ratio = max(0.80, min(8.00, far_ratio))
+
+        listing = LandListing(
+            address=base.get("address") or "",
+            station=base.get("nearest_station"),
+            walk_minutes=base.get("station_distance_min"),
+            land_price=int(float(base.get("asking_price") or 0)),
+            land_area_sqm=float(land_area),
+            building_coverage_ratio=cov_ratio,
+            floor_area_ratio=far_ratio,
+            zoning=base.get("land_use_zone"),
+            latitude=base.get("latitude"),
+            longitude=base.get("longitude"),
+            source=base.get("source"),
+            source_url=base.get("source_url"),
+        )
+
+        rent_hint = None
+        if market_context and market_context.get("rent_sqm"):
+            rent_hint = float(market_context["rent_sqm"])
+        summary = plan_agent.run(listing, rent_per_sqm=rent_hint)
+        if not summary.plans:
+            return None
+
+        # PlanAgentは内部で多角評価ソート済み。先頭を採用。
+        best = summary.plans[0]
+        demo_unit = 25_000
+        try:
+            profile = getattr(plan_agent, "_cost_profiles", {}).get(best.structure_type)
+            if profile and getattr(profile, "demolition_cost_per_sqm", None):
+                demo_unit = int(profile.demolition_cost_per_sqm)
+        except Exception:
+            pass
+        demolition_cost = int(float(building_area) * demo_unit)
+        rebuild_incremental_cost = int(
+            (best.estimated_construction_cost or 0)
+            + (best.construction_overhead or 0)
+            + (best.setback_cost_premium or 0)
+            + demolition_cost
+        )
+
+        rebuilt = dict(base)
+        rebuilt["name"] = f"{base.get('name') or '物件'}（建替）"
+        rebuilt["structure"] = best.structure_type or (base.get("structure") or "重量鉄骨")
+        rebuilt["building_area"] = round(best.actual_total_floor_area_sqm or float(building_area), 1)
+        rebuilt["units"] = best.max_units
+        rebuilt["building_age"] = 0
+        rebuilt["built_year"] = datetime.now().year
+
+        if asking_price and asking_price > 0:
+            rebuilt["asking_price"] = int(float(asking_price) + rebuild_incremental_cost)
+        else:
+            rebuilt["asking_price"] = int(rebuild_incremental_cost)
+
+        # 賃料は建築プラン推定を優先（市場ヒントはPlanAgent側へ投入済み）
+        est_annual = int(best.estimated_annual_income or 0)
+        if est_annual <= 0 and market_context and market_context.get("rent_sqm"):
+            est_annual = int(float(market_context["rent_sqm"]) * float(rebuilt["building_area"]) * 12 * 0.92)
+        elif est_annual <= 0 and base.get("current_rent_annual"):
+            est_annual = int(float(base["current_rent_annual"]) * 1.15)
+        if est_annual > 0:
+            rebuilt["current_rent_annual"] = est_annual
+
+        assumptions = {
+            "selected_plan": best.plan_label,
+            "target_building_area_sqm": rebuilt["building_area"],
+            "target_units": best.max_units,
+            "rebuild_incremental_cost": rebuild_incremental_cost,
+            "rebuild_cost_hard": int(best.estimated_construction_cost or 0),
+            "rebuild_cost_overhead": int(best.construction_overhead or 0),
+            "rebuild_cost_setback": int(best.setback_cost_premium or 0),
+            "demolition_cost": demolition_cost,
+            "plan_total_investment": int(best.total_investment or 0),
+            "plan_estimated_yield": best.estimated_yield,
+            "plan_rank_score": getattr(best, "_rank_score", None),
+            "far_ratio_used": far_ratio,
+            "coverage_ratio_used": cov_ratio,
+        }
+        return rebuilt, assumptions
+    except Exception:
+        return None
+
+
+def _enrich_listing_regulations_if_needed(listing_id: int, listing_data: dict) -> dict:
+    """
+    用途地域/建蔽率/容積率が欠損している場合、reinfolibから補完してDBへ反映。
+    単発分析APIでも規制条件を自動読取できるようにする。
+    """
+    if not listing_data:
+        return listing_data
+    if not listing_data.get("latitude") or not listing_data.get("longitude"):
+        return listing_data
+    needs_enrich = (
+        not listing_data.get("zoning")
+        or listing_data.get("building_coverage_ratio") is None
+        or listing_data.get("floor_area_ratio") is None
+    )
+    if not needs_enrich:
+        return listing_data
+
+    from data.reinfolib_client import ReinfolibClient
+
+    client = ReinfolibClient()
+    if not client.is_configured():
+        return listing_data
+
+    try:
+        data = client.enrich_land_listing(
+            float(listing_data["latitude"]),
+            float(listing_data["longitude"]),
+        )
+    except Exception:
+        return listing_data
+    if not data:
+        return listing_data
+
+    def _to_ratio(v):
+        try:
+            vv = float(str(v).replace("%", "").strip())
+            return vv / 100 if vv > 1 else vv
+        except Exception:
+            return None
+
+    updates = {}
+    if not listing_data.get("zoning") and data.get("zoning"):
+        updates["zoning"] = str(data["zoning"])
+    if listing_data.get("building_coverage_ratio") is None and data.get("building_coverage_ratio") is not None:
+        cov = _to_ratio(data.get("building_coverage_ratio"))
+        if cov is not None:
+            updates["building_coverage_ratio"] = cov
+    if listing_data.get("floor_area_ratio") is None and data.get("floor_area_ratio") is not None:
+        far = _to_ratio(data.get("floor_area_ratio"))
+        if far is not None:
+            updates["floor_area_ratio"] = far
+    if data.get("quasi_fireproof"):
+        updates["quasi_fireproof"] = 1
+
+    if not updates:
+        return listing_data
+
+    set_clause = ", ".join(f"{k}=?" for k in updates)
+    params = list(updates.values()) + [listing_id]
+    with db._conn() as conn:
+        conn.execute(
+            f"UPDATE land_listings SET {set_clause}, updated_at=datetime('now','localtime') WHERE id=?",
+            params,
+        )
+
+    merged = dict(listing_data)
+    merged.update(updates)
+    return merged
+
+
+def _analysis_digest(res: dict, scenario: str, market_context: Optional[dict] = None, assumptions: Optional[dict] = None) -> dict:
+    j = res["judgment"]
+    v = res["valuation"]
+    s = res["simulation"]
+    digest = {
+        "scenario": scenario,
+        "grade": j.grade,
+        "score": round(j.overall_score, 2),
+        "recommendation": j.recommendation,
+        "confidence": j.confidence,
+        "gross_yield": v.gross_yield,
+        "net_yield": v.net_yield,
+        "expense_rate": v.expense_rate,
+        "irr": s.irr,
+        "dscr": s.dscr,
+        "year1_cash_flow": s.year1_cash_flow,
+        "exit_cap_rate": getattr(s, "hold_sell_exit_cap_base", None),
+        "exit_cap_rate_stress": getattr(s, "hold_sell_exit_cap_stress", None),
+        "hold_sell_roi": getattr(s, "hold_sell_roi_65", None),
+        "hold_sell_total_return": getattr(s, "hold_sell_total_return_65", None),
+        "summary": j.summary_text,
+        "market_context": market_context,
+    }
+    if assumptions:
+        digest["assumptions"] = assumptions
+    return digest
 
 
 @app.post("/api/analyze-batch")
@@ -889,12 +1212,98 @@ async def analyze_batch(request: Request):
     })
 
 
+@app.post("/api/properties/auto-analyze")
+async def auto_analyze_properties(request: Request):
+    """一覧物件を自動分析し、地図/リスト反映用の結果を返す"""
+    payload = await request.json()
+    raw_props = payload.get("properties", [])
+    include_rebuild = bool(payload.get("include_rebuild", True))
+    limit = int(payload.get("limit", 300) or 300)
+    raw_props = raw_props[: max(1, min(limit, 600))]
+
+    results = []
+    for i, raw in enumerate(raw_props, 1):
+        try:
+            normalized = _normalize_property_input(raw, default_name=f"物件{i}")
+            prop = Property.from_dict(normalized)
+
+            market_context = None
+            auto_filled = {}
+            if prop.latitude and prop.longitude:
+                market_context, auto_filled = _apply_market_context_to_property(prop, normalized)
+
+            as_is_res = orchestrator.run(prop)
+            as_is = _analysis_digest(as_is_res, "as_is", market_context=market_context)
+            selected = as_is
+            rebuild = None
+
+            # 中古（既存建物あり）について建替え案を比較
+            if include_rebuild:
+                rebuild_pair = _build_rebuild_scenario_input(normalized, market_context)
+                if rebuild_pair:
+                    rebuild_input, assumptions = rebuild_pair
+                    rb_prop = Property.from_dict(_normalize_property_input(rebuild_input, default_name=f"物件{i} 建替"))
+                    if rb_prop.latitude and rb_prop.longitude:
+                        _apply_market_context_to_property(rb_prop, rebuild_input)
+                    rb_res = orchestrator.run(rb_prop)
+                    rebuild = _analysis_digest(rb_res, "rebuild", market_context=market_context, assumptions=assumptions)
+                    if (rebuild.get("score") or 0) > (as_is.get("score") or 0):
+                        selected = rebuild
+
+            row = {
+                "index": i - 1,
+                "client_index": raw.get("_client_index"),
+                "name": normalized.get("name"),
+                "address": normalized.get("address"),
+                "latitude": normalized.get("latitude"),
+                "longitude": normalized.get("longitude"),
+                "auto_filled": auto_filled,
+                "selected": selected,
+                "as_is": as_is,
+                "rebuild": rebuild,
+            }
+            results.append(row)
+        except Exception as e:
+            results.append({
+                "index": i - 1,
+                "client_index": raw.get("_client_index"),
+                "name": raw.get("name") or raw.get("address") or f"物件{i}",
+                "error": str(e),
+            })
+
+    valid = [r for r in results if r.get("selected") and not r.get("error")]
+    ranking = sorted(valid, key=lambda x: x["selected"].get("score") or 0, reverse=True)
+    ranking_rows = [
+        {
+            "rank": idx + 1,
+            "name": r.get("name"),
+            "grade": (r.get("selected") or {}).get("grade"),
+            "score": (r.get("selected") or {}).get("score"),
+            "recommendation": (r.get("selected") or {}).get("recommendation"),
+            "scenario": (r.get("selected") or {}).get("scenario"),
+            "gross_yield": (r.get("selected") or {}).get("gross_yield"),
+            "net_yield": (r.get("selected") or {}).get("net_yield"),
+            "hold_sell_roi": (r.get("selected") or {}).get("hold_sell_roi"),
+            "exit_cap_rate": (r.get("selected") or {}).get("exit_cap_rate"),
+            "client_index": r.get("client_index"),
+        }
+        for idx, r in enumerate(ranking)
+    ]
+
+    return JSONResponse(content={
+        "count": len(raw_props),
+        "success": len(valid),
+        "results": results,
+        "ranking": ranking_rows,
+    })
+
+
 # ===== スクレイピングAPI =====
 
 @app.get("/api/scrape")
 async def scrape_properties(
     prefecture_code: str = "13",
-    sources: str = "suumo,rakumachi,athome",
+    sources: str = "rakumachi,kenbiya,rals",
     max_pages: int = 10,
     split_by_price: bool = False,
 ):
@@ -925,6 +1334,168 @@ async def scrape_properties(
         )
 
 
+def _normalize_ratio_input(v: Any) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        raw = float(str(v).replace("%", "").strip())
+    except (TypeError, ValueError):
+        return None
+    if raw <= 0:
+        return None
+    return raw / 100.0 if raw > 1 else raw
+
+
+@app.post("/api/land/quick-evaluate")
+async def quick_evaluate_land(request: Request):
+    """
+    地図UIの簡易入力から土地の収益性と価格妥当ラインを即時提示
+    Body:
+      {
+        "address": "...",
+        "land_area_sqm": 120,
+        "land_price": 50000000,              # 任意
+        "building_coverage_ratio": 60,       # 任意(% or ratio)
+        "floor_area_ratio": 200,             # 任意(% or ratio)
+        "walk_minutes": 8                    # 任意
+      }
+    """
+    data = await request.json()
+    address = (data.get("address") or "").strip()
+    if not address:
+        return JSONResponse(content={"error": "住所が未入力です"}, status_code=400)
+
+    try:
+        land_area_sqm = float(data.get("land_area_sqm") or 0)
+    except (TypeError, ValueError):
+        land_area_sqm = 0
+    if land_area_sqm <= 0:
+        return JSONResponse(content={"error": "土地面積(㎡)を正しく入力してください"}, status_code=400)
+
+    try:
+        from data.geocoder import Geocoder
+        coords = Geocoder().geocode(address)
+    except Exception as e:
+        return JSONResponse(content={"error": f"ジオコーディング失敗: {e}"}, status_code=500)
+
+    if not coords:
+        return JSONResponse(content={"error": "住所の座標を取得できませんでした"}, status_code=422)
+
+    lat, lng = coords
+    market_ctx = _load_market_context(float(lat), float(lng)) or {}
+
+    land_price_sqm = market_ctx.get("land_price_sqm")
+    tx_price_sqm = market_ctx.get("tx_price_sqm")
+    if not land_price_sqm and tx_price_sqm:
+        land_price_sqm = float(tx_price_sqm) * 0.97
+    if not land_price_sqm:
+        land_price_sqm = 220000.0
+
+    estimated_land_price = int(float(land_price_sqm) * land_area_sqm)
+    input_land_price = data.get("land_price")
+    try:
+        land_price = int(input_land_price) if input_land_price else estimated_land_price
+    except (TypeError, ValueError):
+        land_price = estimated_land_price
+
+    bcr = _normalize_ratio_input(data.get("building_coverage_ratio")) or 0.60
+    far = _normalize_ratio_input(data.get("floor_area_ratio")) or 2.00
+    walk_minutes = None
+    try:
+        if data.get("walk_minutes") is not None:
+            walk_minutes = int(data.get("walk_minutes"))
+    except (TypeError, ValueError):
+        walk_minutes = None
+
+    listing = LandListing(
+        address=address,
+        land_price=land_price,
+        land_area_sqm=land_area_sqm,
+        building_coverage_ratio=bcr,
+        floor_area_ratio=far,
+        walk_minutes=walk_minutes,
+        latitude=float(lat),
+        longitude=float(lng),
+        source="地図クイック診断",
+    )
+
+    plan_summary = plan_agent.run(
+        listing,
+        rent_per_sqm=market_ctx.get("rent_sqm"),
+        equipment_grade="premium",
+    )
+    best_plan = plan_summary.best_plan
+
+    implied_yield = market_ctx.get("implied_yield")
+    if not implied_yield and market_ctx.get("rent_sqm") and land_price_sqm:
+        try:
+            implied_yield = float(market_ctx["rent_sqm"]) * 12 / float(land_price_sqm)
+        except Exception:
+            implied_yield = None
+
+    fair_mid = None
+    fair_low = None
+    fair_high = None
+    valuation_note = "市場基準の妥当レンジ内です"
+
+    if best_plan and best_plan.estimated_annual_income and implied_yield and implied_yield > 0:
+        annual_income = float(best_plan.estimated_annual_income)
+        fair_mid = int(annual_income / float(implied_yield))
+        fair_low = int(annual_income / (float(implied_yield) * 1.15))
+        fair_high = int(annual_income / (float(implied_yield) * 0.85))
+    else:
+        fair_mid = estimated_land_price
+        fair_low = int(fair_mid * 0.9)
+        fair_high = int(fair_mid * 1.1)
+
+    if land_price > fair_high:
+        valuation_note = "割高寄りです（相場より高値）"
+    elif land_price < fair_low:
+        valuation_note = "割安寄りです（仕入候補）"
+
+    profitability = {
+        "gross_yield": best_plan.estimated_yield if best_plan else None,
+        "annual_income": best_plan.estimated_annual_income if best_plan else None,
+        "total_investment": best_plan.total_investment if best_plan else land_price,
+        "plan_label": best_plan.plan_label if best_plan else None,
+        "units": best_plan.max_units if best_plan else None,
+    }
+
+    return JSONResponse(content={
+        "status": "ok",
+        "input": {
+            "address": address,
+            "land_area_sqm": land_area_sqm,
+            "land_price": land_price,
+            "building_coverage_ratio": bcr,
+            "floor_area_ratio": far,
+        },
+        "coordinates": {"lat": lat, "lng": lng},
+        "market_context": {
+            "source": market_ctx.get("source"),
+            "land_price_sqm": land_price_sqm,
+            "rent_sqm": market_ctx.get("rent_sqm"),
+            "tx_price_sqm": market_ctx.get("tx_price_sqm"),
+            "implied_yield": implied_yield,
+            "sample_counts": market_ctx.get("sample_counts") or {},
+        },
+        "profitability": profitability,
+        "fair_price_line": {
+            "low": fair_low,
+            "mid": fair_mid,
+            "high": fair_high,
+            "estimated_land_only_price": estimated_land_price,
+            "judgment": valuation_note,
+        },
+        "auto_regulation_enriched": {
+            "zoning": listing.zoning,
+            "building_coverage_ratio": listing.building_coverage_ratio,
+            "floor_area_ratio": listing.floor_area_ratio,
+            "quasi_fireproof": listing.quasi_fireproof,
+        },
+    })
+
+
 @app.get("/api/scrape-rentals")
 async def scrape_rentals(
     prefecture_code: str = "13",
@@ -950,6 +1521,35 @@ async def scrape_rentals(
     except Exception as e:
         return JSONResponse(
             content={"error": str(e), "count": 0},
+            status_code=500,
+        )
+
+
+@app.post("/api/properties/dedupe")
+async def dedupe_properties(request: Request):
+    """
+    重複物件を検出して統合する
+    Body: {"dry_run": true/false, "min_group_size": 2, "max_groups": 500}
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    dry_run = bool(data.get("dry_run", False))
+    min_group_size = int(data.get("min_group_size", 2) or 2)
+    max_groups = int(data.get("max_groups", 500) or 500)
+
+    try:
+        result = db.merge_duplicate_properties(
+            dry_run=dry_run,
+            min_group_size=max(2, min_group_size),
+            max_groups=max(1, min(5000, max_groups)),
+        )
+        return JSONResponse(content={"status": "ok", **result})
+    except Exception as e:
+        return JSONResponse(
+            content={"status": "error", "error": str(e)},
             status_code=500,
         )
 
@@ -1529,6 +2129,7 @@ async def analyze_land_listing(listing_id: int):
         return JSONResponse(content={"error": "not found"}, status_code=404)
 
     try:
+        listing_data = _enrich_listing_regulations_if_needed(listing_id, listing_data)
         listing = LandListing.from_dict(listing_data)
         listing.id = listing_data["id"]
         summary = plan_agent.run(listing)
@@ -1555,8 +2156,14 @@ async def analyze_land_listing(listing_id: int):
 async def batch_analyze_land():
     """未分析土地の一括プラン生成"""
     try:
+        # 分析直前に用途地域/建蔽率/容積率の欠損をAPI補完して取りこぼしを減らす
+        enriched = batch_processor.batch_enrich_from_api(limit=2000)
         plans = batch_processor.batch_building_plans()
-        return JSONResponse(content={"status": "ok", "plans_generated": plans})
+        return JSONResponse(content={
+            "status": "ok",
+            "regulations_enriched": enriched,
+            "plans_generated": plans,
+        })
     except Exception as e:
         return JSONResponse(
             content={"status": "error", "error": str(e)}, status_code=500
@@ -1587,6 +2194,7 @@ async def judge_land_listing(listing_id: int):
         return JSONResponse(content={"error": "not found"}, status_code=404)
 
     try:
+        listing_data = _enrich_listing_regulations_if_needed(listing_id, listing_data)
         listing = LandListing.from_dict(listing_data)
         listing.id = listing_data["id"]
 
@@ -1830,6 +2438,130 @@ async def get_compare_data(
     rows = rows[:limit]
 
     return JSONResponse(content={"rows": rows, "count": len(rows)})
+
+
+@app.get("/api/compare/high-rank-picks")
+async def get_high_rank_picks(
+    min_grade: str = "B",
+    min_score: float = 55.0,
+    limit: int = 30,
+):
+    """
+    高ランク物件を即ピックアップするための軽量API。
+    - grade優先（S > A > B > C > D > F）
+    - 同grade内は score / yield で降順
+    """
+    min_grade = (min_grade or "B").upper().strip()
+    allowed = {"S", "A", "B", "C", "D", "F"}
+    if min_grade not in allowed:
+        min_grade = "B"
+
+    grade_order = {"S": 0, "A": 1, "B": 2, "C": 3, "D": 4, "F": 5}
+    max_idx = grade_order[min_grade]
+    target_grades = [g for g, idx in grade_order.items() if idx <= max_idx]
+    placeholders = ",".join("?" for _ in target_grades)
+    safe_limit = max(1, min(int(limit), 200))
+
+    rows = []
+    with db._conn() as conn:
+        # 収益物件（latest judgment）
+        prop_sql = f"""
+            SELECT
+                p.id AS id,
+                'property' AS type,
+                COALESCE(p.name, p.address, '収益物件') AS name,
+                p.address AS address,
+                p.latitude AS latitude,
+                p.longitude AS longitude,
+                p.source_url AS source_url,
+                p.gross_yield AS estimated_yield,
+                j.grade AS grade,
+                j.overall_score AS score,
+                j.recommendation AS recommendation
+            FROM properties p
+            JOIN judgments j ON j.property_id = p.id
+            AND j.id = (
+                SELECT j2.id FROM judgments j2
+                WHERE j2.property_id = p.id
+                ORDER BY j2.id DESC LIMIT 1
+            )
+            WHERE j.grade IN ({placeholders})
+            AND COALESCE(j.overall_score, 0) >= ?
+            LIMIT ?
+        """
+        prop_params = [*target_grades, float(min_score), safe_limit]
+        prop_rows = conn.execute(prop_sql, prop_params).fetchall()
+        rows.extend([dict(r) for r in prop_rows])
+
+        # 土地物件（latest judgment + best plan）
+        land_sql = f"""
+            SELECT
+                ll.id AS id,
+                'land' AS type,
+                COALESCE(ll.address, '土地物件') AS name,
+                ll.address AS address,
+                ll.latitude AS latitude,
+                ll.longitude AS longitude,
+                ll.source_url AS source_url,
+                bp.estimated_yield AS estimated_yield,
+                lj.grade AS grade,
+                lj.overall_score AS score,
+                lj.recommendation AS recommendation
+            FROM land_listings ll
+            JOIN land_judgments lj ON lj.land_listing_id = ll.id
+            AND lj.id = (
+                SELECT lj2.id FROM land_judgments lj2
+                WHERE lj2.land_listing_id = ll.id
+                ORDER BY lj2.id DESC LIMIT 1
+            )
+            LEFT JOIN building_plans bp ON bp.land_listing_id = ll.id
+            AND bp.id = (
+                SELECT bp2.id FROM building_plans bp2
+                WHERE bp2.land_listing_id = ll.id
+                ORDER BY bp2.estimated_yield DESC LIMIT 1
+            )
+            WHERE ll.duplicate_of_id IS NULL
+            AND lj.grade IN ({placeholders})
+            AND COALESCE(lj.overall_score, 0) >= ?
+            LIMIT ?
+        """
+        land_params = [*target_grades, float(min_score), safe_limit]
+        land_rows = conn.execute(land_sql, land_params).fetchall()
+        rows.extend([dict(r) for r in land_rows])
+
+    def _sort_key(r):
+        return (
+            -grade_order.get((r.get("grade") or "F"), 9),
+            float(r.get("score") or 0.0),
+            float(r.get("estimated_yield") or 0.0),
+        )
+
+    rows.sort(key=_sort_key, reverse=True)
+    rows = rows[:safe_limit]
+
+    picks = []
+    for idx, r in enumerate(rows, start=1):
+        picks.append({
+            "rank": idx,
+            "id": r.get("id"),
+            "type": r.get("type"),
+            "name": r.get("name") or r.get("address") or "物件",
+            "address": r.get("address") or "",
+            "grade": r.get("grade") or "?",
+            "score": float(r.get("score") or 0.0),
+            "estimated_yield": float(r.get("estimated_yield") or 0.0),
+            "recommendation": r.get("recommendation") or "",
+            "latitude": r.get("latitude"),
+            "longitude": r.get("longitude"),
+            "source_url": r.get("source_url"),
+        })
+
+    return JSONResponse(content={
+        "count": len(picks),
+        "min_grade": min_grade,
+        "min_score": float(min_score),
+        "picks": picks,
+    })
 
 
 @app.post("/api/land-listings/geocode")
@@ -2620,6 +3352,35 @@ async def analyze_full(request: Request):
     judgment = result["judgment"]
     critic = result.get("critic_review", {})
 
+    # 市場データ基準との整合を評価へ反映
+    market_benchmark = {}
+    try:
+        val = result.get("valuation")
+        prop_net = getattr(val, "net_yield", None)
+        prop_gross = getattr(val, "gross_yield", None)
+        m_net = (market_context or {}).get("net_yield_ref")
+        m_gross = (market_context or {}).get("implied_yield")
+        if m_net is not None or m_gross is not None:
+            market_benchmark = {
+                "market_net_yield": m_net,
+                "market_gross_yield": m_gross,
+                "property_net_yield": prop_net,
+                "property_gross_yield": prop_gross,
+                "source": (market_context or {}).get("source"),
+            }
+        if m_net is not None and prop_net is not None:
+            gap = float(prop_net) - float(m_net)
+            market_benchmark["net_yield_gap"] = gap
+            judgment.key_metrics["市場正味利回り"] = f"{float(m_net)*100:.1f}%"
+            judgment.key_metrics["物件-市場乖離"] = f"{gap*100:+.1f}%"
+            if gap >= 0.006:
+                judgment.strengths.append("市場基準の正味利回りを有意に上回る")
+            elif gap <= -0.006:
+                judgment.weaknesses.append("市場基準の正味利回りを下回る")
+                judgment.risks.append("市場比で収益性が弱く、下振れ時の耐性が低い")
+    except Exception:
+        pass
+
     # 資産性分析（座標がある場合）
     asset_score = None
     lat = prop.latitude or data.get("latitude")
@@ -2647,6 +3408,7 @@ async def analyze_full(request: Request):
         "summary": judgment.summary_text,
         "asset_score": asset_score,
         "market_context": market_context,
+        "market_benchmark": market_benchmark,
         "auto_filled": auto_filled,
         "analysis_input_before": analysis_input_before,
         "analysis_input_after": analysis_input_after,
@@ -3254,11 +4016,17 @@ async def compute_mesh_250m():
             # 駅データ
             stations_list = conn.execute("SELECT station_name, latitude, longitude FROM stations WHERE latitude IS NOT NULL").fetchall()
             stations_coords = [(dict(r)["station_name"], dict(r)["latitude"], dict(r)["longitude"]) for r in stations_list]
+            # 既存メッシュID（過去集計の残件も再計算対象に含める）
+            existing_mesh_ids = set(
+                dict(r)["mesh_id"]
+                for r in conn.execute("SELECT mesh_id FROM mesh_250m").fetchall()
+                if dict(r).get("mesh_id")
+            )
 
         # 集計してDB保存
         import statistics
         records = []
-        all_mids = set(mesh_data.keys()) | set(pop_by_mesh.keys())
+        all_mids = set(mesh_data.keys()) | set(pop_by_mesh.keys()) | set(fac_counts.keys()) | set(existing_mesh_ids)
 
         for mid in all_mids:
             clat, clng = _mesh250_center(mid)
@@ -3305,7 +4073,7 @@ async def compute_mesh_250m():
         # --- 陸地マスク: 人口/施設/実データありメッシュのいずれかを補間対象 ---
         data_meshes = set(mid for mid, md in mesh_data.items()
                          if md["lp"] or md["rent"] or md["tx"])
-        land_meshes = set(pop_by_mesh.keys()) | set(fac_counts.keys()) | data_meshes
+        land_meshes = set(pop_by_mesh.keys()) | set(fac_counts.keys()) | data_meshes | set(existing_mesh_ids)
         logging.info(f"  陸地メッシュ(人口/施設/実データ): {len(land_meshes)}")
 
         # --- グリッドインデックス構築 ---
@@ -3352,6 +4120,38 @@ async def compute_mesh_250m():
         lp_grid = _build_point_grid(lp_points)
         rent_grid = _build_point_grid(rent_points)
         tx_grid = _build_point_grid(tx_points)
+
+        # --- 賃料推定用: 地価→賃料変換の基準利回り（駅別 + 全体） ---
+        station_yield_map = {}
+        station_rent_map = {}
+        global_yields = []
+        global_rents = []
+        rent_values = sorted([v for _, _, v, _ in rent_points if v and v > 0])
+        rent_min = rent_values[max(0, int(len(rent_values) * 0.03))] if rent_values else 500
+        rent_max = rent_values[min(len(rent_values) - 1, int(len(rent_values) * 0.97))] if rent_values else 15000
+        tmp_yields = {}
+        tmp_rents = {}
+        for r in records:
+            lp0 = r.get("avg_land_price_sqm")
+            rent0 = r.get("avg_rent_sqm")
+            st0 = r.get("nearest_station") or ""
+            if rent0 and rent0 > 0:
+                global_rents.append(rent0)
+                tmp_rents.setdefault(st0, []).append(rent0)
+            if not lp0 or not rent0 or lp0 <= 0 or rent0 <= 0:
+                continue
+            y = rent0 * 12 / lp0  # 年間賃料 / ㎡地価
+            if 0.015 <= y <= 0.18:
+                global_yields.append(y)
+                tmp_yields.setdefault(st0, []).append(y)
+        for st, ys in tmp_yields.items():
+            if len(ys) >= 5:
+                station_yield_map[st] = statistics.median(ys)
+        for st, rs in tmp_rents.items():
+            if len(rs) >= 5:
+                station_rent_map[st] = statistics.median(rs)
+        default_yield = statistics.median(global_yields) if global_yields else 0.055
+        default_rent = statistics.median(global_rents) if global_rents else 3200
 
         # --- 駅距離による賃料減衰関数 ---
         # 賃料は駅距離に対して対数減衰: 徒歩1分≈80m=0.08km
@@ -3426,13 +4226,33 @@ async def compute_mesh_250m():
 
             n_st, n_dist = _nearest_station_fast(clat, clng)
 
-            # 駅から2km超は補間しない（投資対象外エリア）
-            if n_dist > 2.0:
-                continue
+            # まず近傍IDW（精度優先）
+            est_lp = _idw_estimate(clat, clng, n_dist, lp_grid, k=10, power=2.0, max_dist_km=2.5, min_points=3)
+            est_rent = _idw_estimate(clat, clng, n_dist, rent_grid, k=10, power=2.0, max_dist_km=2.5, min_points=3)
+            est_tx = _idw_estimate(clat, clng, n_dist, tx_grid, k=10, power=2.0, max_dist_km=2.5, min_points=3)
 
-            est_lp = _idw_estimate(clat, clng, n_dist, lp_grid)
-            est_rent = _idw_estimate(clat, clng, n_dist, rent_grid)
-            est_tx = _idw_estimate(clat, clng, n_dist, tx_grid)
+            # 近傍で不足する場合は広域IDW（埋め率優先）
+            if est_lp is None:
+                est_lp = _idw_estimate(clat, clng, n_dist, lp_grid, k=6, power=1.5, max_dist_km=8.0, min_points=1)
+            if est_rent is None:
+                est_rent = _idw_estimate(clat, clng, n_dist, rent_grid, k=6, power=1.5, max_dist_km=8.0, min_points=1)
+            if est_tx is None:
+                est_tx = _idw_estimate(clat, clng, n_dist, tx_grid, k=6, power=1.5, max_dist_km=8.0, min_points=1)
+
+            # 賃料が未推定なら、地価（推定/実測）と駅別利回りから逆算
+            if est_rent is None:
+                base_lp = est_lp or est_tx
+                if base_lp and base_lp > 0:
+                    y = station_yield_map.get(n_st) or default_yield
+                    est_rent = round(base_lp * y / 12)
+                    est_rent = max(int(rent_min), min(int(rent_max), est_rent))
+            # それでも未推定なら駅別/全体賃料に駅距離減衰を適用
+            if est_rent is None:
+                base_rent = station_rent_map.get(n_st) or default_rent
+                # 極端に遠方は減衰を強める
+                dist_factor = _station_distance_factor(min(max(n_dist, 0.08), 6.0))
+                est_rent = round(base_rent * dist_factor)
+                est_rent = max(int(rent_min), min(int(rent_max), est_rent))
 
             if not est_lp and not est_rent and not est_tx:
                 continue
@@ -3464,7 +4284,104 @@ async def compute_mesh_250m():
             observed[mid] = rec
             interpolated_count += 1
 
-        logging.info(f"  空間補間完了: {interpolated_count}メッシュ推定値生成")
+        # --- 最終フォールバック: 残欠損を駅別/全体基準で埋める（充填率最大化） ---
+        station_lp_map, station_tx_map = {}, {}
+        global_lp_vals, global_tx_vals = [], []
+        tmp_lp, tmp_tx = {}, {}
+        for r in records:
+            st = r.get("nearest_station") or ""
+            lpv = r.get("avg_land_price_sqm")
+            txv = r.get("avg_tx_price_sqm")
+            if lpv and lpv > 0:
+                global_lp_vals.append(lpv)
+                tmp_lp.setdefault(st, []).append(lpv)
+            if txv and txv > 0:
+                global_tx_vals.append(txv)
+                tmp_tx.setdefault(st, []).append(txv)
+        for st, vals in tmp_lp.items():
+            if len(vals) >= 3:
+                station_lp_map[st] = statistics.median(vals)
+        for st, vals in tmp_tx.items():
+            if len(vals) >= 3:
+                station_tx_map[st] = statistics.median(vals)
+        global_lp = statistics.median(global_lp_vals) if global_lp_vals else None
+        global_tx = statistics.median(global_tx_vals) if global_tx_vals else global_lp
+        # ハードフォールバック（全域定義保証）
+        HARD_DEFAULT_LP = 220000.0
+        HARD_DEFAULT_TX = 220000.0
+        HARD_DEFAULT_RENT = 2500.0
+        if not global_lp or global_lp <= 0:
+            global_lp = HARD_DEFAULT_LP
+        if not global_tx or global_tx <= 0:
+            global_tx = max(global_lp, HARD_DEFAULT_TX)
+
+        fallback_count = 0
+        for r in records:
+            st = r.get("nearest_station") or ""
+            dkm = float(r.get("station_dist_km") or 1.0)
+            dist_factor = max(0.72, min(1.10, _station_distance_factor(dkm)))
+            pop_cr = r.get("pop_change_rate")
+            pop_in = max(0.0, float(pop_cr) / 100.0) if pop_cr is not None else 0.0
+            core_bias = max(0.0, (1.2 - min(dkm, 1.2)) / 1.2)
+            pressure_idx = max(0.0, min(1.0, 0.65 * min(0.25, pop_in) / 0.25 + 0.35 * core_bias))
+            price_pressure = 1.0 + 0.18 * pressure_idx
+            # 賃料は上がるが、価格の上がりよりは弱い（利回り圧縮）
+            rent_pressure = 1.0 + 0.08 * pressure_idx
+
+            if not (r.get("avg_land_price_sqm") and r.get("avg_land_price_sqm") > 0):
+                base_lp = station_lp_map.get(st) or global_lp
+                if base_lp:
+                    r["avg_land_price_sqm"] = round(base_lp * dist_factor * price_pressure)
+                    r["land_price_count"] = -1
+                    fallback_count += 1
+
+            if not (r.get("avg_tx_price_sqm") and r.get("avg_tx_price_sqm") > 0):
+                base_tx = station_tx_map.get(st) or global_tx or r.get("avg_land_price_sqm")
+                if not base_tx:
+                    # 賃料があれば基準利回りから逆算
+                    rent_for_tx = r.get("avg_rent_sqm")
+                    if rent_for_tx and default_yield and default_yield > 0:
+                        base_tx = float(rent_for_tx) * 12 / float(default_yield)
+                    elif global_lp:
+                        base_tx = global_lp
+                    else:
+                        # 最終フォールバック: 首都圏郊外帯の保守値
+                        base_tx = 220000
+                if base_tx:
+                    r["avg_tx_price_sqm"] = round(base_tx * dist_factor * (1.0 + 0.24 * pressure_idx))
+                    r["tx_count"] = -1
+                    fallback_count += 1
+
+            if not (r.get("avg_rent_sqm") and r.get("avg_rent_sqm") > 0):
+                base_lp_for_rent = r.get("avg_land_price_sqm") or r.get("avg_tx_price_sqm")
+                if base_lp_for_rent:
+                    y = station_yield_map.get(st) or default_yield
+                    y_adj = max(0.018, min(0.12, float(y) * (1.0 - 0.22 * pressure_idx)))
+                    est_rent = round(float(base_lp_for_rent) * y_adj / 12 * rent_pressure)
+                    est_rent = max(int(rent_min), min(int(rent_max), est_rent))
+                    r["avg_rent_sqm"] = est_rent
+                    r["rent_count"] = -1
+                    fallback_count += 1
+                else:
+                    # 最終保証値（全メッシュ定義）
+                    est_rent = round(HARD_DEFAULT_RENT * max(0.72, min(1.08, dist_factor)))
+                    r["avg_rent_sqm"] = max(int(rent_min), min(int(rent_max), est_rent))
+                    r["rent_count"] = -1
+                    fallback_count += 1
+
+            # 全領域定義の最終安全網
+            if not (r.get("avg_land_price_sqm") and r.get("avg_land_price_sqm") > 0):
+                r["avg_land_price_sqm"] = round(global_lp)
+                r["land_price_count"] = -1
+            if not (r.get("avg_tx_price_sqm") and r.get("avg_tx_price_sqm") > 0):
+                r["avg_tx_price_sqm"] = round(global_tx)
+                r["tx_count"] = -1
+            if not (r.get("avg_rent_sqm") and r.get("avg_rent_sqm") > 0):
+                y = station_yield_map.get(st) or default_yield
+                r["avg_rent_sqm"] = round(max(900, min(18000, float(r["avg_land_price_sqm"]) * float(y) / 12)))
+                r["rent_count"] = -1
+
+        logging.info(f"  空間補間完了: {interpolated_count}メッシュ推定値生成 / 最終補完: {fallback_count}項目")
 
         # DB保存（一括UPSERT、zoning/road列は既存値を保持）
         with db._conn() as conn:
@@ -3663,6 +4580,88 @@ async def layer_mesh_250m(
             WHERE center_lat BETWEEN ? AND ? AND center_lng BETWEEN ? AND ?
             LIMIT 15000
         """, (south, north, west, east)).fetchall()
+        station_rows = conn.execute("""
+            SELECT station_name, implied_yield, sample_count_rent, sample_count_land
+            FROM station_metrics
+            WHERE implied_yield > 0
+        """).fetchall()
+
+    station_yield_map = {}
+    station_yield_tx_map = {}
+    global_yields = []
+    global_yields_tx = []
+    for s in [dict(x) for x in station_rows]:
+        y = s.get("implied_yield")
+        if y is None:
+            continue
+        y = float(y)
+        if not (0.015 <= y <= 0.18):
+            continue
+        global_yields.append(y)
+        if (s.get("sample_count_rent") or 0) >= 5 and (s.get("sample_count_land") or 0) >= 3:
+            station_yield_map[s.get("station_name", "")] = y
+    global_yield = statistics.median(global_yields) if global_yields else 0.055
+
+    # 取引実績寄りの利回り基準（rent / tx_price）を同時に構築
+    tmp_station_tx = {}
+    for rr in [dict(x) for x in rows]:
+        tx0 = rr.get("avg_tx_price_sqm") or 0
+        rent0 = rr.get("avg_rent_sqm") or 0
+        tx_cnt0 = rr.get("tx_count") or 0
+        if tx0 <= 0 or rent0 <= 0:
+            continue
+        y_tx = (float(rent0) * 12.0) / float(tx0)
+        if not (0.015 <= y_tx <= 0.18):
+            continue
+        # 実観測取引を優先（推定tx_count=-1は弱め）
+        if tx_cnt0 > 0:
+            global_yields_tx.append(y_tx)
+            st0 = rr.get("nearest_station") or ""
+            tmp_station_tx.setdefault(st0, []).append(y_tx)
+    for st, ys in tmp_station_tx.items():
+        if len(ys) >= 3:
+            station_yield_tx_map[st] = statistics.median(ys)
+    global_yield_tx = statistics.median(global_yields_tx) if global_yields_tx else None
+
+    # 都心圧力（資金流入）を反映するための分位点
+    def _q(vals: list[float], q: float, default: float = 0.0) -> float:
+        if not vals:
+            return default
+        xs = sorted(vals)
+        i = int((len(xs) - 1) * max(0.0, min(1.0, q)))
+        return float(xs[i])
+
+    lp_vals = [float((dict(x).get("avg_land_price_sqm") or 0)) for x in rows if (dict(x).get("avg_land_price_sqm") or 0) > 0]
+    tx_vals = [float((dict(x).get("avg_tx_price_sqm") or 0)) for x in rows if (dict(x).get("avg_tx_price_sqm") or 0) > 0]
+    rent_vals = [float((dict(x).get("avg_rent_sqm") or 0)) for x in rows if (dict(x).get("avg_rent_sqm") or 0) > 0]
+    fac_vals = [float(((dict(x).get("school_count") or 0) + (dict(x).get("medical_count") or 0) + (dict(x).get("childcare_count") or 0))) for x in rows]
+    global_lp_median = statistics.median(lp_vals) if lp_vals else 220000.0
+    global_tx_median = statistics.median(tx_vals) if tx_vals else 240000.0
+    global_rent_median = statistics.median(rent_vals) if rent_vals else 3000.0
+    lp_p70, lp_p90 = _q(lp_vals, 0.70, 180000), _q(lp_vals, 0.90, 380000)
+    tx_p70, tx_p90 = _q(tx_vals, 0.70, 210000), _q(tx_vals, 0.90, 430000)
+    rent_min_clip, rent_max_clip = _q(rent_vals, 0.03, 800), _q(rent_vals, 0.97, 15000)
+    lp_min_clip, lp_max_clip = _q(lp_vals, 0.02, 50000), _q(lp_vals, 0.98, 5000000)
+    tx_min_clip, tx_max_clip = _q(tx_vals, 0.02, 50000), _q(tx_vals, 0.98, 5000000)
+    fac_p70 = _q(fac_vals, 0.70, 4.0)
+
+    def _rank_between(v: float, lo: float, hi: float) -> float:
+        if hi <= lo:
+            return 0.0
+        return max(0.0, min(1.0, (v - lo) / (hi - lo)))
+
+    def _tx_reliability_weight(tx_count_value: int) -> float:
+        """tx_count件数帯ごとの取引実績信頼度
+        1件: 弱、2-3件: 中、4件以上: 強
+        """
+        c = int(tx_count_value or 0)
+        if c >= 4:
+            return 0.78
+        if c >= 2:
+            return 0.58
+        if c >= 1:
+            return 0.38
+        return 0.18
 
     for r in [dict(x) for x in rows]:
         lp = r.get("avg_land_price_sqm") or 0
@@ -3682,32 +4681,215 @@ async def layer_mesh_250m(
         pop = r.get("pop_current") or 0
         pop_cr = r.get("pop_change_rate")
 
-        # 地価がなければ取引価格で代替（地価レイヤーの穴埋め）
-        effective_lp = lp or tx
+        # 取得信頼度に応じた取得価格（地価/取引の加重ブレンド）
+        lp_cnt = r.get("land_price_count") or 0
+        tx_cnt = r.get("tx_count") or 0
+        w_lp = 1.0 if lp_cnt > 0 else (0.6 if lp_cnt < 0 else 0.0)
+        w_tx = 0.9 if tx_cnt > 0 else (0.5 if tx_cnt < 0 else 0.0)
+        if lp > 0 and tx > 0 and (w_lp + w_tx) > 0:
+            effective_lp = (lp * w_lp + tx * w_tx) / (w_lp + w_tx)
+        else:
+            effective_lp = lp or tx
 
-        # 想定利回り = 賃料×12 / 地価 (地価と賃料が両方あるメッシュのみ)
-        implied_yield = None
-        if effective_lp > 0 and rent > 0:
-            implied_yield = round(rent * 12 / effective_lp * 100, 1)
+        # ---- 都心圧力による推定整合補正 ----
+        dkm = float(r.get("station_dist_km") or 0.9)
+        pop_cr = r.get("pop_change_rate")
+        pop_in = max(0.0, float(pop_cr) / 10.0) if pop_cr is not None else 0.0  # +10%で1.0
+        near_core = max(0.0, (1.2 - min(dkm, 1.2)) / 1.2)
+        fac_total = (r.get("school_count") or 0) + (r.get("medical_count") or 0) + (r.get("childcare_count") or 0)
+        fac_rank = _rank_between(float(fac_total), fac_p70, max(fac_p70 + 3.0, fac_p70 * 1.8))
+        lp_rank = _rank_between(float(effective_lp or 0), lp_p70, max(lp_p90, lp_p70 + 1))
+        tx_rank = _rank_between(float(tx or 0), tx_p70, max(tx_p90, tx_p70 + 1))
+        pressure = max(0.0, min(1.0, 0.33 * lp_rank + 0.26 * tx_rank + 0.22 * pop_in + 0.14 * near_core + 0.05 * fac_rank))
+        speculative_heat = max(0.0, min(1.0, ((float(tx or 0) / max(float(effective_lp or 1), 1.0)) - 1.02) / 0.20))
+
+        # ほかのレイヤーも整合するよう、推定値を中心に価格先行バイアスを付与
+        is_lp_est = (r.get("land_price_count") or 0) < 0
+        is_tx_est = (r.get("tx_count") or 0) < 0
+        is_rent_est = (r.get("rent_count") or 0) < 0
+        if is_lp_est and effective_lp:
+            effective_lp = float(effective_lp) * (1.0 + 0.18 * pressure + 0.08 * speculative_heat)
+        if is_tx_est and tx:
+            tx = float(tx) * (1.0 + 0.24 * pressure + 0.14 * speculative_heat)
+        if is_rent_est and rent:
+            rent = float(rent) * (1.0 + 0.08 * pressure)
+        if effective_lp:
+            effective_lp = max(lp_min_clip, min(lp_max_clip, float(effective_lp)))
+        if tx:
+            tx = max(tx_min_clip, min(tx_max_clip, float(tx)))
+        if rent:
+            rent = max(rent_min_clip, min(rent_max_clip, float(rent)))
+
+        # 想定利回り（正味）
+        yield_estimated_fallback = False
+        tx_rel = _tx_reliability_weight(tx_cnt)
+        # 利回り算定の分母価格は、取引実績がある場合は取引単価を優先
+        if tx and tx > 0 and tx_cnt > 0:
+            # 件数が少ないときは地価系と混合してブレを抑制
+            if effective_lp and effective_lp > 0:
+                yield_lp = float(tx) * tx_rel + float(effective_lp) * (1.0 - tx_rel)
+            else:
+                yield_lp = float(tx)
+        elif tx and tx > 0 and effective_lp:
+            # 推定txは実勢寄りにするため混合
+            yield_lp = float(effective_lp) * 0.55 + float(tx) * 0.45
+        else:
+            yield_lp = effective_lp
+        yield_rent = rent
+        st_name = r.get("nearest_station") or ""
+        yref_station_tx = station_yield_tx_map.get(st_name)
+        yref_station_lp = station_yield_map.get(st_name)
+        # 取引実績基準を強める（存在時は優先、なければ既存基準）
+        if yref_station_tx and yref_station_lp:
+            yref = yref_station_tx * 0.70 + yref_station_lp * 0.30
+        elif yref_station_tx:
+            yref = yref_station_tx
+        elif yref_station_lp:
+            yref = yref_station_lp
+        elif global_yield_tx:
+            yref = global_yield_tx * 0.70 + global_yield * 0.30
+        else:
+            yref = global_yield
+
+        # 片側欠損は駅別/全体利回りで逆算（利回りレイヤー埋め）
+        if not (yield_lp > 0 and yield_rent > 0):
+            if yref and yref > 0:
+                if yield_lp > 0 and yield_rent <= 0:
+                    yield_rent = yield_lp * yref / 12
+                    yield_estimated_fallback = True
+                elif yield_rent > 0 and yield_lp <= 0:
+                    yield_lp = yield_rent * 12 / yref
+                    yield_estimated_fallback = True
+
+        implied_yield = None  # 表面
+        net_yield = None      # 正味
+        if yield_lp > 0 and yield_rent > 0:
+            implied_yield = round(yield_rent * 12 / yield_lp * 100, 1)
+        elif yref and yref > 0:
+            implied_yield = round(yref * 100, 1)
+            yield_estimated_fallback = True
+
+        # 外れ値補正（実態に沿う帯域へ収束）
+        if implied_yield is not None:
+            if implied_yield < 1.5 or implied_yield > 20.0:
+                if yref and yref > 0:
+                    implied_yield = round(yref * 100, 1)
+                    yield_estimated_fallback = True
+                else:
+                    implied_yield = max(1.5, min(20.0, implied_yield))
+
+        # 取引実績がある場合は、推定利回りを取引基準へ寄せる
+        if implied_yield is not None and tx and tx > 0 and yield_rent and yield_rent > 0:
+            y_tx_now = (float(yield_rent) * 12.0 / float(tx)) * 100.0
+            if 1.5 <= y_tx_now <= 20.0:
+                # 件数帯で段階化（1件/2-3件/4件以上）
+                if tx_cnt >= 4:
+                    trust = 0.68
+                elif tx_cnt >= 2:
+                    trust = 0.52
+                elif tx_cnt >= 1:
+                    trust = 0.34
+                else:
+                    trust = 0.22
+                implied_yield = round(float(implied_yield) * (1.0 - trust) + y_tx_now * trust, 1)
+
+        # 資金流入・投機熱の強いエリアは利回りを圧縮
+        if implied_yield is not None:
+            compress = max(0.55, 1.0 - (0.34 * pressure + 0.22 * speculative_heat))
+            implied_yield = round(implied_yield * compress, 1)
+            if pressure >= 0.80:
+                implied_yield = min(implied_yield, 4.6)
+            elif pressure >= 0.65:
+                implied_yield = min(implied_yield, 5.0)
+            elif pressure >= 0.50:
+                implied_yield = min(implied_yield, 5.8)
+            # 都心・高価格帯はさらに上限を厳格化
+            if near_core >= 0.65 and (lp_rank >= 0.70 or tx_rank >= 0.70):
+                implied_yield = min(implied_yield, 4.8)
+            elif near_core >= 0.50 and (lp_rank >= 0.55 or tx_rank >= 0.55):
+                implied_yield = min(implied_yield, 5.4)
+            if speculative_heat >= 0.60 and lp_rank >= 0.60:
+                implied_yield = min(implied_yield, 4.6)
+            # 高価格帯そのものに上限を適用（都心判定を駅距離に依存しすぎない）
+            if pressure >= 0.35 and (lp_rank >= 0.70 or tx_rank >= 0.70):
+                implied_yield = min(implied_yield, 5.4)
+            if lp_rank >= 0.85 or tx_rank >= 0.85:
+                implied_yield = min(implied_yield, 5.0)
+            if lp_rank >= 0.92 and tx_rank >= 0.80:
+                implied_yield = min(implied_yield, 4.6)
+            # 絶対単価ベースの都心上限
+            if effective_lp and effective_lp >= lp_p70 and dkm <= 1.2:
+                implied_yield = min(implied_yield, 5.8)
+            if effective_lp and effective_lp >= lp_p90 and dkm <= 1.0:
+                implied_yield = min(implied_yield, 5.0)
+            if (pop_cr is not None and float(pop_cr) >= 0.0) and dkm <= 0.8:
+                implied_yield = min(implied_yield, 5.2)
+            implied_yield = max(1.6, min(14.0, implied_yield))
+
+        if implied_yield:
+            # メッシュ正味利回り: 共通経費 + 立地/人口リスク補正
+            expense = (
+                VACANCY_RATE + MANAGEMENT_FEE_RATE + REPAIR_RESERVE_RATE
+                + INSURANCE_RATE + PROPERTY_TAX_RATE + CITY_PLANNING_TAX_RATE
+            )
+            if dkm > 0.8:
+                expense += min(0.06, (dkm - 0.8) * 0.03)
+            if pop_cr is not None and pop_cr < 0:
+                expense += min(0.04, abs(float(pop_cr)) / 100 * 0.6)
+            # 人気化・投機化エリアは運営難易度と取得競争を加味
+            expense += min(0.03, 0.012 * pressure + 0.010 * speculative_heat)
+            net_yield = round(implied_yield * max(0.55, (1 - expense)), 1)
+            if pressure >= 0.80:
+                net_yield = min(net_yield, 3.6)
+            elif pressure >= 0.65:
+                net_yield = min(net_yield, 4.2)
+            if lp_rank >= 0.85 or tx_rank >= 0.85:
+                net_yield = min(net_yield, 3.8)
+            net_yield = max(0.8, min(12.0, net_yield))
 
         # 施設密度
         fac_total = (r.get("school_count") or 0) + (r.get("medical_count") or 0) + (r.get("childcare_count") or 0)
 
         # 表示値とカラー計算
         value = 0
+        hard_fallback_used = False
         if metric == "land_price":
             value = effective_lp  # 地価なしなら取引価格でフォールバック
+            if not value:
+                if tx and tx > 0:
+                    value = tx
+                elif rent and rent > 0 and yref and yref > 0:
+                    value = (rent * 12) / yref
+                else:
+                    value = global_lp_median
+                hard_fallback_used = True
         elif metric == "rent":
             value = rent
+            if not value:
+                if effective_lp and effective_lp > 0 and yref and yref > 0:
+                    value = effective_lp * yref / 12
+                elif tx and tx > 0 and yref and yref > 0:
+                    value = tx * yref / 12
+                else:
+                    value = global_rent_median
+                hard_fallback_used = True
         elif metric == "tx_price":
             value = tx
+            if not value:
+                if effective_lp and effective_lp > 0:
+                    value = effective_lp
+                elif rent and rent > 0 and yref and yref > 0:
+                    value = (rent * 12) / yref
+                else:
+                    value = global_tx_median
+                hard_fallback_used = True
         elif metric == "population":
             value = pop_cr if pop_cr is not None else 0
         elif metric == "pop_density":
             # 人口密度: 250mメッシュ(0.0625km²)あたりの人口 → 人/km²
             value = round(pop * 16) if pop else 0
         elif metric == "yield":
-            value = implied_yield or 0
+            value = net_yield or implied_yield or 0
         elif metric == "facility":
             value = fac_total
         elif metric == "zoning":
@@ -3726,7 +4908,9 @@ async def layer_mesh_250m(
         elif metric == "tx_price":
             is_estimated = (r.get("tx_count") or 0) < 0
         elif metric == "yield":
-            is_estimated = ((r.get("land_price_count") or 0) < 0) or ((r.get("rent_count") or 0) < 0)
+            is_estimated = ((r.get("land_price_count") or 0) < 0) or ((r.get("rent_count") or 0) < 0) or yield_estimated_fallback
+        if hard_fallback_used:
+            is_estimated = True
 
         features.append({
             "type": "Feature",
@@ -3738,7 +4922,11 @@ async def layer_mesh_250m(
                 "land_price": round(effective_lp) if effective_lp else None,
                 "rent": round(rent) if rent else None,
                 "tx_price": round(tx) if tx else None,
-                "yield": implied_yield,
+                "yield": net_yield if net_yield is not None else implied_yield,
+                "gross_yield": implied_yield,
+                "net_yield": net_yield,
+                "pressure_index": round(pressure, 3),
+                "speculative_heat": round(speculative_heat, 3),
                 "pop": round(pop) if pop else None,
                 "pop_density": round(pop * 16) if pop else None,
                 "pop_change": pop_cr,
@@ -4529,19 +5717,7 @@ async def layer_zoning_points(
     south: float = 35.5, west: float = 139.3,
     north: float = 36.0, east: float = 140.2,
 ):
-    """用途地域を事実ベース（個別地点）で返す。api_land_pricesのzoning情報を活用"""
-    features = []
-    with db._conn() as conn:
-        rows = conn.execute("""
-            SELECT latitude, longitude, zoning, coverage, far,
-                   place_name, price_per_sqm, station, fire_prevention
-            FROM api_land_prices
-            WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
-            AND zoning IS NOT NULL AND zoning != ''
-            LIMIT 5000
-        """, (south, north, west, east)).fetchall()
-
-    # 用途地域カラーマップ
+    """用途地域を領域ポリゴンで返す（XKT002 GeoJSONベース）"""
     zoning_colors = {
         '第一種低層住居専用地域': '#81c784', '第二種低層住居専用地域': '#a5d6a7',
         '第一種中高層住居専用地域': '#4caf50', '第二種中高層住居専用地域': '#66bb6a',
@@ -4550,29 +5726,140 @@ async def layer_zoning_points(
         '近隣商業地域': '#ffb74d', '商業地域': '#ff9800',
         '準工業地域': '#90a4ae', '工業地域': '#78909c', '工業専用地域': '#546e7a',
     }
+    cache_key = (round(south, 3), round(west, 3), round(north, 3), round(east, 3))
+    if not hasattr(layer_zoning_points, "_cache"):
+        layer_zoning_points._cache = {}
+    cache = layer_zoning_points._cache
+    now_ts = datetime.now().timestamp()
+    ttl_sec = 60 * 60 * 6
+    if cache_key in cache and now_ts - cache[cache_key]["ts"] < ttl_sec:
+        return JSONResponse(content=cache[cache_key]["data"])
 
-    for r in [dict(x) for x in rows]:
-        z = r.get("zoning", "")
-        color = zoning_colors.get(z, '#b0bec5')
-        features.append({
-            "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [r["longitude"], r["latitude"]]},
-            "properties": {
-                "zoning": z,
-                "color": color,
-                "coverage": r.get("coverage") or "",
-                "far": r.get("far") or "",
-                "place": r.get("place_name") or "",
-                "price": r.get("price_per_sqm") or 0,
-                "station": r.get("station") or "",
-                "fire_prevention": r.get("fire_prevention") or "",
-            },
-        })
+    def _pick(props: dict, keys: list[str]) -> str:
+        for k in keys:
+            v = props.get(k)
+            if v:
+                return str(v)
+        return ""
 
-    return JSONResponse(content={
+    def _norm_zoning(z: str) -> str:
+        z = (z or "").strip()
+        if not z:
+            return ""
+        # API表記ゆれを主要名称に寄せる
+        if "第一種低層" in z:
+            return "第一種低層住居専用地域"
+        if "第二種低層" in z:
+            return "第二種低層住居専用地域"
+        if "第一種中高層" in z:
+            return "第一種中高層住居専用地域"
+        if "第二種中高層" in z:
+            return "第二種中高層住居専用地域"
+        if "第一種住居" in z:
+            return "第一種住居地域"
+        if "第二種住居" in z:
+            return "第二種住居地域"
+        if "準住居" in z:
+            return "準住居地域"
+        if "近隣商業" in z:
+            return "近隣商業地域"
+        if "商業" in z:
+            return "商業地域"
+        if "準工業" in z:
+            return "準工業地域"
+        if "工業専用" in z:
+            return "工業専用地域"
+        if "工業" in z:
+            return "工業地域"
+        return z
+
+    from data.reinfolib_client import ReinfolibClient
+    client = ReinfolibClient()
+    features = []
+    if client.is_configured():
+        try:
+            zoom = 15
+            tiles = client._bounds_to_tiles(south, west, north, east, zoom)
+            if len(tiles) > 80:
+                tiles = tiles[:80]
+            raw = client._multi_tile_request(
+                "XKT002",
+                tiles,
+                extra_params={"z": str(zoom)},
+                cache_hours=24 * 7,
+            )
+            for f in raw:
+                geom = f.get("geometry") or {}
+                gtype = geom.get("type")
+                if gtype not in ("Polygon", "MultiPolygon"):
+                    continue
+                props = f.get("properties", {}) or {}
+                zoning = _norm_zoning(_pick(props, [
+                    "use_area_ja", "用途地域名", "land_use_ja", "用途地域",
+                ]))
+                if not zoning:
+                    continue
+                features.append({
+                    "type": "Feature",
+                    "geometry": geom,
+                    "properties": {
+                        "zoning": zoning,
+                        "color": zoning_colors.get(zoning, "#b0bec5"),
+                        "coverage": _pick(props, ["u_building_coverage_ratio_ja", "building_coverage_ratio", "建蔽率"]),
+                        "far": _pick(props, ["u_floor_area_ratio_ja", "floor_area_ratio", "容積率"]),
+                        "fire_prevention": _pick(props, ["fire_prevention_ja", "防火地域"]),
+                    },
+                })
+        except Exception as e:
+            logging.warning(f"zoning polygon fetch failed: {e}")
+
+    # API未設定/取得失敗時は既存DB点群から250m疑似ポリゴンを返す
+    if not features:
+        with db._conn() as conn:
+            rows = conn.execute("""
+                SELECT latitude, longitude, zoning, coverage, far,
+                       place_name, price_per_sqm, station, fire_prevention
+                FROM api_land_prices
+                WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
+                AND zoning IS NOT NULL AND zoning != ''
+                LIMIT 5000
+            """, (south, north, west, east)).fetchall()
+        d_lat = 0.00208 / 2
+        d_lng = 0.003125 / 2
+        for r in [dict(x) for x in rows]:
+            z = _norm_zoning(r.get("zoning", ""))
+            if not z:
+                continue
+            lat = r["latitude"]
+            lng = r["longitude"]
+            poly = [
+                [lng - d_lng, lat - d_lat],
+                [lng + d_lng, lat - d_lat],
+                [lng + d_lng, lat + d_lat],
+                [lng - d_lng, lat + d_lat],
+                [lng - d_lng, lat - d_lat],
+            ]
+            features.append({
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": [poly]},
+                "properties": {
+                    "zoning": z,
+                    "color": zoning_colors.get(z, '#b0bec5'),
+                    "coverage": r.get("coverage") or "",
+                    "far": r.get("far") or "",
+                    "place": r.get("place_name") or "",
+                    "price": r.get("price_per_sqm") or 0,
+                    "station": r.get("station") or "",
+                    "fire_prevention": r.get("fire_prevention") or "",
+                },
+            })
+
+    data = {
         "type": "FeatureCollection", "features": features,
-        "_meta": {"count": len(features)},
-    })
+        "_meta": {"count": len(features), "mode": "polygon"},
+    }
+    cache[cache_key] = {"ts": now_ts, "data": data}
+    return JSONResponse(content=data)
 
 
 @app.get("/api/layers/railway-lines")
@@ -4582,12 +5869,6 @@ async def layer_railway_lines(
 ):
     """路線別に色分けした駅ポイントを返す（公式ラインカラー準拠）"""
     features = []
-
-    # station_masterのハードコード順序を取得（路線の正しい駅順）
-    from data.station_master import STATIONS as _SM_STATIONS
-    station_order = {}  # station_name -> (line, order_idx)
-    for i, s in enumerate(_SM_STATIONS):
-        station_order[s["name"]] = {"line": s.get("line", ""), "order": i}
 
     with db._conn() as conn:
         rows = conn.execute("""
@@ -4740,107 +6021,150 @@ async def layer_railway_lines(
             return DISPLAY_NAME_MAP[base]
         return line_name
 
+    def _split_lines(raw_line: str) -> list[str]:
+        if not raw_line:
+            return []
+        parts = re.split(r"[;／/,|]+", raw_line)
+        return [p.strip() for p in parts if p and p.strip()]
+
     line_color_map = {}
+    # 実線路レイヤー: OSM Overpass から取得（駅間擬似接続は廃止）
+    if not hasattr(layer_railway_lines, "_cache"):
+        layer_railway_lines._cache = {}
+    cache = layer_railway_lines._cache
+    import time
+    cache_key = (round(south, 3), round(west, 3), round(north, 3), round(east, 3))
+    now_ts = time.time()
+    if cache_key in cache and now_ts - cache[cache_key]["ts"] < 3600:
+        return JSONResponse(content=cache[cache_key]["data"])
 
-    # 乗換駅判定（同名駅に複数路線）
-    station_line_map = {}
-    prepared_rows = [dict(x) for x in rows]
-    for rr in prepared_rows:
-        nm = rr.get("station_name")
-        if not nm:
+    lat_range = north - south
+    lng_range = east - west
+    track_enabled = True
+    # 広域表示ではOverpass負荷が高いため、駅表示のみ（実線路は近接ズーム時）
+    if lat_range > 0.12 or lng_range > 0.12:
+        track_enabled = False
+    elif lat_range > 0.06 or lng_range > 0.06:
+        clat = (south + north) / 2
+        clng = (west + east) / 2
+        south, north = clat - 0.03, clat + 0.03
+        west, east = clng - 0.03, clng + 0.03
+
+    import requests
+    track_features = []
+    query = (
+        f"[out:json][timeout:25];"
+        f"way[railway~\"rail|subway|light_rail|monorail|tram\"]({south},{west},{north},{east});"
+        f"out tags geom;"
+    )
+    OVERPASS_MIRRORS = [
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass-api.de/api/interpreter",
+    ]
+    if track_enabled:
+        for ep in OVERPASS_MIRRORS:
+            try:
+                resp = requests.post(ep, data={"data": query}, timeout=3)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                elements = data.get("elements", [])
+                for e in elements:
+                    geom = e.get("geometry") or []
+                    if len(geom) < 2:
+                        continue
+                    tags = e.get("tags", {}) or {}
+                    raw_name = (
+                        tags.get("name:ja")
+                        or tags.get("line")
+                        or tags.get("ref")
+                        or tags.get("name")
+                        or tags.get("operator")
+                        or tags.get("network")
+                        or "不明"
+                    )
+                    line_name = _display_name(str(raw_name))
+                    color = _resolve_color(str(raw_name))
+                    line_color_map.setdefault(line_name, color)
+                    track_features.append({
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [[p["lon"], p["lat"]] for p in geom if "lat" in p and "lon" in p],
+                        },
+                        "properties": {
+                            "feature_kind": "track",
+                            "line": line_name,
+                            "color": color,
+                            "railway": tags.get("railway", ""),
+                            "operator": tags.get("operator", ""),
+                            "ref": tags.get("ref", ""),
+                        },
+                    })
+                if track_features:
+                    break
+            except Exception:
+                continue
+
+    # 乗換ハブ作成（同一駅に複数路線）
+    hub_map = {}
+    for n in [dict(x) for x in rows]:
+        name = n.get("station_name", "")
+        lat = n.get("latitude")
+        lng = n.get("longitude")
+        if not name or lat is None or lng is None:
             continue
-        station_line_map.setdefault(nm, set())
-        raw = rr.get("line_name", "") or ""
-        if ";" in raw:
-            for part in [p.strip() for p in raw.split(";") if p.strip()]:
-                station_line_map[nm].add(_display_name(part))
-        elif raw:
-            station_line_map[nm].add(_display_name(raw))
-
-    for r in prepared_rows:
-        name = r["station_name"]
-        raw_line = r.get("line_name", "") or ""
-
-        # ハードコード駅なら正確な路線名と順序を使う
-        sm = station_order.get(name)
-        if sm and sm["line"]:
-            display_line = sm["line"]
-            color = _resolve_color(sm["line"])
-            order = sm["order"]
-        else:
-            display_line = _display_name(raw_line)
-            color = _resolve_color(raw_line)
-            order = 99999  # 拡張駅は末尾
-
-        if display_line not in line_color_map:
-            line_color_map[display_line] = color
-
-        transfer_lines = sorted(station_line_map.get(name, set()))
-        is_transfer = len(transfer_lines) >= 2
-
-        features.append({
-            "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [r["longitude"], r["latitude"]]},
-            "properties": {
+        hub_key = f"{name}|{round(lat, 5)}|{round(lng, 5)}"
+        if hub_key not in hub_map:
+            hub_map[hub_key] = {
                 "name": name,
-                "line": display_line,
+                "lat": lat,
+                "lng": lng,
+                "lines": set(),
+            }
+        split = _split_lines(n.get("line_name", "") or "")
+        if split:
+            for one in split:
+                hub_map[hub_key]["lines"].add(_display_name(one))
+        elif n.get("line_name"):
+            hub_map[hub_key]["lines"].add(_display_name(n.get("line_name")))
+
+    station_features = []
+    for h in hub_map.values():
+        lines = sorted(h["lines"])
+        primary = lines[0] if lines else "不明"
+        color = _resolve_color(primary)
+        line_color_map.setdefault(primary, color)
+        station_features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [h["lng"], h["lat"]]},
+            "properties": {
+                "name": h["name"],
+                "line": primary,
+                "lines": lines,
                 "color": color,
-                "order": order,
                 "feature_kind": "station",
-                "is_transfer": is_transfer,
-                "transfer_count": len(transfer_lines),
-                "transfer_lines": transfer_lines[:8],
+                "is_transfer": len(lines) >= 2,
+                "transfer_count": len(lines),
+                "transfer_lines": lines[:12],
             },
         })
 
-    # 同一路線で隣接駅を結ぶセグメントを返す（駅接続を明示）
-    line_points = {}
-    for f in features:
-        p = f["properties"]
-        if p.get("feature_kind") != "station":
-            continue
-        line = p.get("line") or "不明"
-        line_points.setdefault(line, []).append({
-            "order": p.get("order", 99999),
-            "color": p.get("color", "#90a4ae"),
-            "coord": f["geometry"]["coordinates"],
-        })
-
-    line_features = []
-    for line_name, pts in line_points.items():
-        # 路線名が抽象的なものは点表示のみ（誤接続防止）
-        if not any(k in line_name for k in ("線", "ライン", "モノレール", "りんかい", "ゆりかもめ", "エクスプレス")):
-            continue
-
-        ordered = sorted(pts, key=lambda x: x["order"])
-        if len(ordered) < 2:
-            continue
-
-        for i in range(len(ordered) - 1):
-            a = ordered[i]["coord"]
-            b = ordered[i + 1]["coord"]
-            line_features.append({
-                "type": "Feature",
-                "geometry": {"type": "LineString", "coordinates": [a, b]},
-                "properties": {
-                    "line": line_name,
-                    "color": ordered[i]["color"],
-                    "feature_kind": "segment",
-                    "order": i,
-                },
-            })
-
-    features = line_features + features
-
-    return JSONResponse(content={
+    features = track_features + station_features
+    data = {
         "type": "FeatureCollection", "features": features,
         "_meta": {
             "count": len(features),
-            "stations": sum(1 for f in features if f["properties"].get("feature_kind") == "station"),
-            "segments": sum(1 for f in features if f["properties"].get("feature_kind") == "segment"),
+            "stations": len(station_features),
+            "segments": len(track_features),  # 互換維持: frontendはsegmentsとして扱う
+            "tracks": len(track_features),
+            "track_enabled": track_enabled,
+            "transfer_stations": sum(1 for f in station_features if f["properties"].get("is_transfer")),
             "lines": line_color_map,
         },
-    })
+    }
+    cache[cache_key] = {"ts": now_ts, "data": data}
+    return JSONResponse(content=data)
 
 
 # ===== 道路種別レイヤー（Overpass API） =====
@@ -5180,6 +6504,10 @@ async def mesh_coverage():
         has_pop = conn.execute("SELECT COUNT(*) FROM mesh_250m WHERE pop_current IS NOT NULL").fetchone()[0]
         has_zoning = conn.execute("SELECT COUNT(*) FROM mesh_250m WHERE zoning IS NOT NULL AND zoning != ''").fetchone()[0]
 
+    fill_land = round((has_lp + est_lp) / max(total, 1) * 100, 1)
+    fill_rent = round((has_rent + est_rent) / max(total, 1) * 100, 1)
+    fill_tx = round((has_tx + est_tx) / max(total, 1) * 100, 1)
+
     return JSONResponse(content={
         "total_meshes": total,
         "coverage": {
@@ -5190,9 +6518,19 @@ async def mesh_coverage():
             "zoning": has_zoning,
         },
         "fill_rate": {
-            "land_price": round((has_lp + est_lp) / max(total, 1) * 100, 1),
-            "rent": round((has_rent + est_rent) / max(total, 1) * 100, 1),
-            "transactions": round((has_tx + est_tx) / max(total, 1) * 100, 1),
+            "land_price": fill_land,
+            "rent": fill_rent,
+            "transactions": fill_tx,
+        },
+        "target_fill_rate": {
+            "land_price": 100.0,
+            "rent": 100.0,
+            "transactions": 100.0,
+        },
+        "remaining_to_target": {
+            "land_price": max(0, total - (has_lp + est_lp)),
+            "rent": max(0, total - (has_rent + est_rent)),
+            "transactions": max(0, total - (has_tx + est_tx)),
         },
     })
 

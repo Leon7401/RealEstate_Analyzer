@@ -8,16 +8,23 @@ from dotenv import load_dotenv
 
 # ===== プロジェクトパス =====
 BASE_DIR = Path(__file__).resolve().parent.parent
-OUTPUT_DIR = BASE_DIR / "output"
+OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", str(BASE_DIR / "output")))
 CACHE_DIR = OUTPUT_DIR / "cache"
 LOG_DIR = OUTPUT_DIR / "logs"
 REPORT_DIR = OUTPUT_DIR / "reports"
 DATA_DIR = BASE_DIR / "data" / "samples"
-DB_PATH = BASE_DIR / "output" / "realestate.db"
+DB_PATH = Path(os.environ.get("DB_PATH", str(OUTPUT_DIR / "realestate.db")))
 
 # ===== バッチ処理設定 =====
 BATCH_UPDATE_INTERVAL_HOURS = 24    # 自動更新間隔（時間）
 BATCH_TARGET_PREFECTURES = ["13", "14", "11", "12"]   # 一都三県
+RENTAL_REFRESH_INTERVAL_HOURS = 3   # 賃料データ定期更新間隔
+RENTAL_REFRESH_MAX_PAGES = 8        # 賃料スクレイピング深度（県あたり）
+RENTAL_REFRESH_GEOCODE_BATCH = 1500 # 賃料ジオコード補完件数/回
+PROPERTY_REFRESH_INTERVAL_HOURS = 6  # 既存建物物件の定期スクレイピング間隔
+PROPERTY_REFRESH_MAX_PAGES = 5       # 既存建物スクレイピング深度（県あたり）
+PROPERTY_ANALYZE_LIMIT = 60          # 定期分析で判定する件数（最新順）
+PROPERTY_ANALYZE_INCLUDE_REBUILD = True  # 既存建物の建替え比較を実施
 
 # ===== 駅紐づけ設定 =====
 STATION_MAX_DISTANCE_KM = 2.0      # 最寄り駅として紐づける最大距離(km)
@@ -356,8 +363,8 @@ ASSET_SCORE_WEIGHTS = {
 LOG_LEVEL = "INFO"
 
 # ===== Web設定 =====
-WEB_HOST = "127.0.0.1"
-WEB_PORT = 8080
+WEB_HOST = os.environ.get("WEB_HOST", "0.0.0.0")
+WEB_PORT = int(os.environ.get("WEB_PORT", os.environ.get("PORT", "8080")))
 MAP_DEFAULT_CENTER = [35.6812, 139.7671]  # 東京駅
 MAP_DEFAULT_ZOOM = 12
 

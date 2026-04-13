@@ -1354,3 +1354,130 @@ def _guess_prefecture(address: str) -> str:
     if "埼玉" in address: return "11"
     if "千葉" in address: return "12"
     return "13"  # デフォルト
+
+
+class MeshGrowthPipeline:
+    """メッシュヒートマップのデータ充填率を継続的に向上させるパイプライン
+
+    1. 賃料スクレイピング（SUUMO: 全県全エリア巡回）
+    2. 座標なしレコードのジオコード
+    3. API地価・人口取込
+    4. メッシュ再集計+空間補間
+    """
+
+    def __init__(self):
+        self.db = Database()
+
+    def run(self, prefectures=None, max_rental_pages=5, geocode_batch=200):
+        """フルパイプライン実行"""
+        prefectures = prefectures or BATCH_TARGET_PREFECTURES
+        logger.info(f"=== MeshGrowthPipeline開始: {prefectures} ===")
+
+        # Step 1: 賃料スクレイピング（最大のボトルネック）
+        self._scrape_rentals(prefectures, max_rental_pages)
+
+        # Step 2: 座標なしレコードのジオコード
+        self._geocode_missing(geocode_batch)
+
+        # Step 3: メッシュ再集計 + 空間補間（HTTP経由）
+        self._trigger_mesh_recompute()
+
+        # Step 4: カバレッジログ
+        self._log_coverage()
+
+        logger.info("=== MeshGrowthPipeline完了 ===")
+
+    def _scrape_rentals(self, prefectures, max_pages):
+        """全県の賃料データをSUUMOからスクレイピング"""
+        from agents.scraper_agent import ScraperAgent
+        scraper = ScraperAgent()
+
+        for pref in prefectures:
+            logger.info(f"  賃料スクレイピング: pref={pref}")
+            try:
+                results = scraper.scrape_rentals(
+                    prefecture_code=pref,
+                    max_pages=max_pages,
+                )
+                if results:
+                    saved = self.db.upsert_rental_comps(results)
+                    logger.info(f"    → {len(results)}件取得, {saved}件保存")
+                else:
+                    logger.info(f"    → 0件")
+            except Exception as e:
+                logger.error(f"    賃料スクレイピングエラー (pref={pref}): {e}")
+
+    def _geocode_missing(self, batch_size):
+        """座標なし賃料レコードをジオコード"""
+        import time
+        with self.db._conn() as conn:
+            rows = conn.execute("""
+                SELECT id, address, nearest_station FROM rental_comps
+                WHERE (latitude IS NULL OR latitude = 0) AND address != ''
+                LIMIT ?
+            """, (batch_size,)).fetchall()
+
+        if not rows:
+            logger.info("  ジオコード対象なし")
+            return
+
+        logger.info(f"  ジオコード開始: {len(rows)}件")
+        geocoded = 0
+
+        for r in [dict(x) for x in rows]:
+            try:
+                lat, lng = self._geocode_address(r["address"])
+                if lat and lng:
+                    with self.db._conn() as conn:
+                        conn.execute(
+                            "UPDATE rental_comps SET latitude=?, longitude=? WHERE id=?",
+                            (lat, lng, r["id"]),
+                        )
+                    geocoded += 1
+                time.sleep(0.5)  # API rate limit
+            except Exception:
+                continue
+
+        logger.info(f"  ジオコード完了: {geocoded}/{len(rows)}件")
+
+    def _geocode_address(self, address):
+        """国土地理院ジオコーディングAPI"""
+        import requests
+        try:
+            resp = requests.get(
+                "https://msearch.gsi.go.jp/address-search/AddressSearch",
+                params={"q": address},
+                timeout=5,
+            )
+            data = resp.json()
+            if data and len(data) > 0:
+                coords = data[0].get("geometry", {}).get("coordinates", [])
+                if len(coords) >= 2:
+                    return coords[1], coords[0]  # lat, lng
+        except Exception:
+            pass
+        return None, None
+
+    def _trigger_mesh_recompute(self):
+        """メッシュ再集計をトリガー（HTTP経由: サーバープロセス内で非同期実行）"""
+        import requests as req
+        try:
+            from config.settings import WEB_PORT
+            resp = req.post(f"http://127.0.0.1:{WEB_PORT}/api/mesh/compute", timeout=5)
+            logger.info(f"  メッシュ再集計トリガー: {resp.status_code}")
+        except Exception:
+            logger.info("  メッシュ再集計: サーバー未起動のためスキップ")
+
+    def _log_coverage(self):
+        """現在のカバレッジをログ出力"""
+        with self.db._conn() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM mesh_250m").fetchone()[0]
+            for metric, col, cnt_col in [
+                ("rent", "avg_rent_sqm", "rent_count"),
+                ("land_price", "avg_land_price_sqm", "land_price_count"),
+                ("transactions", "avg_tx_price_sqm", "tx_count"),
+            ]:
+                obs = conn.execute(f"SELECT COUNT(*) FROM mesh_250m WHERE {col} IS NOT NULL AND {cnt_col} > 0").fetchone()[0]
+                est = conn.execute(f"SELECT COUNT(*) FROM mesh_250m WHERE {cnt_col} = -1").fetchone()[0]
+                pct = (obs + est) / max(total, 1) * 100
+                logger.info(f"  coverage {metric}: obs={obs} est={est} ({pct:.1f}%)")

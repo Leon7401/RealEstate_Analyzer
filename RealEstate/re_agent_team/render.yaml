@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: re-agent-team
+    env: python
+    rootDir: RealEstate/re_agent_team
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /healthz
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn web.app:app --host 0.0.0.0 --port $PORT
+    disk:
+      name: re-agent-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: OUTPUT_DIR
+        value: /var/data
+      - key: DB_PATH
+        value: /var/data/realestate.db
+      - key: WEB_HOST
+        value: 0.0.0.0
+      - key: WEB_PORT
+        value: 10000
+      - key: PYTHON_VERSION
+        value: 3.11.9

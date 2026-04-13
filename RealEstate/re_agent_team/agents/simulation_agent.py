@@ -88,6 +88,20 @@ class SimulationAgent(BaseAgent):
             land_for_sim = est_land
             bldg_for_sim = est_bldg
 
+        # 動的前提の最適化（現況・立地・市場利回りに合わせて自動調整）
+        dyn = self._optimize_dynamic_assumptions(
+            property=property,
+            valuation=valuation,
+            purchase_price=purchase_price,
+            annual_rent=annual_rent,
+            loan_amount=loan_amount,
+            loan_rate=loan_rate,
+            loan_term=loan_term,
+            initial_investment=initial_investment,
+            land_value=land_for_sim,
+            building_value=bldg_for_sim,
+        )
+
         # 年次予測
         projections = self._project_cashflows(
             purchase_price=purchase_price,
@@ -97,6 +111,10 @@ class SimulationAgent(BaseAgent):
             loan_term=loan_term,
             land_value=land_for_sim,
             building_value=bldg_for_sim,
+            rent_decline=dyn["rent_decline"],
+            land_growth=dyn["land_growth"],
+            vacancy=dyn["vacancy"],
+            expense_rate=dyn["expense_rate"],
         )
 
         # 初年度指標
@@ -108,15 +126,26 @@ class SimulationAgent(BaseAgent):
         exit_year = min(10, len(projections))
 
         # IRR計算
-        irr = self._calculate_irr(initial_investment, projections, exit_year=exit_year, purchase_price=purchase_price)
+        irr = self._calculate_irr(
+            initial_investment, projections,
+            exit_year=exit_year, purchase_price=purchase_price,
+            exit_cap_rate=dyn["exit_cap_base"],
+        )
 
         # NPV計算（IRRと同じexit_yearで整合）
-        npv = self._calculate_npv(initial_investment, projections, DISCOUNT_RATE, exit_year=exit_year, purchase_price=purchase_price)
+        npv = self._calculate_npv(
+            initial_investment, projections, dyn["discount_rate"],
+            exit_year=exit_year, purchase_price=purchase_price,
+            exit_cap_rate=dyn["exit_cap_base"],
+        )
 
         # 投資回収年数
         payback = self._calculate_payback(initial_investment, projections)
         exit_projection = projections[exit_year - 1] if exit_year > 0 else None
-        exit_price = exit_projection.property_value if exit_projection else 0
+        exit_price = (
+            self._calculate_exit_by_yield(exit_projection.noi, dyn["exit_cap_base"])
+            if exit_projection else 0
+        )
         exit_loan_balance = exit_projection.loan_balance if exit_projection else 0
         net_exit = self._net_exit_price(exit_price, purchase_price)
         exit_profit = net_exit - exit_loan_balance - initial_investment
@@ -128,12 +157,7 @@ class SimulationAgent(BaseAgent):
         dscr = y1_noi / annual_debt_service if annual_debt_service > 0 else 0
 
         # 損益分岐稼働率
-        total_expenses = (
-            annual_rent * (
-                MANAGEMENT_FEE_RATE + REPAIR_RESERVE_RATE
-                + INSURANCE_RATE + PROPERTY_TAX_RATE + CITY_PLANNING_TAX_RATE
-            )
-        )
+        total_expenses = annual_rent * dyn["expense_rate"]
         break_even_occ = (
             (annual_debt_service + total_expenses) / annual_rent
             if annual_rent > 0 else 1.0
@@ -146,15 +170,15 @@ class SimulationAgent(BaseAgent):
         scenarios = self._run_scenarios(
             purchase_price, annual_rent, loan_amount,
             loan_rate, loan_term, initial_investment,
-            land_for_sim, bldg_for_sim,
+            land_for_sim, bldg_for_sim, dyn,
         )
 
         # 8年保有→売却シミュレーション（事業モデル準拠、売却諸費用控除後）
         hold_years = 8
         if len(projections) >= hold_years:
             p8 = projections[hold_years - 1]
-            exit_price_65 = self._calculate_exit_by_yield(p8.gross_rent, 0.065)
-            exit_price_70 = self._calculate_exit_by_yield(p8.gross_rent, 0.070)
+            exit_price_65 = self._calculate_exit_by_yield(p8.noi, dyn["exit_cap_base"])
+            exit_price_70 = self._calculate_exit_by_yield(p8.noi, dyn["exit_cap_stress"])
             net_exit_65 = self._net_exit_price(exit_price_65, purchase_price)
             net_exit_70 = self._net_exit_price(exit_price_70, purchase_price)
             cumulative_cf_8y = sum(pr.cash_flow_before_tax for pr in projections[:hold_years])
@@ -197,6 +221,16 @@ class SimulationAgent(BaseAgent):
             hold_sell_total_return_70=total_return_70,
             hold_sell_roi_65=roi_65,
             hold_sell_roi_70=roi_70,
+            hold_sell_exit_cap_base=dyn["exit_cap_base"],
+            hold_sell_exit_cap_stress=dyn["exit_cap_stress"],
+            dynamic_assumptions={
+                "rent_decline": dyn["rent_decline"],
+                "vacancy": dyn["vacancy"],
+                "expense_rate": dyn["expense_rate"],
+                "land_growth": dyn["land_growth"],
+                "discount_rate": dyn["discount_rate"],
+            },
+            optimization_score=dyn.get("optimization_score"),
         )
 
         self.logger.info(
@@ -206,6 +240,134 @@ class SimulationAgent(BaseAgent):
         return result
 
     # ===== 内部メソッド =====
+
+    @staticmethod
+    def _clamp(value: float, lo: float, hi: float) -> float:
+        return max(lo, min(hi, value))
+
+    def _build_dynamic_assumptions(
+        self,
+        property: Property,
+        valuation: ValuationResult,
+        loan_rate: float,
+    ) -> Dict[str, float]:
+        """物件属性と市場指標から初期前提を生成"""
+        age = float(property.building_age or 15)
+        dist = float(property.station_distance_min or 8)
+        base_expense = (
+            MANAGEMENT_FEE_RATE + REPAIR_RESERVE_RATE
+            + INSURANCE_RATE + PROPERTY_TAX_RATE + CITY_PLANNING_TAX_RATE
+        )
+        market_cap = (
+            valuation.cap_rate_area_avg
+            or valuation.net_yield
+            or ((valuation.gross_yield or 0.055) * 0.78)
+            or 0.055
+        )
+        vacancy = self._clamp(
+            VACANCY_RATE + max(0, age - 15) * 0.001 + max(0, dist - 7) * 0.002,
+            0.03, 0.15,
+        )
+        rent_decline = self._clamp(
+            RENT_DECLINE_RATE + max(0, age - 20) * 0.0005 + (0.0015 if dist > 12 else 0),
+            0.001, 0.02,
+        )
+        expense_rate = self._clamp(
+            base_expense + max(0, age - 15) * 0.0012 + max(0, vacancy - 0.05) * 0.35,
+            0.08, 0.35,
+        )
+        land_growth = self._clamp(
+            LAND_APPRECIATION_RATE - max(0, dist - 8) * 0.0008 - max(0, age - 20) * 0.0003,
+            -0.012, 0.02,
+        )
+        exit_cap_base = self._clamp(
+            float(market_cap) + max(0, age - 20) * 0.0008 + max(0, dist - 8) * 0.0008,
+            0.04, 0.10,
+        )
+        exit_cap_stress = self._clamp(exit_cap_base + 0.005, 0.045, 0.115)
+        discount_rate = self._clamp(DISCOUNT_RATE + max(0, exit_cap_base - 0.055) * 0.5 + max(0, loan_rate - 0.02) * 0.5, 0.03, 0.11)
+        return {
+            "vacancy": vacancy,
+            "rent_decline": rent_decline,
+            "expense_rate": expense_rate,
+            "land_growth": land_growth,
+            "exit_cap_base": exit_cap_base,
+            "exit_cap_stress": exit_cap_stress,
+            "discount_rate": discount_rate,
+            "optimization_score": 0.0,
+        }
+
+    def _optimize_dynamic_assumptions(
+        self,
+        property: Property,
+        valuation: ValuationResult,
+        purchase_price: int,
+        annual_rent: int,
+        loan_amount: int,
+        loan_rate: float,
+        loan_term: int,
+        initial_investment: int,
+        land_value: int,
+        building_value: int,
+    ) -> Dict[str, float]:
+        """リスク調整後リターンが最大になる前提値を探索"""
+        base = self._build_dynamic_assumptions(property, valuation, loan_rate)
+        target_cap = base["exit_cap_base"]
+        target_ny = valuation.net_yield or max(0.02, min(0.10, (annual_rent / max(purchase_price, 1)) * 0.72))
+        annual_debt = self._monthly_payment(loan_amount, loan_rate, loan_term) * 12
+
+        best = dict(base)
+        best_score = -10**18
+        for vac_mul in (0.9, 1.0, 1.1):
+            for rd_mul in (0.9, 1.0, 1.1):
+                for cap_shift in (-0.003, 0.0, 0.003):
+                    for exp_shift in (-0.01, 0.0, 0.01):
+                        cand = dict(base)
+                        cand["vacancy"] = self._clamp(base["vacancy"] * vac_mul, 0.03, 0.16)
+                        cand["rent_decline"] = self._clamp(base["rent_decline"] * rd_mul, 0.001, 0.022)
+                        cand["expense_rate"] = self._clamp(base["expense_rate"] + exp_shift, 0.08, 0.36)
+                        cand["exit_cap_base"] = self._clamp(base["exit_cap_base"] + cap_shift, 0.04, 0.105)
+                        cand["exit_cap_stress"] = self._clamp(cand["exit_cap_base"] + 0.005, 0.045, 0.12)
+                        cand["discount_rate"] = self._clamp(base["discount_rate"] + cap_shift * 0.6, 0.03, 0.115)
+
+                        projs = self._project_cashflows(
+                            purchase_price, annual_rent, loan_amount, loan_rate, loan_term,
+                            land_value, building_value,
+                            rent_decline=cand["rent_decline"],
+                            land_growth=cand["land_growth"],
+                            vacancy=cand["vacancy"],
+                            expense_rate=cand["expense_rate"],
+                        )
+                        if not projs:
+                            continue
+                        y1 = projs[0]
+                        dscr = (y1.noi / annual_debt) if annual_debt > 0 else 0
+                        if dscr < 0.7:
+                            continue
+                        be = ((annual_debt + annual_rent * cand["expense_rate"]) / annual_rent) if annual_rent > 0 else 1.2
+                        irr = self._calculate_irr(
+                            initial_investment, projs, purchase_price=purchase_price,
+                            exit_cap_rate=cand["exit_cap_base"],
+                        )
+                        if irr > 0.22 or irr < -0.30:
+                            continue
+                        npv = self._calculate_npv(
+                            initial_investment, projs, cand["discount_rate"],
+                            purchase_price=purchase_price, exit_cap_rate=cand["exit_cap_base"],
+                        )
+                        y1_net = y1.noi / max(purchase_price, 1)
+                        score = (
+                            (npv / max(initial_investment, 1)) * 100
+                            + dscr * 10
+                            - abs(cand["exit_cap_base"] - target_cap) * 450
+                            - abs(y1_net - target_ny) * 400
+                            - max(0, be - 0.92) * 120
+                        )
+                        if score > best_score:
+                            best_score = score
+                            best = cand
+        best["optimization_score"] = round(best_score, 4) if best_score > -10**17 else 0.0
+        return best
 
     def _project_cashflows(
         self,
@@ -220,6 +382,7 @@ class SimulationAgent(BaseAgent):
         land_growth: float = None,
         building_deprec: float = None,
         vacancy: float = None,
+        expense_rate: float = None,
     ) -> List[YearlyProjection]:
         rent_decline = rent_decline if rent_decline is not None else RENT_DECLINE_RATE
         land_growth = land_growth if land_growth is not None else LAND_APPRECIATION_RATE
@@ -229,10 +392,11 @@ class SimulationAgent(BaseAgent):
         monthly_payment = self._monthly_payment(loan_amount, loan_rate, loan_term)
         annual_debt = int(monthly_payment * 12)
 
-        expense_rate = (
-            MANAGEMENT_FEE_RATE + REPAIR_RESERVE_RATE
-            + INSURANCE_RATE + PROPERTY_TAX_RATE + CITY_PLANNING_TAX_RATE
-        )
+        if expense_rate is None:
+            expense_rate = (
+                MANAGEMENT_FEE_RATE + REPAIR_RESERVE_RATE
+                + INSURANCE_RATE + PROPERTY_TAX_RATE + CITY_PLANNING_TAX_RATE
+            )
 
         projections = []
         cumulative_cf = 0
@@ -300,6 +464,7 @@ class SimulationAgent(BaseAgent):
     def _calculate_irr(
         self, initial_investment: int, projections: List[YearlyProjection],
         exit_year: int = 10, purchase_price: int = 0,
+        exit_cap_rate: float = None,
     ) -> float:
         """IRR（内部収益率）をニュートン法で計算"""
         if not projections or initial_investment <= 0:
@@ -312,7 +477,11 @@ class SimulationAgent(BaseAgent):
         # 最終年に売却益を加算（売却諸費用・譲渡税控除後）
         if exit_idx < len(projections):
             final = projections[exit_idx]
-            net_exit = self._net_exit_price(final.property_value, purchase_price)
+            exit_price = (
+                self._calculate_exit_by_yield(final.noi, exit_cap_rate)
+                if exit_cap_rate else final.property_value
+            )
+            net_exit = self._net_exit_price(exit_price, purchase_price)
             cashflows.append(
                 final.cash_flow_before_tax + net_exit - final.loan_balance
             )
@@ -348,6 +517,7 @@ class SimulationAgent(BaseAgent):
         discount_rate: float,
         exit_year: int = 10,
         purchase_price: int = 0,
+        exit_cap_rate: float = None,
     ) -> int:
         """NPV計算（出口売却益を含む、IRRと整合）"""
         if not projections:
@@ -359,7 +529,11 @@ class SimulationAgent(BaseAgent):
         # 最終年に売却益を加算（売却諸費用・譲渡税控除後、IRR計算と同じロジック）
         if exit_idx < len(projections):
             final = projections[exit_idx]
-            net_exit = self._net_exit_price(final.property_value, purchase_price)
+            exit_price = (
+                self._calculate_exit_by_yield(final.noi, exit_cap_rate)
+                if exit_cap_rate else final.property_value
+            )
+            net_exit = self._net_exit_price(exit_price, purchase_price)
             terminal_cf = (
                 final.cash_flow_before_tax
                 + net_exit
@@ -388,24 +562,34 @@ class SimulationAgent(BaseAgent):
         initial_investment: int,
         land_value: int,
         building_value: int,
+        dynamic_base: Dict[str, float],
     ) -> Dict[str, dict]:
         scenarios = {}
 
         configs = {
             "optimistic": {
-                "rent_decline": 0.002,
-                "land_growth": 0.01,
-                "vacancy": 0.03,
+                "rent_decline": self._clamp(dynamic_base["rent_decline"] * 0.8, 0.001, 0.02),
+                "land_growth": self._clamp(dynamic_base["land_growth"] + 0.003, -0.01, 0.025),
+                "vacancy": self._clamp(dynamic_base["vacancy"] * 0.85, 0.02, 0.13),
+                "expense_rate": self._clamp(dynamic_base["expense_rate"] - 0.01, 0.08, 0.32),
+                "exit_cap_rate": self._clamp(dynamic_base["exit_cap_base"] - 0.004, 0.038, 0.10),
+                "discount_rate": self._clamp(dynamic_base["discount_rate"] - 0.004, 0.028, 0.11),
             },
             "base": {
-                "rent_decline": RENT_DECLINE_RATE,
-                "land_growth": LAND_APPRECIATION_RATE,
-                "vacancy": VACANCY_RATE,
+                "rent_decline": dynamic_base["rent_decline"],
+                "land_growth": dynamic_base["land_growth"],
+                "vacancy": dynamic_base["vacancy"],
+                "expense_rate": dynamic_base["expense_rate"],
+                "exit_cap_rate": dynamic_base["exit_cap_base"],
+                "discount_rate": dynamic_base["discount_rate"],
             },
             "pessimistic": {
-                "rent_decline": 0.01,
-                "land_growth": -0.005,
-                "vacancy": 0.10,
+                "rent_decline": self._clamp(dynamic_base["rent_decline"] * 1.25, 0.002, 0.03),
+                "land_growth": self._clamp(dynamic_base["land_growth"] - 0.004, -0.02, 0.02),
+                "vacancy": self._clamp(dynamic_base["vacancy"] * 1.2, 0.03, 0.20),
+                "expense_rate": self._clamp(dynamic_base["expense_rate"] + 0.015, 0.09, 0.40),
+                "exit_cap_rate": self._clamp(dynamic_base["exit_cap_base"] + 0.006, 0.045, 0.12),
+                "discount_rate": self._clamp(dynamic_base["discount_rate"] + 0.005, 0.03, 0.13),
             },
         }
 
@@ -416,9 +600,16 @@ class SimulationAgent(BaseAgent):
                 rent_decline=cfg["rent_decline"],
                 land_growth=cfg["land_growth"],
                 vacancy=cfg["vacancy"],
+                expense_rate=cfg["expense_rate"],
             )
-            irr = self._calculate_irr(initial_investment, projs, purchase_price=purchase_price)
-            npv = self._calculate_npv(initial_investment, projs, DISCOUNT_RATE, purchase_price=purchase_price)
+            irr = self._calculate_irr(
+                initial_investment, projs, purchase_price=purchase_price,
+                exit_cap_rate=cfg["exit_cap_rate"],
+            )
+            npv = self._calculate_npv(
+                initial_investment, projs, cfg["discount_rate"],
+                purchase_price=purchase_price, exit_cap_rate=cfg["exit_cap_rate"],
+            )
             total_cf = sum(p.cash_flow_before_tax for p in projs)
 
             scenarios[name] = {
@@ -431,8 +622,8 @@ class SimulationAgent(BaseAgent):
 
         return scenarios
 
-    def _calculate_exit_by_yield(self, annual_rent_at_exit: int, exit_yield: float = 0.065) -> int:
-        """出口利回りから逆算した売却価格"""
-        if annual_rent_at_exit <= 0 or exit_yield <= 0:
+    def _calculate_exit_by_yield(self, annual_noi_at_exit: int, exit_yield: float = 0.065) -> int:
+        """出口CapRateから逆算した売却価格"""
+        if annual_noi_at_exit <= 0 or exit_yield <= 0:
             return 0
-        return int(annual_rent_at_exit / exit_yield)
+        return int(annual_noi_at_exit / exit_yield)

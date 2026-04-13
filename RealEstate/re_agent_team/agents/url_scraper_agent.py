@@ -6,6 +6,8 @@ URL指定物件スクレイパー - 1件のURLから物件情報を構造化
 - アットホーム (athome.co.jp)
 - SUUMO (suumo.jp)
 - HOME'S (homes.co.jp)
+- 健美家 (kenbiya.com)
+- 不動産投資★連合隊 (rals.co.jp / fudosan.cbiz.ne.jp)
 - 汎用フォールバック
 
 機能:
@@ -74,6 +76,8 @@ class UrlScraperAgent(BaseAgent):
         "athome": r"athome\.co\.jp|atbb\.athome\.co\.jp",
         "suumo": r"suumo\.jp",
         "homes": r"homes\.co\.jp",
+        "kenbiya": r"kenbiya\.com",
+        "rals": r"rals\.co\.jp|fudosan\.cbiz\.ne\.jp|rals\.net",
         "fudousan_japan": r"fudousan\.or\.jp",
     }
 
@@ -232,6 +236,8 @@ class UrlScraperAgent(BaseAgent):
             "athome": self._parse_athome,
             "suumo": self._parse_suumo,
             "homes": self._parse_homes,
+            "kenbiya": self._parse_kenbiya,
+            "rals": self._parse_rals,
         }
         parser = parsers.get(site, self._parse_generic)
         data = parser(html, url)
@@ -408,6 +414,69 @@ class UrlScraperAgent(BaseAgent):
 
         return data
 
+    def _parse_kenbiya(self, html: str, url: str) -> Dict:
+        """健美家パーサー（表構造 + 本文フォールバック）"""
+        soup = BeautifulSoup(html, "html.parser")
+        data = {}
+
+        title = soup.select_one("h1, .propertyTitle, .detailTitle")
+        data["name"] = title.get_text(strip=True) if title else ""
+
+        table_data = self._extract_table_pairs(soup)
+        full_text = soup.get_text(" ", strip=True)
+
+        data["address"] = table_data.get("所在地", "") or table_data.get("住所", "")
+        data["asking_price"] = self._parse_price(
+            table_data.get("価格", "") or table_data.get("販売価格", "")
+        ) or self._extract_price_from_text(full_text)
+        data["gross_yield"] = self._parse_yield(
+            table_data.get("利回り", "") or table_data.get("表面利回り", "")
+        ) or self._extract_yield_from_text(full_text)
+        data["land_area"] = self._parse_area(
+            table_data.get("土地面積", "") or table_data.get("敷地面積", "")
+        )
+        data["building_area"] = self._parse_area(
+            table_data.get("建物面積", "") or table_data.get("延床面積", "") or table_data.get("専有面積", "")
+        )
+        data["structure"] = self._parse_structure(table_data.get("構造", "") or table_data.get("建物構造", "")) \
+            or self._extract_structure_from_text(full_text)
+        data["built_year"], data["building_age"] = self._parse_built_year(
+            table_data.get("築年月", "") or table_data.get("築年数", "")
+        )
+        st_text = table_data.get("交通", "") or table_data.get("最寄り駅", "")
+        data["nearest_station"], data["station_distance_min"] = self._parse_station(st_text or full_text)
+        data["land_use_zone"] = table_data.get("用途地域", "")
+        data["building_coverage"] = self._parse_ratio(table_data.get("建蔽率", ""))
+        data["floor_area_ratio"] = self._parse_ratio(table_data.get("容積率", ""))
+        data["units"] = self._parse_int(table_data.get("総戸数", ""))
+        data["current_rent_annual"] = self._parse_annual_rent(
+            table_data.get("年間収入", "") or table_data.get("満室想定年収", "")
+        )
+        return data
+
+    def _parse_rals(self, html: str, url: str) -> Dict:
+        """不動産投資★連合隊パーサー（汎用 + 投資向け項目補強）"""
+        soup = BeautifulSoup(html, "html.parser")
+        data = self._parse_generic(html, url)
+        full_text = soup.get_text(" ", strip=True)
+        table_data = self._extract_table_pairs(soup)
+
+        if not data.get("gross_yield"):
+            data["gross_yield"] = self._parse_yield(table_data.get("利回り", "")) or self._extract_yield_from_text(full_text)
+        if not data.get("land_area"):
+            data["land_area"] = self._parse_area(table_data.get("土地面積", ""))
+        if not data.get("building_area"):
+            data["building_area"] = self._parse_area(
+                table_data.get("建物面積", "") or table_data.get("専有面積", "")
+            )
+        if not data.get("units"):
+            data["units"] = self._parse_int(table_data.get("総戸数", ""))
+        if not data.get("current_rent_annual"):
+            data["current_rent_annual"] = self._parse_annual_rent(
+                table_data.get("満室年収", "") or table_data.get("年間収入", "")
+            )
+        return data
+
     def _parse_generic(self, html: str, url: str) -> Dict:
         """汎用パーサー（テーブルペア＋全文テキスト解析）"""
         soup = BeautifulSoup(html, "html.parser")
@@ -558,9 +627,14 @@ class UrlScraperAgent(BaseAgent):
             return ""
         try:
             img = Image.open(io.BytesIO(image_bytes))
-            # 日本語+英語でOCR
-            text = pytesseract.image_to_string(img, lang="jpn+eng")
-            return text.strip()
+            # OCR前処理: グレースケール→2値化で文字認識率を上げる
+            gray = img.convert("L")
+            bw = gray.point(lambda x: 255 if x > 170 else 0)
+            # PSM6（ブロック）とPSM11（疎テキスト）を併用し、長い方を採用
+            t1 = pytesseract.image_to_string(bw, lang="jpn+eng", config="--psm 6")
+            t2 = pytesseract.image_to_string(bw, lang="jpn+eng", config="--psm 11")
+            text = t1 if len(t1 or "") >= len(t2 or "") else t2
+            return (text or "").strip()
         except Exception as e:
             self.logger.debug(f"OCRエラー: {e}")
             return ""

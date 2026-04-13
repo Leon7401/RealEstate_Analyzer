@@ -15,10 +15,12 @@ SQLite データベース層 - 全データの永続化
 import sqlite3
 import json
 import threading
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 from contextlib import contextmanager
+from urllib.parse import urlsplit, urlunsplit
 
 from config.settings import DB_PATH
 
@@ -732,6 +734,42 @@ class Database:
 
     def upsert_property(self, prop: Dict) -> bool:
         with self._conn() as conn:
+            prop = dict(prop or {})
+
+            # 同一URL物件は既存IDに寄せて重複新規作成を抑止
+            normalized_url = self._normalize_source_url(prop.get("source_url"))
+            if normalized_url:
+                existed = conn.execute("""
+                    SELECT id FROM properties
+                    WHERE source_url = ?
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                """, (normalized_url,)).fetchone()
+                if existed:
+                    prop["id"] = dict(existed)["id"]
+                prop["source_url"] = normalized_url
+
+            # URLが無い場合は住所+価格+面積一致で既存寄せ（保守的）
+            if not prop.get("id"):
+                address = self._normalize_address(prop.get("address"))
+                asking = prop.get("asking_price")
+                la = prop.get("land_area")
+                ba = prop.get("building_area")
+                if address and asking and (la or ba):
+                    existed = conn.execute("""
+                        SELECT id
+                        FROM properties
+                        WHERE address = ?
+                          AND asking_price = ?
+                          AND COALESCE(land_area, -1) = COALESCE(?, -1)
+                          AND COALESCE(building_area, -1) = COALESCE(?, -1)
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                    """, (address, asking, la, ba)).fetchone()
+                    if existed:
+                        prop["id"] = dict(existed)["id"]
+                prop["address"] = address or (prop.get("address") or "")
+
             conn.execute("""
                 INSERT INTO properties
                     (id, name, address, prefecture_code, city_code,
@@ -763,6 +801,284 @@ class Database:
                 json.dumps(prop, ensure_ascii=False),
             ))
         return True
+
+    @staticmethod
+    def _normalize_source_url(url: Any) -> str:
+        if not url:
+            return ""
+        try:
+            raw = str(url).strip()
+            if not raw:
+                return ""
+            parts = urlsplit(raw)
+            path = (parts.path or "/").rstrip("/") or "/"
+            return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, "", ""))
+        except Exception:
+            return str(url).strip()
+
+    @staticmethod
+    def _normalize_address(address: Any) -> str:
+        if address is None:
+            return ""
+        s = str(address).strip().replace("　", " ")
+        s = re.sub(r"\s+", "", s)
+        # 代表的な表記ゆれを軽く吸収
+        s = s.replace("丁目", "-").replace("番地", "-").replace("番", "-").replace("号", "")
+        s = re.sub(r"-{2,}", "-", s).strip("-")
+        return s
+
+    @staticmethod
+    def _normalize_station_name(station: Any) -> str:
+        if not station:
+            return ""
+        s = str(station).replace("駅", "").replace("　", "").strip()
+        s = re.sub(r"\s+", "", s)
+        return s
+
+    @staticmethod
+    def _value_score(v: Any) -> int:
+        if v is None:
+            return 0
+        if isinstance(v, str):
+            return 1 if v.strip() else 0
+        return 1
+
+    def merge_duplicate_properties(
+        self,
+        dry_run: bool = False,
+        min_group_size: int = 2,
+        max_groups: int = 500,
+    ) -> Dict[str, Any]:
+        """
+        重複物件を検出し統合する。
+        優先キー:
+          1) source_url 正規化一致
+          2) 駅距離 + 価格 + 延べ床面積（+市区町村/駅名）一致
+          3) 住所正規化 + 価格帯 + 面積 + 駅名一致
+        """
+        with self._conn() as conn:
+            rows = [dict(r) for r in conn.execute("""
+                SELECT *
+                FROM properties
+                ORDER BY updated_at DESC
+            """).fetchall()]
+
+            # 複数キー一致で連結統合するため、Union-Findでグループ化
+            id_to_prop: Dict[str, Dict[str, Any]] = {}
+            parent: Dict[str, str] = {}
+            rank: Dict[str, int] = {}
+
+            def _find(x: str) -> str:
+                px = parent.get(x, x)
+                if px != x:
+                    parent[x] = _find(px)
+                return parent.get(x, x)
+
+            def _union(a: str, b: str):
+                ra, rb = _find(a), _find(b)
+                if ra == rb:
+                    return
+                rka, rkb = rank.get(ra, 0), rank.get(rb, 0)
+                if rka < rkb:
+                    parent[ra] = rb
+                elif rka > rkb:
+                    parent[rb] = ra
+                else:
+                    parent[rb] = ra
+                    rank[ra] = rka + 1
+
+            key_owner: Dict[str, str] = {}
+            for p in rows:
+                pid = p.get("id")
+                if not pid:
+                    continue
+                id_to_prop[pid] = p
+                parent.setdefault(pid, pid)
+                rank.setdefault(pid, 0)
+
+                addr = self._normalize_address(p.get("address"))
+                station = self._normalize_station_name(p.get("nearest_station"))
+                land_area = round(float(p["land_area"]), 1) if p.get("land_area") else None
+                bld_area = round(float(p["building_area"]), 1) if p.get("building_area") else None
+                price = p.get("asking_price")
+                station_dist = p.get("station_distance_min")
+                city = (p.get("city_code") or p.get("prefecture_code") or "").strip()
+                name = re.sub(r"\s+", "", str(p.get("name") or ""))
+                name = re.sub(r"(new|NEW|新着|登録|更新|価格改定|値下げ).*", "", name)
+
+                keys = []
+                url_key = self._normalize_source_url(p.get("source_url"))
+                if url_key:
+                    keys.append(f"url:{url_key}")
+
+                # 駅距離・価格・延床面積（市区町村＋駅名で誤結合抑制）
+                if price is not None and bld_area is not None and station_dist is not None and city:
+                    try:
+                        price_exact = int(float(price))
+                        dist_exact = int(float(station_dist))
+                        keys.append(f"spd:{city}|{station}|{dist_exact}|{price_exact}|{bld_area}")
+                    except (TypeError, ValueError):
+                        pass
+
+                # 同価格帯・同規模・近接駅のフォールバック（URL違いの横断重複吸収）
+                if price is not None and bld_area is not None and city:
+                    try:
+                        price_bucket = int(float(price) / 500_000)
+                        keys.append(f"spb:{city}|{station}|{price_bucket}|{bld_area}")
+                    except (TypeError, ValueError):
+                        pass
+
+                # 住所ベース
+                if addr:
+                    try:
+                        price_bucket = int(float(price) / 500_000) if price else -1
+                    except (TypeError, ValueError):
+                        price_bucket = -1
+                    keys.append(f"fp:{addr}|{price_bucket}|{land_area}|{bld_area}|{station}")
+
+                # 名称ベース（住所欠落や文字化けの取りこぼし補完）
+                if name and price is not None and bld_area is not None and city:
+                    try:
+                        price_bucket = int(float(price) / 500_000)
+                        keys.append(f"np:{city}|{name[:32]}|{price_bucket}|{bld_area}")
+                    except (TypeError, ValueError):
+                        pass
+
+                for k in keys:
+                    owner = key_owner.get(k)
+                    if owner and owner != pid:
+                        _union(owner, pid)
+                    else:
+                        key_owner[k] = pid
+
+            by_root: Dict[str, List[Dict[str, Any]]] = {}
+            for pid, p in id_to_prop.items():
+                root = _find(pid)
+                by_root.setdefault(root, []).append(p)
+
+            duplicate_groups = [g for g in by_root.values() if len(g) >= min_group_size][:max_groups]
+            summary = {
+                "dry_run": dry_run,
+                "group_count": len(duplicate_groups),
+                "merged_records": 0,
+                "relinked_judgments": 0,
+                "groups": [],
+            }
+
+            for grp in duplicate_groups:
+                grp_sorted = sorted(
+                    grp,
+                    key=lambda x: (
+                        # 情報密度が高いものを優先
+                        sum(self._value_score(x.get(c)) for c in [
+                            "asking_price", "land_area", "building_area", "structure",
+                            "built_year", "current_rent_annual", "gross_yield",
+                            "nearest_station", "source_url",
+                        ]),
+                        x.get("updated_at") or "",
+                    ),
+                    reverse=True,
+                )
+                canonical = dict(grp_sorted[0])
+                duplicates = [dict(x) for x in grp_sorted[1:]]
+
+                # canonicalを重複群の情報で補完
+                for d in duplicates:
+                    for col in [
+                        "name", "address", "prefecture_code", "city_code",
+                        "latitude", "longitude", "asking_price", "land_area",
+                        "building_area", "structure", "built_year", "building_age",
+                        "units", "current_rent_annual", "gross_yield", "nearest_station",
+                        "station_distance_min", "station_id", "source", "source_url",
+                    ]:
+                        if not canonical.get(col) and d.get(col):
+                            canonical[col] = d.get(col)
+
+                merged_data = {}
+                try:
+                    merged_data = json.loads(canonical.get("data_json") or "{}")
+                    if not isinstance(merged_data, dict):
+                        merged_data = {}
+                except Exception:
+                    merged_data = {}
+
+                merged_ids = [d.get("id") for d in duplicates if d.get("id")]
+                merged_sources = sorted({
+                    *(x.get("source") for x in grp if x.get("source")),
+                })
+                merged_urls = sorted({
+                    self._normalize_source_url(x.get("source_url"))
+                    for x in grp
+                    if x.get("source_url")
+                })
+                merged_data["merged_from_ids"] = sorted({
+                    *(merged_data.get("merged_from_ids", []) if isinstance(merged_data.get("merged_from_ids"), list) else []),
+                    *merged_ids,
+                })
+                merged_data["merged_sources"] = merged_sources
+                merged_data["merged_source_urls"] = merged_urls
+
+                relinked = 0
+                if not dry_run:
+                    conn.execute("""
+                        UPDATE properties SET
+                            name=?, address=?, prefecture_code=?, city_code=?,
+                            latitude=?, longitude=?, asking_price=?, land_area=?,
+                            building_area=?, structure=?, built_year=?, building_age=?,
+                            units=?, current_rent_annual=?, gross_yield=?,
+                            nearest_station=?, station_distance_min=?, station_id=?,
+                            source=?, source_url=?, data_json=?,
+                            updated_at=datetime('now','localtime')
+                        WHERE id=?
+                    """, (
+                        canonical.get("name") or "",
+                        canonical.get("address") or "",
+                        canonical.get("prefecture_code") or "",
+                        canonical.get("city_code") or "",
+                        canonical.get("latitude"),
+                        canonical.get("longitude"),
+                        canonical.get("asking_price"),
+                        canonical.get("land_area"),
+                        canonical.get("building_area"),
+                        canonical.get("structure"),
+                        canonical.get("built_year"),
+                        canonical.get("building_age"),
+                        canonical.get("units"),
+                        canonical.get("current_rent_annual"),
+                        canonical.get("gross_yield"),
+                        canonical.get("nearest_station"),
+                        canonical.get("station_distance_min"),
+                        canonical.get("station_id"),
+                        canonical.get("source"),
+                        self._normalize_source_url(canonical.get("source_url")),
+                        json.dumps(merged_data, ensure_ascii=False),
+                        canonical.get("id"),
+                    ))
+
+                    for d in duplicates:
+                        dup_id = d.get("id")
+                        if not dup_id:
+                            continue
+                        cur = conn.execute("""
+                            UPDATE judgments
+                            SET property_id = ?
+                            WHERE property_id = ?
+                        """, (canonical.get("id"), dup_id))
+                        relinked += cur.rowcount if cur else 0
+                        conn.execute("DELETE FROM properties WHERE id = ?", (dup_id,))
+
+                summary["merged_records"] += len(duplicates)
+                summary["relinked_judgments"] += relinked
+                summary["groups"].append({
+                    "canonical_id": canonical.get("id"),
+                    "canonical_name": canonical.get("name"),
+                    "canonical_address": canonical.get("address"),
+                    "duplicate_ids": merged_ids,
+                    "group_size": len(grp),
+                    "relinked_judgments": relinked,
+                })
+
+            return summary
 
     def get_properties(
         self, city_code: str = "", station_id: str = "", limit: int = 200,

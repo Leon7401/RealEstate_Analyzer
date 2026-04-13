@@ -65,6 +65,12 @@ class SimulationResult:
     hold_sell_total_return_70: int = 0
     hold_sell_roi_65: float = 0.0
     hold_sell_roi_70: float = 0.0
+    hold_sell_exit_cap_base: Optional[float] = None
+    hold_sell_exit_cap_stress: Optional[float] = None
+
+    # 動的最適化パラメータ
+    dynamic_assumptions: Dict[str, float] = field(default_factory=dict)
+    optimization_score: Optional[float] = None
 
     # シナリオ分析
     scenarios: Dict[str, dict] = field(default_factory=dict)

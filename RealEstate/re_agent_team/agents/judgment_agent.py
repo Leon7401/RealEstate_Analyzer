@@ -42,7 +42,7 @@ class JudgmentAgent(BaseAgent):
 
         # 1. スコア算出
         scores = self._calculate_scores(property, valuation, simulation)
-        overall = sum(scores.values()) / len(scores) if scores else 0
+        overall = self._calculate_overall_score(scores)
 
         # 資産性スコアグレードによる補正
         if asset_score_grade == "S":
@@ -95,6 +95,32 @@ class JudgmentAgent(BaseAgent):
             f"判定完了: {grade} - {recommendation} (スコア: {overall:.1f})"
         )
         return result
+
+    def _calculate_overall_score(self, scores: Dict[str, float]) -> float:
+        """利回り偏重を避け、出口性・リスク耐性を重視した総合化"""
+        if not scores:
+            return 0.0
+        weights = {
+            "location": 0.12,
+            "land_value": 0.15,
+            "yield": 0.10,
+            "cash_flow": 0.10,
+            "growth": 0.12,
+            "risk": 0.16,
+            "exit_profit": 0.15,
+            "asset_value": 0.10,
+        }
+        weighted_sum = 0.0
+        total_weight = 0.0
+        for k, v in scores.items():
+            w = weights.get(k, 0.0)
+            if w <= 0:
+                continue
+            weighted_sum += float(v) * w
+            total_weight += w
+        if total_weight <= 0:
+            return sum(scores.values()) / len(scores)
+        return weighted_sum / total_weight
 
     # ===== スコアリング =====
 
@@ -166,7 +192,7 @@ class JudgmentAgent(BaseAgent):
         else:
             scores["growth"] = max(10, irr * 1000)
 
-        # リスク (0-100) - 低リスク=高スコア
+        # リスク (0-100) - 低リスク=高スコア（空室・賃料下落・出口不透明を反映）
         risk_score = 70  # ベース
         if sim.dscr and sim.dscr >= 1.3:
             risk_score += 15
@@ -181,6 +207,28 @@ class JudgmentAgent(BaseAgent):
         age = prop.building_age or 0
         if age > 30:
             risk_score -= 15
+        dyn = getattr(sim, "dynamic_assumptions", {}) or {}
+        vacancy = dyn.get("vacancy")
+        rent_decline = dyn.get("rent_decline")
+        exit_cap = getattr(sim, "hold_sell_exit_cap_base", None)
+        if vacancy is not None:
+            if vacancy >= 0.12:
+                risk_score -= 15
+            elif vacancy >= 0.09:
+                risk_score -= 8
+            elif vacancy <= 0.05:
+                risk_score += 5
+        if rent_decline is not None:
+            if rent_decline >= 0.012:
+                risk_score -= 10
+            elif rent_decline <= 0.004:
+                risk_score += 4
+        if exit_cap is not None:
+            # 出口利回りが高いほど売却難度が高くなる前提
+            if exit_cap >= 0.075:
+                risk_score -= 12
+            elif exit_cap <= 0.055:
+                risk_score += 6
         scores["risk"] = max(10, min(100, risk_score))
 
         # 売却益 (0-100) - 8年後売却ROI
@@ -381,7 +429,9 @@ class JudgmentAgent(BaseAgent):
         if opt.get("irr", 0) >= 0.10:
             opps.append(f"楽観シナリオIRR {opt['irr']:.1%} → 上振れポテンシャル")
         if hasattr(sim, 'hold_sell_total_return_65') and sim.hold_sell_total_return_65 > 0:
-            opps.append(f"8年保有+売却(6.5%)でトータル{sim.hold_sell_total_return_65/10000:,.0f}万円のリターン見込")
+            cap = getattr(sim, "hold_sell_exit_cap_base", None)
+            cap_label = f"{cap:.1%}" if cap else "動的Cap"
+            opps.append(f"8年保有+売却({cap_label})でトータル{sim.hold_sell_total_return_65/10000:,.0f}万円のリターン見込")
         return opps
 
     def _build_key_metrics(
@@ -405,9 +455,13 @@ class JudgmentAgent(BaseAgent):
             metrics["投資回収"] = f"{sim.payback_years}年"
         metrics["価格妥当性"] = val.price_assessment
         if hasattr(sim, 'hold_sell_exit_price_65') and sim.hold_sell_exit_price_65 > 0:
-            metrics["8年後売却(6.5%)"] = f"{sim.hold_sell_exit_price_65/10000:,.0f}万円"
-            metrics["8年後売却(7.0%)"] = f"{sim.hold_sell_exit_price_70/10000:,.0f}万円"
+            cap_base = getattr(sim, "hold_sell_exit_cap_base", None)
+            cap_stress = getattr(sim, "hold_sell_exit_cap_stress", None)
+            base_label = f"{cap_base:.1%}" if cap_base else "動的Cap"
+            stress_label = f"{cap_stress:.1%}" if cap_stress else "保守Cap"
+            metrics[f"8年後売却({base_label})"] = f"{sim.hold_sell_exit_price_65/10000:,.0f}万円"
+            metrics[f"8年後売却({stress_label})"] = f"{sim.hold_sell_exit_price_70/10000:,.0f}万円"
             metrics["8年累積CF"] = f"{sim.hold_sell_cumulative_cf/10000:,.0f}万円"
-            metrics["トータルリターン(6.5%)"] = f"{sim.hold_sell_total_return_65/10000:,.0f}万円"
-            metrics["ROI(6.5%売却)"] = f"{sim.hold_sell_roi_65:.0%}"
+            metrics[f"トータルリターン({base_label})"] = f"{sim.hold_sell_total_return_65/10000:,.0f}万円"
+            metrics[f"ROI({base_label}売却)"] = f"{sim.hold_sell_roi_65:.0%}"
         return metrics

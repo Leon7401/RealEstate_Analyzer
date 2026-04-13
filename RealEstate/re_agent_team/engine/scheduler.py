@@ -10,6 +10,16 @@ import threading
 import time
 from datetime import datetime, timedelta
 from typing import Optional
+from config.settings import (
+    BATCH_TARGET_PREFECTURES,
+    RENTAL_REFRESH_INTERVAL_HOURS,
+    RENTAL_REFRESH_MAX_PAGES,
+    RENTAL_REFRESH_GEOCODE_BATCH,
+    PROPERTY_REFRESH_INTERVAL_HOURS,
+    PROPERTY_REFRESH_MAX_PAGES,
+    PROPERTY_ANALYZE_LIMIT,
+    PROPERTY_ANALYZE_INCLUDE_REBUILD,
+)
 
 logger = logging.getLogger("Scheduler")
 
@@ -48,17 +58,189 @@ class ScrapeScheduler:
 
     def _run_loop(self):
         """メインループ: CHECK_INTERVAL_SEC ごとに設定をチェック"""
+        growth_last_run = None
+        GROWTH_INTERVAL_HOURS = 6  # 6時間ごとにデータ成長パイプライン
+        rental_last_run = None
+        property_last_run = None
+
         while not self._stop_event.is_set():
             try:
                 self._check_and_run()
             except Exception as e:
                 logger.error(f"スケジューラエラー: {e}")
 
-            # 次のチェックまで待機（stop_eventで即座に抜けられる）
+            # 賃料データ高頻度リフレッシュ（品質維持）
+            try:
+                now = datetime.now()
+                if rental_last_run is None or (now - rental_last_run) >= timedelta(hours=RENTAL_REFRESH_INTERVAL_HOURS):
+                    self._run_rental_refresh()
+                    rental_last_run = now
+            except Exception as e:
+                logger.error(f"賃料リフレッシュエラー: {e}")
+
+            # 既存建物物件スクレイピング + 現況/建替え比較分析
+            try:
+                now = datetime.now()
+                if property_last_run is None or (now - property_last_run) >= timedelta(hours=PROPERTY_REFRESH_INTERVAL_HOURS):
+                    self._run_property_refresh_and_analysis()
+                    property_last_run = now
+            except Exception as e:
+                logger.error(f"既存建物分析パイプラインエラー: {e}")
+
+            # データ成長パイプライン（6時間ごと）
+            try:
+                now = datetime.now()
+                if growth_last_run is None or (now - growth_last_run) >= timedelta(hours=GROWTH_INTERVAL_HOURS):
+                    self._run_growth_pipeline()
+                    growth_last_run = now
+            except Exception as e:
+                logger.error(f"成長パイプラインエラー: {e}")
+
             self._stop_event.wait(self.CHECK_INTERVAL_SEC)
 
         self._running = False
         logger.info("スケジューラループ終了")
+
+    def _run_growth_pipeline(self):
+        """メッシュデータ成長パイプラインを実行"""
+        logger.info("=== 定期データ成長パイプライン開始 ===")
+        try:
+            from engine.batch_processor import MeshGrowthPipeline
+            pipeline = MeshGrowthPipeline()
+            pipeline.run(max_rental_pages=3, geocode_batch=100)
+        except Exception as e:
+            logger.error(f"成長パイプラインエラー: {e}")
+
+    def _run_rental_refresh(self):
+        """賃料収集・ジオコードを高頻度で回す"""
+        logger.info("=== 定期賃料リフレッシュ開始 ===")
+        try:
+            from engine.batch_processor import MeshGrowthPipeline
+            pipeline = MeshGrowthPipeline()
+            pipeline.run(
+                prefectures=BATCH_TARGET_PREFECTURES,
+                max_rental_pages=RENTAL_REFRESH_MAX_PAGES,
+                geocode_batch=RENTAL_REFRESH_GEOCODE_BATCH,
+            )
+        except Exception as e:
+            logger.error(f"定期賃料リフレッシュエラー: {e}")
+
+    @staticmethod
+    def _build_rebuild_candidate(base: dict) -> Optional[dict]:
+        """既存建物物件から建替えシナリオ入力を生成"""
+        try:
+            land_area = float(base.get("land_area") or 0)
+            current_bldg = float(base.get("building_area") or 0)
+            age = int(base.get("building_age") or 0)
+            if land_area <= 0 or current_bldg <= 0 or age < 10:
+                return None
+
+            far_ratio = 2.0
+            if base.get("floor_area_ratio"):
+                far_raw = float(base.get("floor_area_ratio"))
+                far_ratio = far_raw if far_raw <= 5 else far_raw / 100
+            far_ratio = max(0.8, min(4.5, far_ratio))
+
+            target_area = max(current_bldg * 1.12, land_area * min(1.8, far_ratio * 0.90))
+            target_area = max(current_bldg, target_area)
+
+            structure = base.get("structure") or "RC"
+            unit_cost = {"木造": 220000, "鉄骨": 280000, "RC": 300000, "SRC": 340000}.get(structure, 280000)
+            demolition = int(current_bldg * 35000)
+            rebuild_cost = int(target_area * unit_cost + demolition)
+
+            rebuilt = dict(base)
+            rebuilt["name"] = f"{base.get('name') or '物件'} (建替想定)"
+            rebuilt["built_year"] = datetime.now().year
+            rebuilt["building_age"] = 0
+            rebuilt["building_area"] = target_area
+            rebuilt["asking_price"] = int((base.get("asking_price") or 0) + rebuild_cost)
+            if base.get("current_rent_annual"):
+                rebuilt["current_rent_annual"] = int(float(base["current_rent_annual"]) * 1.15)
+            return rebuilt
+        except Exception:
+            return None
+
+    @staticmethod
+    def _choose_scenario(as_is: dict, rebuild: Optional[dict]) -> dict:
+        """出口性を重視して現況/建替えの採用シナリオを決定"""
+        if not rebuild:
+            return as_is
+
+        as_score = as_is["judgment"].overall_score
+        rb_score = rebuild["judgment"].overall_score
+        as_sim = as_is.get("simulation")
+
+        # 出口が見えやすく、数年保有が有利なら現況を優先
+        if as_sim:
+            hold_roi = getattr(as_sim, "hold_sell_roi_65", 0.0) or 0.0
+            if hold_roi >= 0.25 and as_score + 3.0 >= rb_score:
+                return as_is
+
+        return rebuild if rb_score > as_score else as_is
+
+    def _run_property_refresh_and_analysis(self):
+        """既存建物スクレイピングを定期実行し、現況/建替え比較で自動判定"""
+        logger.info("=== 定期既存建物スクレイピング + 比較分析開始 ===")
+        try:
+            from agents.scraper_agent import ScraperAgent
+            from agents.orchestrator_agent import OrchestratorAgent
+            from models.property import Property
+            from storage.database import Database
+
+            scraper = ScraperAgent()
+            orchestrator = OrchestratorAgent()
+            db = Database()
+
+            all_props = []
+            for pref in BATCH_TARGET_PREFECTURES:
+                try:
+                    props = scraper.run(prefecture_code=pref, max_pages=PROPERTY_REFRESH_MAX_PAGES)
+                    all_props.extend(props)
+                    logger.info(f"  既存建物収集: pref={pref}, {len(props)}件")
+                except Exception as e:
+                    logger.warning(f"  既存建物収集エラー: pref={pref}, {e}")
+
+            if not all_props:
+                logger.info("  既存建物収集: 0件")
+                return
+
+            # 最新物件を保存
+            for p in all_props:
+                try:
+                    db.upsert_property(p.to_dict())
+                except Exception:
+                    continue
+
+            # 価格がある物件を優先して判定（上限あり）
+            candidates = [p for p in all_props if p.asking_price and p.asking_price > 0]
+            candidates.sort(key=lambda x: x.asking_price or 0, reverse=True)
+            candidates = candidates[: max(1, PROPERTY_ANALYZE_LIMIT)]
+
+            judged = 0
+            for prop in candidates:
+                try:
+                    as_is = orchestrator.run(prop)
+                    selected = as_is
+
+                    if PROPERTY_ANALYZE_INCLUDE_REBUILD:
+                        rebuild_input = self._build_rebuild_candidate(prop.to_dict())
+                        if rebuild_input:
+                            rebuild_prop = Property.from_dict(rebuild_input)
+                            rebuild = orchestrator.run(rebuild_prop)
+                            selected = self._choose_scenario(as_is, rebuild)
+
+                    judged += 1
+                    logger.info(
+                        f"  自動判定: {prop.name} -> {selected['judgment'].grade} "
+                        f"({selected['judgment'].overall_score:.1f})"
+                    )
+                except Exception as e:
+                    logger.warning(f"  自動判定エラー: {prop.name}, {e}")
+
+            logger.info(f"=== 定期既存建物スクレイピング + 比較分析完了: 収集{len(all_props)}件 / 判定{judged}件 ===")
+        except Exception as e:
+            logger.error(f"定期既存建物処理エラー: {e}")
 
     def _check_and_run(self):
         """アクティブな設定をチェックし、実行タイミングのものを処理"""
