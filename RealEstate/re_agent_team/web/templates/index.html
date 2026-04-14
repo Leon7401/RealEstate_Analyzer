@@ -100,7 +100,6 @@
                     <option value="2K,2DK">2K/2DK</option>
                     <option value="2LDK,3LDK">2LDK+</option>
                 </select>
-                <label><input type="checkbox" id="layer-mesh-tx"> 取引実績</label>
                 <label><input type="checkbox" id="layer-mesh-yield"> 利回り</label>
                 <label><input type="checkbox" id="layer-mesh-pop"> 人口</label>
                 <select id="pop-metric-select" style="font-size:0.68rem;margin-left:18px;width:calc(100% - 18px);margin-top:-2px;margin-bottom:2px;" onchange="if(document.getElementById('layer-mesh-pop').checked){meshLayers['population']&&map.removeLayer(meshLayers['population']);delete meshLayers['population'];meshLayers['pop_density']&&map.removeLayer(meshLayers['pop_density']);delete meshLayers['pop_density'];delete meshCache['population'];delete meshRectCache['population'];delete meshCache['pop_density'];delete meshRectCache['pop_density'];loadMeshLayer(this.value,true)}">
@@ -375,7 +374,7 @@
                             <option value="price_desc">価格高い順</option>
                             <option value="grade">グレード順</option>
                             <option value="station_near">駅近い順</option>
-                            <option value="updated_at">更新日順</option>
+                            <option value="updated_at" selected>更新日順</option>
                         </select>
                         <button id="btn-reload-props" class="btn-secondary" style="height:28px;font-size:0.72rem;" onclick="loadSampleProperties()">検索</button>
                         <button id="btn-batch-analyze" class="btn-secondary" style="height:28px;font-size:0.72rem;">一括判定</button>

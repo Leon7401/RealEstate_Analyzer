@@ -57,7 +57,10 @@ function applyCachedAnalysisToProperty(p) {
     }
     if (!cached) return;
 
-    if (cached.grade) p.grade = cached.grade;
+    if (cached.grade) {
+        p._analysis_grade = cached.grade;
+        p.grade = cached.grade;
+    }
     if (cached.gross_yield != null) p.gross_yield = cached.gross_yield;
     if (cached.net_yield != null) p.net_yield = cached.net_yield;
     if (cached.score != null) p._analysis_score = cached.score;
@@ -100,7 +103,44 @@ function switchScraperPanel(mode) {
 
 function gradeColor(grade) {
     const colors = {S:'#1a9641',A:'#4dac26',B:'#b8e186',C:'#fdb863',D:'#e66101',F:'#d7191c'};
-    return colors[grade] || '#546e7a';
+    return colors[normalizeGrade(grade)] || '#546e7a';
+}
+
+function normalizeGrade(grade) {
+    const g = String(grade || '').trim().toUpperCase();
+    return ['S', 'A', 'B', 'C', 'D', 'F'].includes(g) ? g : '';
+}
+
+function resolvePropertyGrade(p) {
+    if (!p) return '';
+    return normalizeGrade(
+        p._analysis_grade ||
+        p.grade ||
+        p.asset_grade ||
+        p.judge_grade
+    );
+}
+
+function getSelectedPrefectureCodes(group, fallback = ['13']) {
+    const checked = Array.from(
+        document.querySelectorAll(`input[data-pref-group="${group}"]:checked`)
+    ).map(el => String(el.value || '').trim()).filter(Boolean);
+    return checked.length ? checked : [...fallback];
+}
+
+function getPrefectureParam(group, fallback = ['13']) {
+    return getSelectedPrefectureCodes(group, fallback).join(',');
+}
+
+function getPrimaryPrefectureCode(group, fallback = ['13']) {
+    const codes = getSelectedPrefectureCodes(group, fallback);
+    return codes[0] || fallback[0] || '13';
+}
+
+function isLayerEnabled(layerId, defaultValue = true) {
+    const el = document.getElementById(layerId);
+    if (!el) return defaultValue;
+    return !!el.checked;
 }
 
 // ===== 初期化 =====
@@ -120,7 +160,28 @@ function initMap(center, zoom) {
     });
 
     // イベント
-    document.getElementById('prefecture-select').addEventListener('change', loadCities);
+    const sortEl = document.getElementById('prop-sort');
+    if (sortEl && (sortEl.value === 'rank_desc' || sortEl.value === 'rank_asc')) {
+        // 初期表示での重い自動分析を避け、API応答性と地図レイヤー描画を優先
+        sortEl.value = 'updated_at';
+    }
+    document.querySelectorAll('input[data-pref-group="map"]').forEach(el => {
+        el.addEventListener('change', (e) => {
+            const selected = getSelectedPrefectureCodes('map', []);
+            if (selected.length === 0) {
+                e.target.checked = true;
+            }
+            loadCities();
+            loadDbLayersFromDatabase();
+        });
+    });
+    const citySel = document.getElementById('city-select');
+    if (citySel) {
+        citySel.addEventListener('change', () => {
+            loadSampleProperties();
+            loadDbLayersFromDatabase();
+        });
+    }
     document.getElementById('btn-load-data').addEventListener('click', loadAreaData);
     document.getElementById('btn-analyze').addEventListener('click', analyzeProperty);
     document.getElementById('btn-batch-analyze').addEventListener('click', batchAnalyze);
@@ -187,7 +248,6 @@ function initMap(center, zoom) {
     const meshMetrics = {
         'layer-mesh-landprice': 'land_price',
         'layer-mesh-rent':      'rent',
-        'layer-mesh-tx':        'tx_price',
         'layer-mesh-yield':     'yield',
         // layer-mesh-pop is handled separately with dropdown
         'layer-mesh-facility':  'facility',
@@ -261,13 +321,12 @@ function initMap(center, zoom) {
 
     // 初期読込
     loadCities();
-    loadSampleProperties();
     loadRentalStats();
     loadReports();
     loadLandListings();
     loadScrapeConfigs();
     loadLandStats();
-    loadStationMarkers();
+    loadDbLayersFromDatabase();
 }
 
 function switchTab(tabId) {
@@ -281,9 +340,9 @@ function switchTab(tabId) {
 // ===== 市区町村ロード =====
 
 async function loadCities() {
-    const pref = document.getElementById('prefecture-select').value;
+    const pref = getPrefectureParam('map', ['13', '14', '11', '12']);
     try {
-        const resp = await fetch(`/api/cities/${pref}`);
+        const resp = await fetch(`/api/cities/${encodeURIComponent(pref)}`);
         const data = await resp.json();
         const sel = document.getElementById('city-select');
         sel.innerHTML = '';
@@ -295,6 +354,11 @@ async function loadCities() {
         });
         // 駅マーカーも更新
         loadStationMarkers();
+        const prefCount = getSelectedPrefectureCodes('map', ['13']).length;
+        if (map && prefCount > 1) {
+            map.setView([35.72, 139.75], 9);
+        }
+        loadSampleProperties();
     } catch (e) {
         console.error('市区町村取得エラー:', e);
     }
@@ -313,11 +377,12 @@ async function loadSampleProperties() {
     const stationFilter = (document.getElementById('prop-filter-station')?.value || '').trim();
     const typeFilter = document.getElementById('prop-filter-type')?.value || '';
     const sortBy = document.getElementById('prop-sort')?.value || 'yield_desc';
+    const pref = getPrefectureParam('map', ['13', '14', '11', '12']);
     const includeRebuild = document.getElementById('auto-include-rebuild')?.checked !== false;
 
     // ランク系はクライアント側で自動分析後に並べる
     const apiSortBy = (sortBy === 'rank_desc' || sortBy === 'rank_asc') ? 'updated_at' : sortBy;
-    let url = `/api/sample-properties?sort_by=${apiSortBy}&include_land=true`;
+    let url = `/api/sample-properties?sort_by=${apiSortBy}&include_land=true&prefecture_code=${encodeURIComponent(pref)}`;
     if (stationFilter) url += `&station_filter=${encodeURIComponent(stationFilter)}`;
 
     try {
@@ -416,6 +481,8 @@ function buildRankingFromProperties(props) {
     return (props || [])
         .filter(p => p.grade || p._analysis_score != null)
         .map(p => ({
+            id: p.id || null,
+            client_index: sampleProperties.indexOf(p),
             name: p.name || p.address || '物件',
             grade: p.grade || '?',
             score: Number(p._analysis_score || 0),
@@ -459,6 +526,7 @@ async function analyzePropertiesForRanking(targets, includeRebuild = true, btn =
             if (Number.isNaN(idx) || !sampleProperties[idx]) return;
             const p = sampleProperties[idx];
             const selected = r.selected || {};
+            p._analysis_grade = selected.grade || p._analysis_grade;
             p.grade = selected.grade || p.grade;
             p.gross_yield = selected.gross_yield || p.gross_yield;
             if (selected.net_yield != null) p.net_yield = selected.net_yield;
@@ -501,14 +569,21 @@ function renderPropertyList(props) {
             : Math.round(p.asking_price / 1e4).toLocaleString() + '万') : '?';
         const yldVal = p.net_yield || p.gross_yield || 0;
         const yld = yldVal ? (yldVal * 100).toFixed(1) + '%' : '?';
-        const grade = p.grade || '';
+        const grade = resolvePropertyGrade(p);
         const isLand = (p._type === 'land');
+        const buildingPresence = p._building_presence
+            || (isLand ? 'land_only' : (p.building_area || p.structure ? 'building' : 'unknown'));
         const scenario = p._analysis_scenario === 'rebuild' ? '建替' : (p._analysis_scenario === 'as_is' ? '現況' : '');
         const gradeColors = {S:'#4caf50',A:'#66bb6a',B:'#ffd54f',C:'#ffa726',D:'#ef5350',F:'#b71c1c'};
         const gc = gradeColors[grade] || '#546e7a';
         const typeBadge = isLand
             ? '<span style="background:#1565c0;color:#fff;padding:0 4px;border-radius:2px;font-size:0.6rem;margin-right:4px;">土地</span>'
             : '<span style="background:#2e7d32;color:#fff;padding:0 4px;border-radius:2px;font-size:0.6rem;margin-right:4px;">収益</span>';
+        const presenceBadge = buildingPresence === 'land_only'
+            ? '<span style="background:#455a64;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">建物なし</span>'
+            : (buildingPresence === 'building'
+                ? '<span style="background:#6a1b9a;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">建物あり</span>'
+                : '<span style="background:#546e7a;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">建物不明</span>');
         const station = p.nearest_station ? `${p.nearest_station}${p.station_distance_min ? ' ' + p.station_distance_min + '分' : ''}` : '';
         const selected = realIdx === _selectedPropIdx ? 'background:#1a3a5f;' : '';
         const rankTag = p._rank_order ? `<span style="background:#263238;color:#fff;padding:0 5px;border-radius:10px;font-size:0.58rem;">#${p._rank_order}</span>` : '';
@@ -519,6 +594,7 @@ function renderPropertyList(props) {
                 <div style="display:flex;align-items:center;gap:2px;">
                     ${rankTag}
                     ${typeBadge}
+                    ${presenceBadge}
                     ${grade ? `<span style="color:${gc};font-weight:bold;font-size:0.7rem;">${grade}</span>` : ''}
                     ${scenario ? `<span style="background:#455a64;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">${scenario}</span>` : ''}
                     <span style="color:#e0e0e0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.name || p.address || '物件'}</span>
@@ -568,7 +644,7 @@ function plotSampleProperties(propsToPlot) {
         const price = p.asking_price ? `${(p.asking_price/10000).toLocaleString()}万円` : '?';
         const yldBase = p.net_yield || p.gross_yield || (p.current_rent_annual && p.asking_price ? (p.current_rent_annual / p.asking_price) : 0);
         const yld = yldBase ? `${(yldBase*100).toFixed(1)}%` : '?';
-        const grade = p.grade || '?';
+        const grade = resolvePropertyGrade(p) || '?';
         const source = p.source || '';
         const sourceLink = p.source_url ? `<a href="${p.source_url}" target="_blank" rel="noopener" style="color:#4fc3f7;">物件ページ</a>` : '';
         const structure = p.structure || '';
@@ -576,11 +652,11 @@ function plotSampleProperties(propsToPlot) {
         const isLand = (p._type === 'land');
         const rankNo = p._rank_order || null;
 
-        const gradeColor = grade === 'S' ? '#4caf50' : grade === 'A' ? '#66bb6a' : grade === 'B' ? '#ffd54f' : grade === 'C' ? '#ffa726' : grade === 'D' ? '#ef5350' : grade === 'F' ? '#b71c1c' : (isLand ? '#42a5f5' : '#78909c');
+        const markerColor = gradeColor(grade) || (isLand ? '#42a5f5' : '#78909c');
         const markerShape = isLand ? { radius: 7, weight: 2, dashArray: '3' } : { radius: 8, weight: 2 };
 
         const marker = L.circleMarker([p.latitude, p.longitude], {
-            ...markerShape, color: gradeColor, fillColor: gradeColor, fillOpacity: 0.7,
+            ...markerShape, color: markerColor, fillColor: markerColor, fillOpacity: 0.7,
         });
 
         const estimated = p._coords_estimated ? '<span style="color:#ffa726;font-size:0.6rem;">(推定位置)</span>' : '';
@@ -724,23 +800,18 @@ async function fillGaps(target) {
 
 async function loadAreaData() {
     const btn = document.getElementById('btn-load-data');
-    const pref = document.getElementById('prefecture-select').value;
+    const pref = getPrefectureParam('map', ['13', '14', '11', '12']);
     const city = document.getElementById('city-select').value;
 
     btn.disabled = true;
     btn.textContent = '地価+賃料 読込中...';
 
     try {
-        // 1. 既存地価データ + 取引データ
-        const [lpResp, txResp] = await Promise.all([
-            fetch(`/api/land-prices/${pref}?city_code=${city}`),
-            fetch(`/api/transactions/${pref}?city_code=${city}`),
-        ]);
+        // 1. 既存地価データ（取引平均プロットは廃止）
+        const lpResp = await fetch(`/api/land-prices/${encodeURIComponent(pref)}?city_code=${city}`);
         const lpData = await lpResp.json();
         renderLandPrices(lpData.geojson);
         showAreaStats(lpData.summary);
-        const txData = await txResp.json();
-        renderTransactions(txData.geojson);
 
         // 2. 公示地価API (bounds→DB保存) + 賃料スクレイピングを同時実行
         btn.textContent = 'API地価+賃料取得中...';
@@ -775,6 +846,21 @@ async function loadAreaData() {
     }
 }
 
+async function loadDbLayersFromDatabase() {
+    const pref = getPrefectureParam('map', ['13', '14', '11', '12']);
+    const city = document.getElementById('city-select')?.value || '';
+    try {
+        const lpResp = await fetch(`/api/land-prices/${encodeURIComponent(pref)}?city_code=${city}`);
+        const lpData = await lpResp.json();
+        renderLandPrices(lpData.geojson);
+        showAreaStats(lpData.summary);
+        // 取引平均プロットと吹き出しは表示しない
+        renderTransactions(null);
+    } catch (err) {
+        console.error('DBレイヤー読込エラー:', err);
+    }
+}
+
 // ===== 地図レンダリング =====
 
 function renderLandPrices(geojson) {
@@ -802,11 +888,16 @@ function renderLandPrices(geojson) {
             `);
         },
     });
-    if (document.getElementById('layer-land-price').checked) landPriceLayer.addTo(map);
+    if (isLayerEnabled('layer-land-price', true)) landPriceLayer.addTo(map);
 }
 
 function renderTransactions(geojson) {
     if (transactionLayer) map.removeLayer(transactionLayer);
+    // 取引平均のプロット/吹き出しは廃止
+    if (!geojson || !geojson.features || !geojson.features.length) {
+        transactionLayer = null;
+        return;
+    }
 
     transactionLayer = L.geoJSON(geojson, {
         pointToLayer: (f, ll) => L.circleMarker(ll, {
@@ -825,7 +916,7 @@ function renderTransactions(geojson) {
             `);
         },
     });
-    if (document.getElementById('layer-transactions').checked) transactionLayer.addTo(map);
+    if (isLayerEnabled('layer-transactions', true)) transactionLayer.addTo(map);
 }
 
 function showAreaStats(summary) {
@@ -850,7 +941,7 @@ async function analyzeProperty() {
     btn.disabled = true;
     btn.textContent = '分析中...';
 
-    const pref = document.getElementById('prefecture-select').value;
+    const pref = getPrimaryPrefectureCode('map', ['13']);
     const city = document.getElementById('city-select').value;
 
     const propData = {
@@ -905,6 +996,44 @@ async function analyzeProperty() {
             data.analysis_input_after || null
         );
         if (data.asset_score) showAssetScoreInResult(data.asset_score);
+
+        // 判定結果と地図色を一致させるため、選択中物件の表示データを更新
+        const presetIdxNum = parseInt(presetIdx);
+        if (!Number.isNaN(presetIdxNum) && sampleProperties[presetIdxNum] && data.judgment) {
+            const p = sampleProperties[presetIdxNum];
+            p._analysis_grade = data.judgment.grade || p._analysis_grade;
+            p.grade = data.judgment.grade || p.grade;
+            if (data.valuation?.gross_yield != null) p.gross_yield = data.valuation.gross_yield;
+            if (data.valuation?.net_yield != null) p.net_yield = data.valuation.net_yield;
+            p._analysis_score = data.judgment.overall_score ?? p._analysis_score;
+            p._analysis_recommendation = data.judgment.recommendation || p._analysis_recommendation;
+            p._analysis_updated_at = new Date().toISOString();
+
+            // キャッシュも更新
+            persistPropertyAnalysisResult(p, {
+                selected: {
+                    grade: p.grade,
+                    gross_yield: p.gross_yield,
+                    net_yield: p.net_yield,
+                    score: p._analysis_score,
+                    recommendation: p._analysis_recommendation,
+                    scenario: p._analysis_scenario,
+                    confidence: data.judgment.confidence,
+                },
+                as_is: p._scenario_as_is,
+                rebuild: p._scenario_rebuild,
+            });
+            saveAnalysisCache();
+
+            const typeFilter = document.getElementById('prop-filter-type')?.value || '';
+            const sortBy = document.getElementById('prop-sort')?.value || 'updated_at';
+            const refreshed = getFilteredProperties(sampleProperties, typeFilter);
+            const sorted = sortPropertiesForView(refreshed, sortBy);
+            applyRankOrderToProperties(sorted);
+            renderPropertyList(sorted);
+            plotSampleProperties(sorted);
+            showRanking(buildRankingFromProperties(sorted));
+        }
         switchTab('tab-property');
     } catch (err) {
         console.error('分析エラー:', err);
@@ -1241,8 +1370,11 @@ function showRanking(ranking) {
         const netY = r.net_yield != null ? ` / 正味${(r.net_yield * 100).toFixed(1)}%` : '';
         const holdRoi = r.hold_sell_roi != null ? ` / 8年ROI${(r.hold_sell_roi * 100).toFixed(0)}%` : '';
         const exitCap = r.exit_cap_rate != null ? ` / 出口Cap${(r.exit_cap_rate * 100).toFixed(1)}%` : '';
+        const ci = Number.isFinite(Number(r.client_index)) ? Number(r.client_index) : '';
+        const pid = (r.id == null ? '' : String(r.id).replace(/"/g, '&quot;'));
+        const selectable = (ci !== '' || pid) ? 'ranking-selectable' : '';
         html += `
-            <div class="ranking-item">
+            <div class="ranking-item ${selectable}" data-client-index="${ci}" data-property-id="${pid}" style="${selectable ? 'cursor:pointer;' : ''}">
                 <span class="ranking-rank">#${i + 1}</span>
                 <span class="ranking-grade grade-badge grade-${r.grade}" style="width:28px;height:28px;font-size:0.85rem;border-radius:6px;">${r.grade}</span>
                 <div class="ranking-info">
@@ -1252,6 +1384,31 @@ function showRanking(ranking) {
             </div>`;
     });
     document.getElementById('ranking-list').innerHTML = html;
+    document.querySelectorAll('#ranking-list .ranking-selectable').forEach(el => {
+        el.addEventListener('click', async () => {
+            const ciRaw = el.getAttribute('data-client-index');
+            const ci = ciRaw === '' ? null : Number(ciRaw);
+            const pid = el.getAttribute('data-property-id') || '';
+            await openRankingItem(ci, pid);
+        });
+    });
+}
+
+async function openRankingItem(clientIndex, propertyId) {
+    let resolved = false;
+    if (Number.isInteger(clientIndex) && clientIndex >= 0 && sampleProperties[clientIndex]) {
+        selectProperty(clientIndex);
+        resolved = true;
+    } else if (propertyId) {
+        resolved = await selectPropertyById(propertyId);
+    }
+    if (!resolved) return;
+    switchTab('tab-property');
+    try {
+        await analyzeProperty();
+    } catch (e) {
+        console.debug('ranking詳細分析エラー:', e);
+    }
 }
 
 function hideRankingPanel() {
@@ -1396,7 +1553,7 @@ async function scrapeProperties() {
     btn.textContent = 'スクレイピング中...';
     document.getElementById('scrape-result').innerHTML = '<div class="loading">複数ソースから取得中...</div>';
 
-    const pref = document.getElementById('scrape-pref').value;
+    const pref = getPrefectureParam('scrape-property', ['13', '14', '11', '12']);
     const pages = document.getElementById('scrape-pages').value;
 
     // マルチソース選択
@@ -1415,11 +1572,17 @@ async function scrapeProperties() {
         const data = await resp.json();
 
         if (data.count > 0) {
+            const dedupe = data.dedupe || {};
+            const judged = Number(data.auto_judged || 0);
             document.getElementById('scrape-result').innerHTML =
-                `<span style="color:#66bb6a">${data.count}件取得 (${(data.sources||[]).join(', ')})</span>`;
+                `<span style="color:#66bb6a">${data.count}件取得 (${(data.sources||[]).join(', ')})</span>` +
+                `<br><span style="color:#90caf9;font-size:0.72rem;">重複統合: ${dedupe.merged_records || 0}件 / 自動判定: ${judged}件</span>`;
             sampleProperties = sampleProperties.concat(data.properties);
             loadSampleProperties();
             plotSampleProperties();
+            if (Array.isArray(data.ranking) && data.ranking.length) {
+                showRanking(data.ranking);
+            }
         } else {
             document.getElementById('scrape-result').innerHTML =
                 '<span style="color:#ffa726">物件が見つかりませんでした</span>';
@@ -1517,14 +1680,16 @@ async function scrapeRentals() {
     const resultEl = document.getElementById('rental-scrape-result');
     resultEl.innerHTML = '<div class="loading">SUUMO賃貸から取得中...</div>';
 
-    const pref = document.getElementById('rental-scrape-pref').value;
+    const pref = getPrefectureParam('scrape-rental', ['13', '14', '11', '12']);
     const pages = document.getElementById('rental-scrape-pages').value;
 
     try {
         const resp = await fetch(`/api/scrape-rentals?prefecture_code=${pref}&max_pages=${pages}`);
         const data = await resp.json();
+        const dedupe = data.dedupe || {};
         resultEl.innerHTML = `<span style="color:#66bb6a">` +
-            `${data.count}件取得, ${data.saved}件DB保存</span>`;
+            `${data.count}件取得, ${data.saved}件DB保存</span>` +
+            `<br><span style="color:#90caf9;font-size:0.72rem;">重複統合: ${dedupe.merged_records || 0}件</span>`;
         loadRentalStats();
     } catch (e) {
         resultEl.innerHTML = `<span style="color:#ef5350">エラー: ${e.message}</span>`;
@@ -1540,10 +1705,10 @@ async function runDistortionAnalysis() {
     const btn = document.getElementById('btn-run-distortion');
     btn.disabled = true;
     btn.textContent = '分析中...';
-    const pref = document.getElementById('prefecture-select').value;
+    const pref = getPrefectureParam('map', ['13', '14', '11', '12']);
 
     try {
-        const resp = await fetch(`/api/analysis/distortion?prefecture_code=${pref}`);
+        const resp = await fetch(`/api/analysis/distortion?prefecture_code=${encodeURIComponent(pref)}`);
         const data = await resp.json();
         const panel = document.getElementById('distortion-panel');
         panel.style.display = 'block';
@@ -1670,9 +1835,9 @@ function toggleLayer(e) {
 async function loadStationMarkers() {
     if (stationLayer) map.removeLayer(stationLayer);
 
-    const pref = document.getElementById('prefecture-select').value;
+    const pref = getPrefectureParam('map', ['13', '14', '11', '12']);
     try {
-        const resp = await fetch(`/api/stations/${pref}`);
+        const resp = await fetch(`/api/stations/${encodeURIComponent(pref)}`);
         const data = await resp.json();
         stationsData = data.stations || [];
 
@@ -1917,9 +2082,11 @@ async function scrapeLandListings() {
     btn.textContent = 'スクレイピング中...';
     document.getElementById('land-scrape-result').innerHTML = '<div class="loading">取得中...</div>';
 
+    const prefCodes = getSelectedPrefectureCodes('scrape-land', ['13', '14', '11', '12']);
     const body = {
         source: document.getElementById('land-source').value,
-        prefecture_code: document.getElementById('land-pref').value,
+        prefecture_code: prefCodes.join(','),
+        prefecture_codes: prefCodes,
         price_min: parseInt(document.getElementById('land-price-min').value) || null,
         price_max: parseInt(document.getElementById('land-price-max').value) || null,
         area_min: parseFloat(document.getElementById('land-area-min').value) || null,
@@ -2597,10 +2764,11 @@ async function saveScrapeConfig() {
         return;
     }
 
+    const prefCodes = getSelectedPrefectureCodes('scrape-land', ['13', '14', '11', '12']);
     const config = {
         name: name,
         source: document.getElementById('land-source').value,
-        prefecture_codes: [document.getElementById('land-pref').value],
+        prefecture_codes: prefCodes,
         price_min: parseInt(document.getElementById('land-price-min').value) || null,
         price_max: parseInt(document.getElementById('land-price-max').value) || null,
         area_min: parseFloat(document.getElementById('land-area-min').value) || null,
@@ -2965,17 +3133,24 @@ async function loadUnifiedData(offset) {
     }
 }
 
-function selectPropertyById(propertyId) {
+async function selectPropertyById(propertyId) {
     const idx = sampleProperties.findIndex(p => String(p.id) === String(propertyId));
     if (idx >= 0) {
         selectProperty(idx);
-        return;
+        return true;
     }
     // 最新データに未読込のIDがある場合は再読込後に再解決
-    loadSampleProperties().then(() => {
+    try {
+        await loadSampleProperties();
         const reIdx = sampleProperties.findIndex(p => String(p.id) === String(propertyId));
-        if (reIdx >= 0) selectProperty(reIdx);
-    }).catch(() => {});
+        if (reIdx >= 0) {
+            selectProperty(reIdx);
+            return true;
+        }
+        return false;
+    } catch (_) {
+        return false;
+    }
 }
 
 // =====================================================
@@ -3396,6 +3571,16 @@ function _buildMeshRect(metric, f) {
 }
 
 async function loadMeshLayer(metric, forceRefresh) {
+    if (metric === 'tx_price') {
+        // 取引平均メッシュは表示対象外
+        if (meshLayers[metric] && map.hasLayer(meshLayers[metric])) {
+            map.removeLayer(meshLayers[metric]);
+        }
+        delete meshLayers[metric];
+        delete meshCache[metric];
+        delete meshRectCache[metric];
+        return;
+    }
     // キャッシュ初期化
     if (!meshCache[metric]) meshCache[metric] = {};
     if (!meshRectCache[metric]) meshRectCache[metric] = {};
@@ -3787,41 +3972,9 @@ async function loadIVYield() {
 }
 
 async function loadIVTransactions() {
+    // 市区町村/区平均の取引プロットは表示しない
     if (ivTransLayer) map.removeLayer(ivTransLayer);
-    ivTransLayer = L.layerGroup();
-    try {
-        // ズームに応じてメッシュ粒度 or 市区町村集計
-        const zoom = map.getZoom();
-        const url = zoom >= 12
-            ? `/api/layers/mesh-transactions?${_mapBoundsParams()}`
-            : `/api/layers/transactions?${_mapBoundsParams()}`;
-        const resp = await fetch(url);
-        const data = await resp.json();
-
-        (data.features || []).forEach(f => {
-            const p = f.properties, c = f.geometry.coordinates;
-            const psm = p.avg_price_sqm || p.avg_price_sqm;
-            const color = p.color || (psm > 1000000 ? '#880e4f' : psm > 500000 ? '#d32f2f' :
-                          psm > 300000 ? '#ff6f00' : psm > 150000 ? '#fbc02d' : '#66bb6a');
-            const r = Math.max(3, Math.min(12, Math.log10(Math.max(1, p.count)) * 3));
-            const m = L.circleMarker([c[1], c[0]], {
-                radius: r, color: '#fff', fillColor: color,
-                fillOpacity: 0.6, weight: 0.5, opacity: 0.4,
-            });
-            const pType = p.type || p.property_type || '';
-            let tip = `<b>¥${psm.toLocaleString()}/m²</b>`;
-            if (pType) tip += ` <span style="color:#90a4ae">${pType}</span>`;
-            if (p.city_name) tip += `<br>${p.city_name}`;
-            if (p.min_price_sqm) tip += `<br>幅: ¥${p.min_price_sqm.toLocaleString()}~${p.max_price_sqm.toLocaleString()}`;
-            const total = p.avg_total || p.avg_total_price;
-            if (total) tip += `<br>平均総額: ¥${(total/10000).toFixed(0)}万円`;
-            tip += `<br>${p.count.toLocaleString()}件`;
-            m.bindTooltip(tip, {sticky:true});
-            ivTransLayer.addLayer(m);
-        });
-        ivTransLayer.addTo(map);
-        console.log(`取引(${zoom>=12?'mesh':'area'}): ${data.features?.length || 0}件`);
-    } catch(e) { console.error('取引レイヤーエラー:', e); }
+    ivTransLayer = null;
 }
 
 async function loadIVPopulation() {
@@ -4262,7 +4415,7 @@ function updateLegend() {
 
 function _hookLegendUpdate() {
     // 新レイヤーIDと旧レイヤーID両方フック
-    ['layer-mesh-landprice','layer-mesh-rent','layer-mesh-tx','layer-mesh-yield',
+    ['layer-mesh-landprice','layer-mesh-rent','layer-mesh-yield',
      'layer-mesh-pop','layer-mesh-facility','layer-mesh-zoning',
      'layer-iv-stationpower','layer-iv-yield'].forEach(id => {
         const el = document.getElementById(id);
