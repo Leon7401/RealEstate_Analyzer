@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 from .base_agent import BaseAgent
 from .url_scraper_agent import UrlScraperAgent
 from models.property import Property
+from data.station_master import resolve_station_id, STATION_MAP
 
 
 class ScraperAgent(BaseAgent):
@@ -308,7 +309,7 @@ class ScraperAgent(BaseAgent):
 
         # 交通
         transport = fields.get("交通", "")
-        station, distance = self._extract_station_from_transport(transport)
+        station, distance, station_id = self._extract_station_from_transport(transport, pref_code=pref_code)
 
         # 構造
         structure = self._extract_structure(
@@ -322,8 +323,16 @@ class ScraperAgent(BaseAgent):
         # 面積
         land_text = fields.get("土地面積", "")
         land_area = self._extract_area_val(land_text)
-        bldg_text = fields.get("建物面積", "") or fields.get("専有面積", "")
+        bldg_text = (
+            fields.get("建物面積", "")
+            or fields.get("建物延床面積", "")
+            or fields.get("延床面積", "")
+            or fields.get("専有面積", "")
+        )
         building_area = self._extract_area_val(bldg_text)
+        floors = self._extract_floor_count(
+            fields.get("階数", "") + " " + fields.get("建物階数", "") + " " + fields.get("建物", "")
+        )
 
         # フォールバック: フルテキストから不足情報を補完
         full_text = card.get_text(" ", strip=True)
@@ -352,13 +361,17 @@ class ScraperAgent(BaseAgent):
             else:
                 structure = self._extract_structure(full_text)
         if not station:
-            station, distance = self._extract_station_from_transport(full_text)
+            station, distance, station_id = self._extract_station_from_transport(full_text, pref_code=pref_code)
         if not land_area:
             m = re.search(r"土地\s*([\d,.]+)\s*(?:m²|㎡|m2)", full_text)
             if m:
                 land_area = float(m.group(1).replace(",", ""))
         if not building_area:
-            m = re.search(r"建物\s*([\d,.]+)\s*(?:m²|㎡|m2)", full_text)
+            m = re.search(r"(?:建物|延床|建物延床|専有)\s*(?:面積)?\s*[:：]?\s*([\d,.]+)\s*(?:m²|㎡|m2|平米)", full_text)
+            if m:
+                building_area = float(m.group(1).replace(",", ""))
+        if not building_area:
+            m = re.search(r"([\d,.]+)\s*(?:m²|㎡|m2|平米)\s*(?:建物|延床|専有)", full_text)
             if m:
                 building_area = float(m.group(1).replace(",", ""))
         if not building_age:
@@ -367,6 +380,8 @@ class ScraperAgent(BaseAgent):
                 building_age = int(m.group(1))
                 from datetime import datetime
                 built_year = datetime.now().year - building_age
+        if not floors:
+            floors = self._extract_floor_count(full_text)
 
         if not price and not gross_yield:
             return None
@@ -382,11 +397,13 @@ class ScraperAgent(BaseAgent):
             land_area=land_area,
             building_area=building_area,
             structure=structure,
+            floors=floors,
             built_year=built_year,
             building_age=building_age,
             gross_yield=gross_yield,
             nearest_station=station,
             station_distance_min=distance,
+            station_id=station_id,
             current_rent_annual=(
                 int(price * gross_yield) if price and gross_yield else None
             ),
@@ -554,7 +571,11 @@ class ScraperAgent(BaseAgent):
         for card in cards:
             try:
                 # 建物情報
-                title_el = card.select_one(".cassetteitem_content-title")
+                title_el = (
+                    card.select_one(".cassetteitem_content-title")
+                    or card.select_one(".cassetteitem_content-label")
+                    or card.select_one(".cassetteitem_title")
+                )
                 building_name = title_el.get_text(strip=True) if title_el else ""
 
                 addr_el = card.select_one(".cassetteitem_detail-col1")
@@ -576,12 +597,18 @@ class ScraperAgent(BaseAgent):
                 if m:
                     from datetime import datetime
                     built_year = datetime.now().year - int(m.group(1))
+                floors_total = None
+                m_total = re.search(r"(\d+)階建", col3_text)
+                if m_total:
+                    floors_total = int(m_total.group(1))
+                if floors_total is None:
+                    floors_total = self._extract_floor_count(col3_text)
 
                 # 構造
                 structure = self._extract_structure(col3_text + " " + building_name)
 
                 # 駅・徒歩
-                station, distance = self._extract_station_from_transport(station_text)
+                station, distance, station_id = self._extract_station_from_transport(station_text, pref_code=pref_code)
 
                 city_code = self._guess_city_code(address, pref_code)
 
@@ -594,17 +621,26 @@ class ScraperAgent(BaseAgent):
 
                     texts = [td.get_text(strip=True) for td in tds]
 
+                    unit_text = " ".join(texts)
+
                     # 賃料 (例: "15万円12000円" → 150000 + 12000 = rent, 管理費は別)
-                    rent_text = texts[3] if len(texts) > 3 else ""
+                    rent_text = texts[3] if len(texts) > 3 else unit_text
                     rent = self._extract_rent(rent_text)
                     if not rent or rent < 10000:
                         continue
 
                     # 面積 (例: "1SK34.7m2")
-                    area_text = texts[5] if len(texts) > 5 else ""
+                    area_text = texts[5] if len(texts) > 5 else unit_text
                     area = self._extract_area_val(area_text)
                     if not area or area < 5:
                         continue
+                    floor = None
+                    floor_text = " ".join(texts[:3]) or unit_text
+                    m_floor = re.search(r"(\d+)階", floor_text)
+                    if m_floor:
+                        floor = int(m_floor.group(1))
+                    if floor is None:
+                        floor = self._extract_unit_floor(unit_text)
 
                     # 間取り（1R/ワンルーム/1K/1LDK 等を正規化）
                     layout = self._extract_layout(area_text or " ".join(texts))
@@ -616,6 +652,7 @@ class ScraperAgent(BaseAgent):
                         continue
 
                     rentals.append({
+                        "building_name": building_name,
                         "address": address,
                         "rent_monthly": rent,
                         "area_sqm": area,
@@ -623,8 +660,11 @@ class ScraperAgent(BaseAgent):
                         "layout": layout,
                         "structure": structure,
                         "built_year": built_year,
+                        "floor": floor,
+                        "floors_total": floors_total,
                         "nearest_station": station,
                         "station_distance_min": distance,
+                        "station_id": station_id,
                         "city_code": city_code,
                         "source": "SUUMO賃貸",
                     })
@@ -694,6 +734,29 @@ class ScraperAgent(BaseAgent):
                 return val
         return None
 
+    def _extract_floor_count(self, text: str) -> Optional[int]:
+        if not text:
+            return None
+        m = re.search(r"(\d+)\s*階建", text)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"地上\s*(\d+)\s*階", text)
+        if m:
+            return int(m.group(1))
+        return None
+
+    def _extract_unit_floor(self, text: str) -> Optional[int]:
+        if not text:
+            return None
+        # "3階/10階建", "4階", "B1階"
+        m = re.search(r"(\d+)\s*階\s*/\s*\d+\s*階建", text)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"(\d+)\s*階", text)
+        if m:
+            return int(m.group(1))
+        return None
+
     def _extract_structure(self, text: str) -> Optional[str]:
         if not text:
             return None
@@ -720,19 +783,52 @@ class ScraperAgent(BaseAgent):
             return (year, max(0, datetime.now().year - year))
         return (None, None)
 
-    def _extract_station_from_transport(self, text: str) -> tuple:
-        """交通テキストから駅名と徒歩分数を抽出"""
+    def _extract_station_from_transport(self, text: str, pref_code: str = None) -> tuple:
+        """交通テキストから実在駅名/駅IDと徒歩分数を抽出"""
         if not text:
-            return (None, None)
-        # "東武亀戸線 小村井駅 徒歩2分"
-        m = re.search(r"(\S+駅)\s*(?:.*?)(?:歩|徒歩)\s*(\d+)\s*分", text)
-        if m:
-            return (m.group(1), int(m.group(2)))
-        # "「渋谷」駅 歩5分"
-        m = re.search(r"「(.+?)」.*?(?:歩|徒歩)\s*(\d+)\s*分", text)
-        if m:
-            return (m.group(1), int(m.group(2)))
-        return (None, None)
+            return (None, None, None)
+
+        raw = str(text).replace("\n", " ").replace("　", " ")
+        raw = re.sub(r"\s+", " ", raw).strip()
+
+        # 候補抽出（「駅」表記、引用符表記、最寄り駅ラベル）
+        candidates = []
+        for pat in [
+            r"([^\s/／()（）,、]+?)駅",
+            r"「([^」]+)」",
+            r"最寄(?:り)?駅[:：]?\s*([^\s/／()（）,、]+)",
+        ]:
+            for m in re.finditer(pat, raw):
+                name = (m.group(1) or "").strip()
+                if not name:
+                    continue
+                if name in {"徒歩", "バス", "停", "分"}:
+                    continue
+                candidates.append(name)
+
+        # 近傍距離（徒歩）を先に拾う
+        dist = None
+        md = re.search(r"(?:歩|徒歩)\s*(\d+)\s*分", raw)
+        if md:
+            dist = int(md.group(1))
+        else:
+            md = re.search(r"バス\s*\d+\s*分", raw)
+            if md:
+                # バスのみは精度が低いので徒歩距離は未設定
+                dist = None
+
+        # 候補を実在駅に正規化
+        for cand in candidates:
+            sid = resolve_station_id(nearest_station_text=cand, pref_code=pref_code)
+            if sid and sid in STATION_MAP:
+                return (STATION_MAP[sid]["name"], dist, sid)
+
+        # 交通文全体をフォールバックで解決
+        sid = resolve_station_id(nearest_station_text=raw, pref_code=pref_code)
+        if sid and sid in STATION_MAP:
+            return (STATION_MAP[sid]["name"], dist, sid)
+
+        return (None, dist, None)
 
     def _extract_layout(self, text: str) -> Optional[str]:
         """SUUMO表記ゆれを含む間取り抽出"""

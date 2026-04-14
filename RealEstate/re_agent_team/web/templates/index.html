@@ -30,15 +30,13 @@
                 <h3>エリア選択</h3>
                 <div class="form-row">
                     <div class="form-group" style="flex:1">
-                        <select id="prefecture-select">
-                            <option value="13" selected>東京都</option>
-                            <option value="14">神奈川県</option>
-                            <option value="11">埼玉県</option>
-                            <option value="12">千葉県</option>
-                            <option value="27">大阪府</option>
-                            <option value="23">愛知県</option>
-                            <option value="40">福岡県</option>
-                        </select>
+                        <label>都道府県（複数選択）</label>
+                        <div style="display:flex;gap:10px;flex-wrap:wrap;padding:6px 8px;border:1px solid #1e3a5f;border-radius:6px;background:#0f172a;">
+                            <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="map" value="13" checked> 東京都</label>
+                            <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="map" value="14" checked> 神奈川県</label>
+                            <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="map" value="11" checked> 埼玉県</label>
+                            <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="map" value="12" checked> 千葉県</label>
+                        </div>
                     </div>
                     <div class="form-group" style="flex:1">
                         <select id="city-select">
@@ -211,12 +209,13 @@
                         <p class="hint">楽待 / 健美家 / 不動産投資連合隊 から収益物件を一括取得</p>
                         <div class="form-row">
                             <div class="form-group" style="flex:1">
-                                <select id="scrape-pref">
-                                    <option value="13" selected>東京都</option>
-                                    <option value="14">神奈川県</option>
-                                    <option value="11">埼玉県</option>
-                                    <option value="12">千葉県</option>
-                                </select>
+                                <label>都道府県（複数選択）</label>
+                                <div style="display:flex;gap:10px;flex-wrap:wrap;padding:6px 8px;border:1px solid #1e3a5f;border-radius:6px;background:#0f172a;">
+                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-property" value="13" checked> 東京都</label>
+                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-property" value="14" checked> 神奈川県</label>
+                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-property" value="11" checked> 埼玉県</label>
+                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-property" value="12" checked> 千葉県</label>
+                                </div>
                             </div>
                             <div class="form-group" style="flex:1">
                                 <label>ページ数</label>
@@ -248,12 +247,12 @@
                             </div>
                             <div class="form-group" style="flex:1">
                                 <label>都道府県</label>
-                                <select id="land-pref">
-                                    <option value="13" selected>東京都</option>
-                                    <option value="14">神奈川県</option>
-                                    <option value="11">埼玉県</option>
-                                    <option value="12">千葉県</option>
-                                </select>
+                                <div style="display:flex;gap:10px;flex-wrap:wrap;padding:6px 8px;border:1px solid #1e3a5f;border-radius:6px;background:#0f172a;">
+                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-land" value="13" checked> 東京都</label>
+                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-land" value="14" checked> 神奈川県</label>
+                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-land" value="11" checked> 埼玉県</label>
+                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-land" value="12" checked> 千葉県</label>
+                                </div>
                             </div>
                         </div>
                         <div class="form-row">
@@ -289,12 +288,13 @@
                         <p class="hint">SUUMO賃貸から賃料相場データを取得しDBに蓄積</p>
                         <div class="form-row">
                             <div class="form-group" style="flex:1">
-                                <select id="rental-scrape-pref">
-                                    <option value="13" selected>東京都</option>
-                                    <option value="14">神奈川県</option>
-                                    <option value="11">埼玉県</option>
-                                    <option value="12">千葉県</option>
-                                </select>
+                                <label>都道府県（複数選択）</label>
+                                <div style="display:flex;gap:10px;flex-wrap:wrap;padding:6px 8px;border:1px solid #1e3a5f;border-radius:6px;background:#0f172a;">
+                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-rental" value="13" checked> 東京都</label>
+                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-rental" value="14" checked> 神奈川県</label>
+                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-rental" value="11" checked> 埼玉県</label>
+                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-rental" value="12" checked> 千葉県</label>
+                                </div>
                             </div>
                             <div class="form-group" style="flex:1">
                                 <label>ページ数</label>

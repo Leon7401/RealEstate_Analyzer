@@ -47,6 +47,7 @@ class Property:
     # 交通
     nearest_station: Optional[str] = None       # 最寄駅
     station_distance_min: Optional[int] = None  # 駅徒歩（分）
+    station_id: Optional[str] = None            # 駅ID
 
     # メタデータ
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
