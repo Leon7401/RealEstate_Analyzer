@@ -357,8 +357,14 @@ def resolve_station_id(
         cleaned = []
         for c in candidates:
             c = c.replace("駅", "").strip()
-            c = re.sub(r"(JR|東京メトロ|都営|東急|京王|小田急|相鉄|西武|東武|京急|地下鉄)", "", c)
-            c = c.replace("本線", "").replace("線", "").strip()
+            # 事業者名を無条件除去すると「東武練馬」「小田急相模原」を壊すため、
+            # 「◯◯線」の接頭語として現れる場合のみ除去する。
+            c = re.sub(
+                r"^(?:JR|東京メトロ|都営|東急|京王|小田急|相鉄|西武|東武|京急|地下鉄)[^駅]{0,12}?線[／/\s]*",
+                "",
+                c,
+            )
+            c = c.replace("本線", "線").strip()
             if c and len(c) >= 2:
                 cleaned.append(c)
         candidates = cleaned or candidates

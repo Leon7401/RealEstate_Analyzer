@@ -35,7 +35,12 @@ from models.land_listing import LandListing
 from storage.report_store import ReportStore
 from storage.database import Database
 from data.city_master import CITY_MASTER, CITY_NAME_MAP
-from data.station_master import STATIONS, get_stations_by_prefecture
+from data.station_master import (
+    STATIONS,
+    STATION_MAP,
+    get_stations_by_prefecture,
+    resolve_station_id,
+)
 from config.settings import (
     MAP_DEFAULT_CENTER,
     MAP_DEFAULT_ZOOM,
@@ -369,6 +374,125 @@ def _sanitize_station_refs_for_display(props: List[dict]):
                     "UPDATE land_listings SET station=?, walk_minutes=?, updated_at=datetime('now','localtime') WHERE id=?",
                     land_updates,
                 )
+
+
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    r = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(max(0.0, min(1.0, a))))
+
+
+def _is_station_address_consistent(raw: Dict[str, Any]) -> bool:
+    """住所/座標/最寄駅の整合性をざっくり判定"""
+    try:
+        lat = float(raw.get("latitude")) if raw.get("latitude") is not None else None
+        lng = float(raw.get("longitude")) if raw.get("longitude") is not None else None
+    except (TypeError, ValueError):
+        lat = lng = None
+    if lat is None or lng is None:
+        return False
+
+    sid = resolve_station_id(
+        nearest_station_text=raw.get("nearest_station"),
+        lat=lat,
+        lon=lng,
+        pref_code=raw.get("prefecture_code"),
+    )
+    if not sid or sid not in STATION_MAP:
+        return False
+
+    s = STATION_MAP[sid]
+    dkm = _haversine_km(lat, lng, float(s["lat"]), float(s["lon"]))
+    walk = raw.get("station_distance_min")
+    try:
+        walk = float(walk) if walk is not None else None
+    except (TypeError, ValueError):
+        walk = None
+    if walk and walk > 0:
+        expected = max(0.08 * walk, 0.2)
+        return dkm <= max(2.0, expected * 4.0)
+    return dkm <= 8.0
+
+
+def _refresh_property_from_source(raw: Dict[str, Any], use_browser: bool = False) -> Dict[str, Any]:
+    """
+    source_url を再スクレイプし、住所/駅/座標が明確に改善する場合のみ上書きする。
+    """
+    src = str(raw.get("source_url") or "").strip()
+    if not src:
+        return {"updated": False, "reason": "no_source_url"}
+    try:
+        scraped = url_scraper.run(url=src, use_ocr=True, use_browser=use_browser)
+    except Exception as e:
+        return {"updated": False, "reason": f"scrape_error:{e}"}
+    if not scraped:
+        return {"updated": False, "reason": "scrape_none"}
+
+    sdict = scraped.to_dict()
+    if not str(sdict.get("address") or "").strip() and not str(sdict.get("nearest_station") or "").strip():
+        return {"updated": False, "reason": "scrape_low_quality"}
+
+    merged = dict(raw)
+    changed_fields: List[str] = []
+    overwrite_fields = [
+        "name",
+        "address",
+        "prefecture_code",
+        "city_code",
+        "nearest_station",
+        "station_distance_min",
+        "latitude",
+        "longitude",
+        "asking_price",
+        "land_area",
+        "building_area",
+        "structure",
+        "built_year",
+        "building_age",
+        "gross_yield",
+        "current_rent_annual",
+    ]
+    for k in overwrite_fields:
+        nv = sdict.get(k)
+        if nv in (None, ""):
+            continue
+        ov = merged.get(k)
+        if ov != nv:
+            merged[k] = nv
+            changed_fields.append(k)
+
+    # DB正規化ロジックに通す（station_id再解決など）
+    try:
+        db.upsert_property(merged)
+    except Exception as e:
+        return {"updated": False, "reason": f"upsert_error:{e}"}
+
+    # 最新行を再取得
+    latest = dict(merged)
+    try:
+        with db._conn() as conn:
+            row = None
+            if merged.get("id"):
+                row = conn.execute("SELECT * FROM properties WHERE id=? LIMIT 1", (str(merged["id"]),)).fetchone()
+            if not row and merged.get("source_url"):
+                row = conn.execute(
+                    "SELECT * FROM properties WHERE source_url=? ORDER BY updated_at DESC LIMIT 1",
+                    (db._normalize_source_url(merged.get("source_url")),),
+                ).fetchone()
+            if row:
+                latest = dict(row)
+    except Exception:
+        pass
+    return {
+        "updated": bool(changed_fields),
+        "reason": "ok",
+        "changed_fields": changed_fields,
+        "property": latest,
+    }
 
 
 # ===== ページ =====
@@ -2389,6 +2513,103 @@ async def reconcile_stations(request: Request):
         return JSONResponse(content={"status": "error", "error": str(e)}, status_code=500)
 
 
+@app.post("/api/properties/consistency-check")
+async def consistency_check_properties(request: Request):
+    """
+    住所/最寄駅/座標の整合チェックを行い、疑義件はsource_url再取得で補正する。
+    Body:
+      {
+        "limit": 50000,
+        "max_rescrape": 300,
+        "use_browser": false,
+        "strict_nearest": true,
+        "with_dedupe": true
+      }
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    limit = int(data.get("limit", 50000) or 50000)
+    max_rescrape = int(data.get("max_rescrape", 300) or 300)
+    use_browser = bool(data.get("use_browser", False))
+    strict_nearest = bool(data.get("strict_nearest", True))
+    with_dedupe = bool(data.get("with_dedupe", True))
+
+    scanned = 0
+    suspicious = 0
+    rescape_attempted = 0
+    rescape_updated = 0
+    samples: List[Dict[str, Any]] = []
+
+    try:
+        with db._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM properties
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (max(1, limit),),
+            ).fetchall()
+        scanned = len(rows)
+
+        for row in rows:
+            raw = dict(row)
+            if _is_station_address_consistent(raw):
+                continue
+            suspicious += 1
+            if len(samples) < 20:
+                samples.append({
+                    "id": raw.get("id"),
+                    "name": raw.get("name"),
+                    "address": raw.get("address"),
+                    "nearest_station": raw.get("nearest_station"),
+                    "station_distance_min": raw.get("station_distance_min"),
+                    "source_url": raw.get("source_url"),
+                })
+            if rescape_attempted >= max(1, max_rescrape):
+                continue
+            if not str(raw.get("source_url") or "").strip():
+                continue
+            rescape_attempted += 1
+            refreshed = _refresh_property_from_source(raw, use_browser=use_browser)
+            if refreshed.get("updated"):
+                rescape_updated += 1
+
+        # 再スクレイプ後に駅整合を強制再計算
+        rp = db.reconcile_station_refs("properties", limit=limit, force_nearest=strict_nearest)
+        rr = db.reconcile_station_refs("rental_comps", limit=limit, force_nearest=strict_nearest)
+        rl = db.reconcile_land_listing_station_refs(limit=limit, force_nearest=strict_nearest)
+
+        dedupe_props = {}
+        dedupe_rentals = {}
+        land_dup_marked = 0
+        if with_dedupe:
+            dedupe_props = db.merge_duplicate_properties(dry_run=False, min_group_size=2, max_groups=5000)
+            dedupe_rentals = db.merge_duplicate_rental_comps(dry_run=False, min_group_size=2, max_groups=5000)
+            land_dup_marked = db.detect_duplicates()
+
+        return JSONResponse(content={
+            "status": "ok",
+            "scanned": scanned,
+            "suspicious": suspicious,
+            "rescrape_attempted": rescape_attempted,
+            "rescrape_updated": rescape_updated,
+            "reconciled_properties": rp,
+            "reconciled_rentals": rr,
+            "reconciled_land_listings": rl,
+            "strict_nearest": strict_nearest,
+            "dedupe_properties": dedupe_props,
+            "dedupe_rentals": dedupe_rentals,
+            "land_duplicates_marked": land_dup_marked,
+            "sample_suspicious": samples,
+        })
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "error": str(e)}, status_code=500)
+
+
 # ===== URL物件取込API =====
 
 @app.post("/api/scrape-url")
@@ -4208,6 +4429,21 @@ async def export_kml():
 async def analyze_full(request: Request):
     """物件の投資判定 + 資産性分析を統合実行"""
     data = await request.json()
+    verify_source_on_analyze = bool(data.get("verify_source_on_analyze", True))
+    verify_source_use_browser = bool(data.get("verify_source_use_browser", False))
+    source_refresh = {"checked": False, "updated": False, "reason": "skipped"}
+    if verify_source_on_analyze and str(data.get("source_url") or "").strip():
+        source_refresh["checked"] = True
+        refreshed = _refresh_property_from_source(data, use_browser=verify_source_use_browser)
+        source_refresh.update({
+            "updated": bool(refreshed.get("updated")),
+            "reason": refreshed.get("reason"),
+            "changed_fields": refreshed.get("changed_fields", []),
+        })
+        if refreshed.get("property"):
+            # 分析入力を最新DB値へ置換
+            data = dict(refreshed["property"])
+
     prop = Property.from_dict(data)
     analysis_input_before = {
         "asking_price": prop.asking_price,
@@ -4317,6 +4553,7 @@ async def analyze_full(request: Request):
         "auto_filled": auto_filled,
         "analysis_input_before": analysis_input_before,
         "analysis_input_after": analysis_input_after,
+        "source_refresh": source_refresh,
     })
 
 
