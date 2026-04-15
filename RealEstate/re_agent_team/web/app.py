@@ -227,6 +227,9 @@ def _dedupe_properties_for_display(props: List[dict]) -> List[dict]:
             lat = lng = None
         if lat is not None and lng is not None and price is not None and bld is not None:
             keys.append(f"geo:{round(lat, 4)}|{round(lng, 4)}|{price}|{bld}")
+        if lat is not None and lng is not None and address:
+            # ソース差異を跨いだ同一地点重複を抑制
+            keys.append(f"addrgeo:{pref}|{address}|{round(lat,4)}|{round(lng,4)}")
         if lat is not None and lng is not None and price is not None and station:
             dist = p.get("station_distance_min")
             try:
@@ -246,6 +249,120 @@ def _dedupe_properties_for_display(props: List[dict]) -> List[dict]:
         seen.update(keys)
 
     return unique_rows
+
+
+def _sanitize_station_refs_for_display(props: List[dict]):
+    """表示前に最寄駅の整合性を補正（住所/座標と矛盾する駅名を修正）"""
+    if not props:
+        return
+    try:
+        from data.station_master import resolve_station_id, STATION_MAP, find_nearest_station
+    except Exception:
+        return
+
+    def _pref_from_address(addr: str) -> str:
+        a = str(addr or "")
+        if "東京都" in a:
+            return "13"
+        if "神奈川県" in a:
+            return "14"
+        if "埼玉県" in a:
+            return "11"
+        if "千葉県" in a:
+            return "12"
+        return ""
+
+    def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+        r = 6371.0
+        p1 = math.radians(lat1)
+        p2 = math.radians(lat2)
+        dp = math.radians(lat2 - lat1)
+        dl = math.radians(lng2 - lng1)
+        a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        return 2 * r * math.asin(math.sqrt(max(0.0, min(1.0, a))))
+
+    prop_updates: List[tuple] = []
+    land_updates: List[tuple] = []
+
+    for p in props:
+        try:
+            lat = float(p.get("latitude")) if p.get("latitude") is not None else None
+            lng = float(p.get("longitude")) if p.get("longitude") is not None else None
+        except (TypeError, ValueError):
+            lat = lng = None
+        if lat is None or lng is None:
+            continue
+
+        pref = str(p.get("prefecture_code") or "").strip() or _pref_from_address(p.get("address") or "")
+        st_name = str(p.get("nearest_station") or "").strip()
+        sid = resolve_station_id(st_name, lat=lat, lon=lng, pref_code=pref or None)
+
+        suspicious = False
+        if sid and sid in STATION_MAP:
+            s = STATION_MAP[sid]
+            if pref and str(s.get("pref") or "") and str(s.get("pref")) != pref:
+                suspicious = True
+            try:
+                dkm = _haversine_km(lat, lng, float(s["lat"]), float(s["lon"]))
+            except Exception:
+                dkm = None
+            walk = p.get("station_distance_min")
+            try:
+                walk = float(walk) if walk is not None else None
+            except (TypeError, ValueError):
+                walk = None
+            if dkm is not None:
+                if walk and walk > 0:
+                    expected = max(0.08 * walk, 0.2)
+                    if dkm > max(2.0, expected * 4.0):
+                        suspicious = True
+                elif dkm > 8.0:
+                    suspicious = True
+        else:
+            suspicious = bool(st_name)
+
+        if not suspicious:
+            continue
+
+        near = find_nearest_station(lat, lng, max_distance_km=8.0, pref_code=pref or None)
+        # 駅マスタの都県コードが実地とズレるケースを救済（例: 八王子周辺）
+        if (not near) or float(near.get("distance_km") or 999.0) > 20.0:
+            near_any = find_nearest_station(lat, lng, max_distance_km=8.0, pref_code=None)
+            if near_any:
+                near = near_any
+        if not near:
+            continue
+        sid2 = near.get("station_id")
+        sname2 = near.get("name")
+        dkm2 = float(near.get("distance_km") or 0.0)
+        walk2 = max(1, min(120, int(round(dkm2 * 12.5)))) if dkm2 > 0 else (p.get("station_distance_min") or None)
+
+        p["station_id"] = sid2
+        p["nearest_station"] = sname2
+        p["station_distance_min"] = walk2
+
+        pid = p.get("id")
+        if pid:
+            prop_updates.append((sid2, sname2, walk2, str(pid)))
+        lid = p.get("_land_listing_id")
+        if lid:
+            try:
+                land_updates.append((sname2, walk2, int(lid)))
+            except Exception:
+                pass
+
+    if prop_updates or land_updates:
+        with db._conn() as conn:
+            if prop_updates:
+                conn.executemany(
+                    "UPDATE properties SET station_id=?, nearest_station=?, station_distance_min=?, updated_at=datetime('now','localtime') WHERE id=?",
+                    prop_updates,
+                )
+            if land_updates:
+                conn.executemany(
+                    "UPDATE land_listings SET station=?, walk_minutes=?, updated_at=datetime('now','localtime') WHERE id=?",
+                    land_updates,
+                )
 
 
 # ===== ページ =====
@@ -453,8 +570,6 @@ async def get_sample_properties(
     if min_yield is not None:
         props = [p for p in props if (p.get("gross_yield") or 0) >= min_yield]
 
-    props = _dedupe_properties_for_display(props)
-
     # ソート
     sort_keys = {
         "updated_at": lambda p: p.get("fetched_at") or p.get("updated_at") or "",
@@ -469,6 +584,10 @@ async def get_sample_properties(
 
     # 座標なし物件に駅マスタから推定座標を付与
     _estimate_missing_coords(props)
+    # 座標/住所と矛盾する最寄駅を補正
+    _sanitize_station_refs_for_display(props)
+    # 補正後に重複除外
+    props = _dedupe_properties_for_display(props)
     return JSONResponse(content={"properties": props, "total": len(props)})
 
 
@@ -583,21 +702,71 @@ def _estimate_missing_coords(props: list):
             lat0 = float(p["latitude"])
             lng0 = float(p["longitude"])
             if _coord_in_pref_bounds(lat0, lng0, pref_code):
-                # 都県内でも、駅徒歩情報と距離が極端に矛盾する座標は補正対象にする
-                station_name0 = str(p.get("nearest_station") or "")
-                walk_min0 = p.get("station_distance_min")
-                try:
-                    walk_min0 = float(walk_min0) if walk_min0 is not None else None
-                except (TypeError, ValueError):
-                    walk_min0 = None
-                st0 = _pick_station_coord(station_name0, pref_code)
-                if st0 and walk_min0 is not None and walk_min0 > 0:
-                    dkm0 = _haversine_km(lat0, lng0, st0["lat"], st0["lng"])
-                    expected = max(0.08 * walk_min0, 0.2)
-                    if dkm0 <= max(1.5, expected * 4.0):
-                        continue
+                # 同一都県内でも、住所ジオコードと大きく乖離する座標は補正対象
+                addr0 = (p.get("address") or "").strip()
+                if addr0 and len(addr0) >= 6:
+                    if addr0 in geocode_cache:
+                        gc0 = geocode_cache[addr0]
+                    else:
+                        try:
+                            gc0 = Geocoder().geocode(addr0)
+                        except Exception:
+                            gc0 = None
+                        geocode_cache[addr0] = gc0
+                    if gc0:
+                        glat0, glng0 = float(gc0[0]), float(gc0[1])
+                        if _coord_in_pref_bounds(glat0, glng0, pref_code):
+                            if _haversine_km(lat0, lng0, glat0, glng0) > 8.0:
+                                # 住所準拠座標を優先するため補正対象に回す
+                                pass
+                            else:
+                                # 都県内でも、駅徒歩情報と距離が極端に矛盾する座標は補正対象にする
+                                station_name0 = str(p.get("nearest_station") or "")
+                                walk_min0 = p.get("station_distance_min")
+                                try:
+                                    walk_min0 = float(walk_min0) if walk_min0 is not None else None
+                                except (TypeError, ValueError):
+                                    walk_min0 = None
+                                st0 = _pick_station_coord(station_name0, pref_code)
+                                if st0 and walk_min0 is not None and walk_min0 > 0:
+                                    dkm0 = _haversine_km(lat0, lng0, st0["lat"], st0["lng"])
+                                    expected = max(0.08 * walk_min0, 0.2)
+                                    if dkm0 <= max(1.5, expected * 4.0):
+                                        continue
+                                else:
+                                    continue
+                        else:
+                            # ジオコードが都県外なら従来判定のみ
+                            station_name0 = str(p.get("nearest_station") or "")
+                            walk_min0 = p.get("station_distance_min")
+                            try:
+                                walk_min0 = float(walk_min0) if walk_min0 is not None else None
+                            except (TypeError, ValueError):
+                                walk_min0 = None
+                            st0 = _pick_station_coord(station_name0, pref_code)
+                            if st0 and walk_min0 is not None and walk_min0 > 0:
+                                dkm0 = _haversine_km(lat0, lng0, st0["lat"], st0["lng"])
+                                expected = max(0.08 * walk_min0, 0.2)
+                                if dkm0 <= max(1.5, expected * 4.0):
+                                    continue
+                            else:
+                                continue
                 else:
-                    continue
+                    # 都県内でも、駅徒歩情報と距離が極端に矛盾する座標は補正対象にする
+                    station_name0 = str(p.get("nearest_station") or "")
+                    walk_min0 = p.get("station_distance_min")
+                    try:
+                        walk_min0 = float(walk_min0) if walk_min0 is not None else None
+                    except (TypeError, ValueError):
+                        walk_min0 = None
+                    st0 = _pick_station_coord(station_name0, pref_code)
+                    if st0 and walk_min0 is not None and walk_min0 > 0:
+                        dkm0 = _haversine_km(lat0, lng0, st0["lat"], st0["lng"])
+                        expected = max(0.08 * walk_min0, 0.2)
+                        if dkm0 <= max(1.5, expected * 4.0):
+                            continue
+                    else:
+                        continue
 
         lat, lng = None, None
         coord_source = None

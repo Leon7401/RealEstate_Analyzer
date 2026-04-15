@@ -198,10 +198,26 @@ function isLayerEnabled(layerId, defaultValue = true) {
     return !!el.checked;
 }
 
+function setupMapPanes() {
+    if (!map) return;
+    // ヒートマップ系を物件より下に固定
+    if (!map.getPane('heatPane')) {
+        map.createPane('heatPane');
+    }
+    map.getPane('heatPane').style.zIndex = 350;
+
+    // 物件オブジェクトは常に最前面側へ
+    if (!map.getPane('objectPane')) {
+        map.createPane('objectPane');
+    }
+    map.getPane('objectPane').style.zIndex = 650;
+}
+
 // ===== 初期化 =====
 
 function initMap(center, zoom) {
     map = L.map('map').setView(center, zoom);
+    setupMapPanes();
     loadAnalysisCache();
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -538,7 +554,7 @@ function applyRankOrderToProperties(sortedProps) {
 }
 
 function buildRankingFromProperties(props) {
-    return (props || [])
+    const rows = (props || [])
         .filter(p => p.grade || p._analysis_score != null)
         .map(p => ({
             id: p.id || null,
@@ -552,6 +568,17 @@ function buildRankingFromProperties(props) {
             exit_cap_rate: p._scenario_as_is?.valuation?.exit_cap_rate ?? p._scenario_rebuild?.valuation?.exit_cap_rate ?? null,
             scenario: p._analysis_scenario || null,
         }));
+    const gradeOrder = { S: 0, A: 1, B: 2, C: 3, D: 4, F: 5, '?': 9 };
+    rows.sort((a, b) => {
+        const sa = Number(a.score || 0);
+        const sb = Number(b.score || 0);
+        if (sb !== sa) return sb - sa;
+        const ga = gradeOrder[a.grade] ?? 9;
+        const gb = gradeOrder[b.grade] ?? 9;
+        if (ga !== gb) return ga - gb;
+        return (a.name || '').localeCompare(b.name || '', 'ja');
+    });
+    return rows;
 }
 
 async function analyzePropertiesForRanking(targets, includeRebuild = true, btn = null) {
@@ -723,7 +750,11 @@ function plotSampleProperties(propsToPlot) {
         const markerShape = isLand ? { radius: 7, weight: 2, dashArray: '3' } : { radius: 8, weight: 2 };
 
         const marker = L.circleMarker([p.latitude, p.longitude], {
-            ...markerShape, color: markerColor, fillColor: markerColor, fillOpacity: 0.7,
+            ...markerShape,
+            pane: 'objectPane',
+            color: markerColor,
+            fillColor: markerColor,
+            fillOpacity: 0.7,
         });
 
         const estimated = p._coords_estimated ? '<span style="color:#ffa726;font-size:0.6rem;">(推定位置)</span>' : '';
@@ -2213,6 +2244,7 @@ async function loadHeatmap() {
 
         if (points.length > 0) {
             heatmapLayer = L.heatLayer(points, {
+                pane: 'heatPane',
                 radius: 25,
                 blur: 15,
                 maxZoom: 17,
@@ -2557,6 +2589,7 @@ function plotLandListings(listings) {
             const bg = y >= 0.08 ? '#1a9641' : y >= 0.06 ? '#4dac26' : y >= 0.04 ? '#fdb863' : y >= 0.02 ? '#e66101' : '#78909c';
             const label = y > 0 ? (y * 100).toFixed(1) : '地';
             return L.marker(ll, {
+                pane: 'objectPane',
                 icon: L.divIcon({
                     className: '',
                     html: `<div style="background:${bg};color:#fff;min-width:28px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold;border:1.5px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.4);padding:0 3px;">${label}</div>`,
@@ -3764,6 +3797,7 @@ function _buildMeshRect(metric, f) {
 
     const bounds = [[c[1] - dLat, c[0] - dLng], [c[1] + dLat, c[0] + dLng]];
     const rect = L.rectangle(bounds, {
+        pane: 'heatPane',
         color: '#fff', fillColor: color,
         fillOpacity: opacity, weight: 0.2, opacity: 0.1,
     });
