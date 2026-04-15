@@ -230,6 +230,12 @@ def _dedupe_properties_for_display(props: List[dict]) -> List[dict]:
         if lat is not None and lng is not None and address:
             # ソース差異を跨いだ同一地点重複を抑制
             keys.append(f"addrgeo:{pref}|{address}|{round(lat,4)}|{round(lng,4)}")
+        if lat is not None and lng is not None and price is not None:
+            # 同座標・同価格帯（10万円単位）を同一候補として扱う
+            keys.append(f"gprice:{pref}|{round(lat,4)}|{round(lng,4)}|{int(price/100000)}")
+        if ("新築プラン" in str(p.get("name") or "") or "[土地]" in str(p.get("name") or "")) and address and land is not None:
+            # 生成系（新築プラン/土地統合）の同住所・同面積重複を抑制
+            keys.append(f"gen_addr_land:{pref}|{address}|{land}")
         if lat is not None and lng is not None and price is not None and station:
             dist = p.get("station_distance_min")
             try:
@@ -702,7 +708,23 @@ def _estimate_missing_coords(props: list):
             lat0 = float(p["latitude"])
             lng0 = float(p["longitude"])
             if _coord_in_pref_bounds(lat0, lng0, pref_code):
-                # 同一都県内でも、住所ジオコードと大きく乖離する座標は補正対象
+                # まず駅徒歩整合の軽量判定（通常ケースはここで確定させ、重いジオコードを回避）
+                station_name0 = str(p.get("nearest_station") or "")
+                walk_min0 = p.get("station_distance_min")
+                try:
+                    walk_min0 = float(walk_min0) if walk_min0 is not None else None
+                except (TypeError, ValueError):
+                    walk_min0 = None
+                st0 = _pick_station_coord(station_name0, pref_code)
+                if st0 and walk_min0 is not None and walk_min0 > 0:
+                    dkm0 = _haversine_km(lat0, lng0, st0["lat"], st0["lng"])
+                    expected = max(0.08 * walk_min0, 0.2)
+                    if dkm0 <= max(1.5, expected * 4.0):
+                        continue
+                elif st0 is None and not (p.get("address") or "").strip():
+                    continue
+
+                # 怪しい行のみ住所ジオコードで確認
                 addr0 = (p.get("address") or "").strip()
                 if addr0 and len(addr0) >= 6:
                     if addr0 in geocode_cache:
@@ -716,57 +738,11 @@ def _estimate_missing_coords(props: list):
                     if gc0:
                         glat0, glng0 = float(gc0[0]), float(gc0[1])
                         if _coord_in_pref_bounds(glat0, glng0, pref_code):
-                            if _haversine_km(lat0, lng0, glat0, glng0) > 8.0:
-                                # 住所準拠座標を優先するため補正対象に回す
-                                pass
-                            else:
-                                # 都県内でも、駅徒歩情報と距離が極端に矛盾する座標は補正対象にする
-                                station_name0 = str(p.get("nearest_station") or "")
-                                walk_min0 = p.get("station_distance_min")
-                                try:
-                                    walk_min0 = float(walk_min0) if walk_min0 is not None else None
-                                except (TypeError, ValueError):
-                                    walk_min0 = None
-                                st0 = _pick_station_coord(station_name0, pref_code)
-                                if st0 and walk_min0 is not None and walk_min0 > 0:
-                                    dkm0 = _haversine_km(lat0, lng0, st0["lat"], st0["lng"])
-                                    expected = max(0.08 * walk_min0, 0.2)
-                                    if dkm0 <= max(1.5, expected * 4.0):
-                                        continue
-                                else:
-                                    continue
-                        else:
-                            # ジオコードが都県外なら従来判定のみ
-                            station_name0 = str(p.get("nearest_station") or "")
-                            walk_min0 = p.get("station_distance_min")
-                            try:
-                                walk_min0 = float(walk_min0) if walk_min0 is not None else None
-                            except (TypeError, ValueError):
-                                walk_min0 = None
-                            st0 = _pick_station_coord(station_name0, pref_code)
-                            if st0 and walk_min0 is not None and walk_min0 > 0:
-                                dkm0 = _haversine_km(lat0, lng0, st0["lat"], st0["lng"])
-                                expected = max(0.08 * walk_min0, 0.2)
-                                if dkm0 <= max(1.5, expected * 4.0):
-                                    continue
-                            else:
+                            if _haversine_km(lat0, lng0, glat0, glng0) <= 8.0:
                                 continue
                 else:
-                    # 都県内でも、駅徒歩情報と距離が極端に矛盾する座標は補正対象にする
-                    station_name0 = str(p.get("nearest_station") or "")
-                    walk_min0 = p.get("station_distance_min")
-                    try:
-                        walk_min0 = float(walk_min0) if walk_min0 is not None else None
-                    except (TypeError, ValueError):
-                        walk_min0 = None
-                    st0 = _pick_station_coord(station_name0, pref_code)
-                    if st0 and walk_min0 is not None and walk_min0 > 0:
-                        dkm0 = _haversine_km(lat0, lng0, st0["lat"], st0["lng"])
-                        expected = max(0.08 * walk_min0, 0.2)
-                        if dkm0 <= max(1.5, expected * 4.0):
-                            continue
-                    else:
-                        continue
+                    # 住所情報不足で駅整合も取れない場合は既存座標を維持
+                    continue
 
         lat, lng = None, None
         coord_source = None
@@ -2371,20 +2347,43 @@ async def dedupe_properties(request: Request):
 
 @app.post("/api/stations/reconcile")
 async def reconcile_stations(request: Request):
-    """既存データの駅名/駅IDを実在駅に補正"""
+    """既存データの駅名/駅IDを実在駅に補正（物件/賃料/土地 + 重複整理）"""
     try:
         data = await request.json()
     except Exception:
         data = {}
     limit = int(data.get("limit", 10000) or 10000)
+    with_dedupe = bool(data.get("with_dedupe", True))
+    strict_nearest = bool(data.get("strict_nearest", True))
     try:
-        p = db.reconcile_station_refs("properties", limit=limit)
-        r = db.reconcile_station_refs("rental_comps", limit=limit)
+        p = db.reconcile_station_refs("properties", limit=limit, force_nearest=strict_nearest)
+        r = db.reconcile_station_refs("rental_comps", limit=limit, force_nearest=strict_nearest)
+        l = db.reconcile_land_listing_station_refs(limit=limit, force_nearest=strict_nearest)
+        dedupe_props = {}
+        dedupe_rentals = {}
+        land_dup_marked = 0
+        if with_dedupe:
+            dedupe_props = db.merge_duplicate_properties(
+                dry_run=False,
+                min_group_size=2,
+                max_groups=5000,
+            )
+            dedupe_rentals = db.merge_duplicate_rental_comps(
+                dry_run=False,
+                min_group_size=2,
+                max_groups=5000,
+            )
+            land_dup_marked = db.detect_duplicates()
         return JSONResponse(content={
             "status": "ok",
             "updated_properties": p,
             "updated_rentals": r,
-            "updated_total": p + r,
+            "updated_land_listings": l,
+            "updated_total": p + r + l,
+            "dedupe_properties": dedupe_props,
+            "dedupe_rentals": dedupe_rentals,
+            "land_duplicates_marked": land_dup_marked,
+            "strict_nearest": strict_nearest,
         })
     except Exception as e:
         return JSONResponse(content={"status": "error", "error": str(e)}, status_code=500)

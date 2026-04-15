@@ -18,6 +18,7 @@ URL指定物件スクレイパー - 1件のURLから物件情報を構造化
 import io
 import re
 import time
+import math
 import logging
 from typing import Optional, Dict, List, Tuple
 from urllib.parse import urlparse
@@ -89,6 +90,7 @@ class UrlScraperAgent(BaseAgent):
         self._last_request = 0.0
         self._image_dir = Path(__file__).parent.parent / "output" / "cache" / "images"
         self._image_dir.mkdir(parents=True, exist_ok=True)
+        self._geocode_cache: Dict[str, Tuple[float, float]] = {}
 
     def run(self, url: str, use_ocr: bool = True, use_browser: bool = False) -> Optional[Property]:
         """
@@ -806,25 +808,66 @@ class UrlScraperAgent(BaseAgent):
         return self._extract_station_from_text(text)
 
     def _extract_station_from_text(self, text: str) -> Tuple[Optional[str], Optional[int]]:
-        # "JR山手線「新宿」駅 徒歩5分"
-        m = re.search(r"「(.+?)」\s*駅?\s*(?:徒歩|歩)\s*(\d+)\s*分", text)
-        if m:
-            return m.group(1), int(m.group(2))
+        def _clean_station(raw: str) -> str:
+            s = str(raw or "").strip()
+            s = re.sub(r"(?:最寄り?駅|交通|アクセス)[:：\s]*", "", s)
+            s = re.sub(r"^.*?線[／/\s]*", "", s)
+            s = s.replace("「", "").replace("」", "").replace("駅", "").strip()
+            s = re.split(r"[、,／/・\s]", s)[0].strip()
+            # 住所/路線記法の誤爆を除外
+            if not (1 <= len(s) <= 12):
+                return ""
+            if any(x in s for x in ("都", "道", "府", "県", "市", "区", "町", "丁目", "番地")):
+                return ""
+            if "線" in s:
+                return ""
+            return s
 
-        # "新宿駅 徒歩5分"
-        m = re.search(r"(.{2,8}駅)\s*(?:徒歩|歩)\s*(\d+)\s*分", text)
-        if m:
-            station = m.group(1)
-            # 路線名を除去
-            station = re.sub(r"^.+線\s*", "", station)
-            return station, int(m.group(2))
+        candidates: List[Tuple[str, int]] = []
+        patterns = [
+            r"[「『]?\s*([^「」『』\n]{1,14}?)\s*[」』]?\s*駅?\s*(?:徒歩|歩)\s*(\d{1,3})\s*分",
+            r"([^\s\n]{1,14}?)駅\s*(?:徒歩|歩)\s*(\d{1,3})\s*分",
+            r"(?:最寄り?駅|交通)[:：\s]*([^\s\n]{1,14}?)(?:駅|$).*?(?:徒歩|歩)\s*(\d{1,3})\s*分",
+        ]
+        for pat in patterns:
+            for m in re.finditer(pat, text):
+                st = _clean_station(m.group(1))
+                if not st:
+                    continue
+                try:
+                    walk = int(m.group(2))
+                except (TypeError, ValueError):
+                    continue
+                if 0 < walk <= 180:
+                    candidates.append((st, walk))
+            if candidates:
+                break
+
+        if candidates:
+            # 徒歩分が短い候補を優先（通常は最寄駅）
+            candidates.sort(key=lambda x: x[1])
+            return candidates[0][0], candidates[0][1]
 
         # "徒歩5分" のみ
-        m = re.search(r"(?:徒歩|歩)\s*(\d+)\s*分", text)
+        m = re.search(r"(?:徒歩|歩)\s*(\d{1,3})\s*分", text)
         if m:
-            return None, int(m.group(1))
+            try:
+                walk = int(m.group(1))
+            except (TypeError, ValueError):
+                walk = None
+            return None, walk
 
         return None, None
+
+    @staticmethod
+    def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        r = 6371.0
+        p1 = math.radians(lat1)
+        p2 = math.radians(lat2)
+        dp = math.radians(lat2 - lat1)
+        dl = math.radians(lon2 - lon1)
+        a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        return 2 * r * math.asin(math.sqrt(max(0.0, min(1.0, a))))
 
     def _parse_ratio(self, text: str) -> Optional[float]:
         """建蔽率/容積率（%→小数）"""
@@ -869,6 +912,75 @@ class UrlScraperAgent(BaseAgent):
             y = data.get("gross_yield")
             if price and y:
                 data["current_rent_annual"] = int(price * y)
+
+        # 駅名整合チェック（OCR/HTML誤抽出の補正）
+        try:
+            from data.station_master import resolve_station_id, STATION_MAP, find_nearest_station
+            from data.geocoder import Geocoder
+
+            pref_code = data.get("prefecture_code") or self._guess_pref_code(address)
+            station_text = str(data.get("nearest_station") or "").strip()
+
+            # 住所ジオコード（キャッシュ）
+            glat = glon = None
+            if address:
+                if address in self._geocode_cache:
+                    gc = self._geocode_cache[address]
+                else:
+                    try:
+                        gc = Geocoder().geocode(address)
+                    except Exception:
+                        gc = None
+                    self._geocode_cache[address] = gc
+                if gc:
+                    glat, glon = float(gc[0]), float(gc[1])
+
+            sid = resolve_station_id(
+                nearest_station_text=station_text,
+                lat=glat,
+                lon=glon,
+                pref_code=pref_code or None,
+            )
+
+            near = None
+            if glat is not None and glon is not None:
+                near = find_nearest_station(glat, glon, max_distance_km=8.0, pref_code=pref_code or None)
+                if (not near) or float(near.get("distance_km") or 999.0) > 20.0:
+                    near_any = find_nearest_station(glat, glon, max_distance_km=8.0, pref_code=None)
+                    if near_any:
+                        near = near_any
+
+            suspicious = False
+            if sid and sid in STATION_MAP and glat is not None and glon is not None:
+                s = STATION_MAP[sid]
+                dkm = self._haversine_km(glat, glon, float(s["lat"]), float(s["lon"]))
+                walk = data.get("station_distance_min")
+                try:
+                    walk = float(walk) if walk is not None else None
+                except (TypeError, ValueError):
+                    walk = None
+                if walk and walk > 0:
+                    expected = max(0.08 * walk, 0.2)
+                    suspicious = dkm > max(2.0, expected * 4.0)
+                else:
+                    suspicious = dkm > 8.0
+            elif station_text:
+                suspicious = True
+
+            if near and (not sid or suspicious):
+                data["nearest_station"] = near.get("name")
+                data["station_id"] = near.get("station_id")
+                dkm2 = float(near.get("distance_km") or 0.0)
+                if dkm2 > 0 and (
+                    not data.get("station_distance_min")
+                    or suspicious
+                ):
+                    data["station_distance_min"] = max(1, min(120, int(round(dkm2 * 12.5))))
+            elif sid and sid in STATION_MAP:
+                data["nearest_station"] = STATION_MAP[sid]["name"]
+                data["station_id"] = sid
+        except Exception:
+            pass
 
     def _guess_pref_code(self, address: str) -> str:
         """住所から都道府県コード推定"""

@@ -1718,7 +1718,7 @@ class Database:
                         updated += 1
         return updated
 
-    def reconcile_station_refs(self, table: str = "properties", limit: int = 5000) -> int:
+    def reconcile_station_refs(self, table: str = "properties", limit: int = 5000, force_nearest: bool = False) -> int:
         """既存レコードの駅名を実在駅へ補正しstation_idを再付与"""
         if table not in {"properties", "rental_comps"}:
             return 0
@@ -1726,12 +1726,12 @@ class Database:
         with self._conn() as conn:
             rows = conn.execute(
                 f"""
-                    SELECT id, name, address, nearest_station, latitude, longitude, prefecture_code, city_code
+                    SELECT id, name, address, nearest_station, station_distance_min, latitude, longitude, prefecture_code, city_code
                     FROM {table}
                     ORDER BY updated_at DESC
                     LIMIT ?
                 """ if table == "properties" else f"""
-                    SELECT id, '' AS name, address, nearest_station, latitude, longitude, '' AS prefecture_code, city_code
+                    SELECT id, '' AS name, address, nearest_station, station_distance_min, latitude, longitude, '' AS prefecture_code, city_code
                     FROM {table}
                     ORDER BY fetched_at DESC
                     LIMIT ?
@@ -1795,8 +1795,36 @@ class Database:
                         pref_code=pref_code or None,
                     )
 
-                # 3) 住所ジオコード -> 実在最寄駅で補正
-                if r.get("address"):
+                try:
+                    cur_lat = float(r.get("latitude")) if r.get("latitude") is not None else None
+                    cur_lon = float(r.get("longitude")) if r.get("longitude") is not None else None
+                except (TypeError, ValueError):
+                    cur_lat = cur_lon = None
+                lat = cur_lat
+                lon = cur_lon
+
+                # 3) 必要時のみ住所ジオコード -> 実在最寄駅で補正
+                need_geocode = False
+                if not sid:
+                    need_geocode = True
+                elif sid and sid in STATION_MAP and cur_lat is not None and cur_lon is not None:
+                    s0 = STATION_MAP[sid]
+                    d0 = _haversine_km(cur_lat, cur_lon, float(s0["lat"]), float(s0["lon"]))
+                    walk0 = None
+                    if table == "properties":
+                        try:
+                            walk0 = float(r.get("station_distance_min")) if r.get("station_distance_min") is not None else None
+                        except (TypeError, ValueError):
+                            walk0 = None
+                    if walk0 and walk0 > 0:
+                        expected = max(0.08 * walk0, 0.2)
+                        need_geocode = d0 > max(2.0, expected * 4.0)
+                    else:
+                        need_geocode = d0 > 8.0
+                elif cur_lat is None or cur_lon is None:
+                    need_geocode = True
+
+                if need_geocode and r.get("address"):
                     addr = str(r.get("address"))
                     if addr in geo_cache:
                         gc = geo_cache[addr]
@@ -1808,7 +1836,16 @@ class Database:
                         geo_cache[addr] = gc
                     if gc:
                         lat, lon = gc
-                        near = find_nearest_station(lat, lon, max_distance_km=3.0, pref_code=pref_code or None)
+                        near = find_nearest_station(
+                            lat,
+                            lon,
+                            max_distance_km=8.0,
+                            pref_code=None if force_nearest else (pref_code or None),
+                        )
+                        if (not near) or float(near.get("distance_km") or 999.0) > 20.0:
+                            near_any = find_nearest_station(lat, lon, max_distance_km=8.0, pref_code=None)
+                            if near_any:
+                                near = near_any
                         if near:
                             near_sid = near.get("station_id")
                             # 既存sidがある場合は、住所ジオコードとの整合を確認して不整合なら上書き
@@ -1821,11 +1858,6 @@ class Database:
                                 sid = near_sid
                             # 座標が未設定か、都県と矛盾する場合はジオコード結果を反映
                             if table == "properties":
-                                try:
-                                    cur_lat = float(r.get("latitude")) if r.get("latitude") is not None else None
-                                    cur_lon = float(r.get("longitude")) if r.get("longitude") is not None else None
-                                except (TypeError, ValueError):
-                                    cur_lat = cur_lon = None
                                 should_update_coord = cur_lat is None or cur_lon is None
                                 if not should_update_coord:
                                     if pref_from_addr and not (
@@ -1842,6 +1874,21 @@ class Database:
                                     )
                                     updated += cur.rowcount if cur else 0
 
+                near_final = None
+                if lat is not None and lon is not None:
+                    near_final = find_nearest_station(
+                        lat,
+                        lon,
+                        max_distance_km=8.0,
+                        pref_code=None if force_nearest else (pref_code or None),
+                    )
+                    if (not near_final) or float(near_final.get("distance_km") or 999.0) > 20.0:
+                        near_any = find_nearest_station(lat, lon, max_distance_km=8.0, pref_code=None)
+                        if near_any:
+                            near_final = near_any
+                if force_nearest and near_final:
+                    sid = near_final.get("station_id") or sid
+
                 if not sid:
                     # 解決不可の駅名は誤った位置推定の原因になるためクリア
                     if r.get("nearest_station"):
@@ -1852,9 +1899,167 @@ class Database:
                         updated += cur.rowcount if cur else 0
                     continue
                 sname = STATION_MAP.get(sid, {}).get("name")
+                station_distance_min = r.get("station_distance_min")
+                if near_final and float(near_final.get("distance_km") or 0.0) > 0:
+                    if force_nearest or not station_distance_min:
+                        station_distance_min = max(1, min(120, int(round(float(near_final["distance_km"]) * 12.5))))
                 cur = conn.execute(
-                    f"UPDATE {table} SET station_id=?, nearest_station=? WHERE id=?",
-                    (sid, sname, r["id"]),
+                    f"UPDATE {table} SET station_id=?, nearest_station=?, station_distance_min=? WHERE id=?",
+                    (sid, sname, station_distance_min, r["id"]),
+                )
+                updated += cur.rowcount if cur else 0
+        return updated
+
+    def reconcile_land_listing_station_refs(self, limit: int = 5000, force_nearest: bool = False) -> int:
+        """
+        土地物件の駅名/徒歩分数を住所ジオコードと駅マスタで補正。
+        OCRや簡易パース誤読の残件を後段で一括クリーニングする。
+        """
+        updated = 0
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                    SELECT id, address, station, walk_minutes, latitude, longitude
+                    FROM land_listings
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+            try:
+                from data.station_master import resolve_station_id, STATION_MAP, find_nearest_station
+                from data.geocoder import Geocoder
+            except Exception:
+                return 0
+
+            def _pref_from_address(addr: Any) -> str:
+                s = str(addr or "")
+                if "東京都" in s:
+                    return "13"
+                if "神奈川県" in s:
+                    return "14"
+                if "埼玉県" in s:
+                    return "11"
+                if "千葉県" in s:
+                    return "12"
+                return ""
+
+            def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+                r = 6371.0
+                p1 = math.radians(lat1)
+                p2 = math.radians(lat2)
+                dp = math.radians(lat2 - lat1)
+                dl = math.radians(lon2 - lon1)
+                a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+                return 2 * r * math.asin(math.sqrt(max(0.0, min(1.0, a))))
+
+            geocoder = Geocoder()
+            geo_cache: Dict[str, Any] = {}
+
+            for row in rows:
+                r = dict(row)
+                pref_code = _pref_from_address(r.get("address"))
+
+                lat = r.get("latitude")
+                lon = r.get("longitude")
+                try:
+                    lat = float(lat) if lat is not None else None
+                    lon = float(lon) if lon is not None else None
+                except (TypeError, ValueError):
+                    lat = lon = None
+
+                sid = resolve_station_id(
+                    nearest_station_text=r.get("station"),
+                    lat=lat,
+                    lon=lon,
+                    pref_code=pref_code or None,
+                )
+
+                need_geocode = False
+                if not sid or lat is None or lon is None:
+                    need_geocode = True
+                elif sid in STATION_MAP:
+                    s0 = STATION_MAP[sid]
+                    d0 = _haversine_km(lat, lon, float(s0["lat"]), float(s0["lon"]))
+                    walk0 = r.get("walk_minutes")
+                    try:
+                        walk0 = float(walk0) if walk0 is not None else None
+                    except (TypeError, ValueError):
+                        walk0 = None
+                    if walk0 and walk0 > 0:
+                        expected = max(0.08 * walk0, 0.2)
+                        need_geocode = d0 > max(2.0, expected * 4.0)
+                    else:
+                        need_geocode = d0 > 8.0
+
+                if need_geocode and r.get("address"):
+                    addr = str(r.get("address"))
+                    if addr in geo_cache:
+                        gc = geo_cache[addr]
+                    else:
+                        try:
+                            gc = geocoder.geocode(addr)
+                        except Exception:
+                            gc = None
+                        geo_cache[addr] = gc
+                    if gc:
+                        glat, glon = float(gc[0]), float(gc[1])
+                        if lat is None or lon is None or _haversine_km(lat, lon, glat, glon) > 8.0:
+                            lat, lon = glat, glon
+                        sid = resolve_station_id(
+                            nearest_station_text=r.get("station"),
+                            lat=lat,
+                            lon=lon,
+                            pref_code=pref_code or None,
+                        )
+
+                near = None
+                if lat is not None and lon is not None:
+                    near = find_nearest_station(
+                        lat,
+                        lon,
+                        max_distance_km=8.0,
+                        pref_code=None if force_nearest else (pref_code or None),
+                    )
+                    if (not near) or float(near.get("distance_km") or 999.0) > 20.0:
+                        near_any = find_nearest_station(lat, lon, max_distance_km=8.0, pref_code=None)
+                        if near_any:
+                            near = near_any
+
+                suspicious = False
+                if sid and sid in STATION_MAP and lat is not None and lon is not None:
+                    s0 = STATION_MAP[sid]
+                    d0 = _haversine_km(lat, lon, float(s0["lat"]), float(s0["lon"]))
+                    walk = r.get("walk_minutes")
+                    try:
+                        walk = float(walk) if walk is not None else None
+                    except (TypeError, ValueError):
+                        walk = None
+                    if walk and walk > 0:
+                        expected = max(0.08 * walk, 0.2)
+                        suspicious = d0 > max(2.0, expected * 4.0)
+                    else:
+                        suspicious = d0 > 8.0
+                elif r.get("station"):
+                    suspicious = True
+
+                new_station = r.get("station")
+                new_walk = r.get("walk_minutes")
+                if near and (force_nearest or not sid or suspicious):
+                    new_station = near.get("name")
+                    dkm2 = float(near.get("distance_km") or 0.0)
+                    if dkm2 > 0:
+                        new_walk = max(1, min(120, int(round(dkm2 * 12.5))))
+                elif sid and sid in STATION_MAP:
+                    new_station = STATION_MAP[sid]["name"]
+
+                cur = conn.execute(
+                    """
+                    UPDATE land_listings
+                    SET station=?, walk_minutes=?, latitude=?, longitude=?, updated_at=datetime('now','localtime')
+                    WHERE id=?
+                    """,
+                    (new_station, new_walk, lat, lon, r["id"]),
                 )
                 updated += cur.rowcount if cur else 0
         return updated

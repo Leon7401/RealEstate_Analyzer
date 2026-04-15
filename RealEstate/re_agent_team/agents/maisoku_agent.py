@@ -14,6 +14,7 @@ PDF/画像のマイソクからテキストを抽出し、土地物件情報を�
   接道, 価格, 最寄駅/徒歩分数, 所有権/借地権, 間口/奥行
 """
 import re
+import math
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -88,6 +89,7 @@ class MaisokuAgent(BaseAgent):
 
     def __init__(self):
         super().__init__("MaisokuAgent")
+        self._geocode_cache: Dict[str, Any] = {}
 
     def run(self, file_path: str, lat: float = None, lng: float = None,
             enrich_from_api: bool = True) -> Dict[str, Any]:
@@ -293,6 +295,7 @@ class MaisokuAgent(BaseAgent):
         rejected, ownership = self._check_ownership(normalized)
         result["_rejected"] = rejected
         result["_ownership"] = ownership
+        self._reconcile_station_from_address(result)
 
         return result
 
@@ -544,6 +547,89 @@ class MaisokuAgent(BaseAgent):
                 walk = int(m.group(1))
 
         return station, walk, line
+
+    @staticmethod
+    def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        r = 6371.0
+        p1 = math.radians(lat1)
+        p2 = math.radians(lat2)
+        dp = math.radians(lat2 - lat1)
+        dl = math.radians(lon2 - lon1)
+        a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        return 2 * r * math.asin(math.sqrt(max(0.0, min(1.0, a))))
+
+    def _reconcile_station_from_address(self, result: Dict[str, Any]) -> None:
+        """
+        OCR誤読に起因する駅名誤りを住所ジオコードで補正。
+        """
+        try:
+            from data.station_master import resolve_station_id, STATION_MAP, find_nearest_station
+            from data.geocoder import Geocoder
+        except Exception:
+            return
+
+        addr = str(result.get("address") or "").strip()
+        if not addr:
+            return
+
+        def _pref_from_address(a: str) -> str:
+            if "東京都" in a:
+                return "13"
+            if "神奈川県" in a:
+                return "14"
+            if "埼玉県" in a:
+                return "11"
+            if "千葉県" in a:
+                return "12"
+            return ""
+
+        pref = _pref_from_address(addr)
+
+        if addr in self._geocode_cache:
+            gc = self._geocode_cache[addr]
+        else:
+            try:
+                gc = Geocoder().geocode(addr)
+            except Exception:
+                gc = None
+            self._geocode_cache[addr] = gc
+        if not gc:
+            return
+        glat, glon = float(gc[0]), float(gc[1])
+
+        station_text = str(result.get("station") or "").strip()
+        sid = resolve_station_id(station_text, lat=glat, lon=glon, pref_code=pref or None)
+        near = find_nearest_station(glat, glon, max_distance_km=8.0, pref_code=pref or None)
+        if (not near) or float(near.get("distance_km") or 999.0) > 20.0:
+            near_any = find_nearest_station(glat, glon, max_distance_km=8.0, pref_code=None)
+            if near_any:
+                near = near_any
+
+        suspicious = False
+        if sid and sid in STATION_MAP:
+            s = STATION_MAP[sid]
+            dkm = self._haversine_km(glat, glon, float(s["lat"]), float(s["lon"]))
+            walk = result.get("walk_minutes")
+            try:
+                walk = float(walk) if walk is not None else None
+            except (TypeError, ValueError):
+                walk = None
+            if walk and walk > 0:
+                expected = max(0.08 * walk, 0.2)
+                suspicious = dkm > max(2.0, expected * 4.0)
+            else:
+                suspicious = dkm > 8.0
+        elif station_text:
+            suspicious = True
+
+        if near and (not sid or suspicious):
+            result["station"] = near.get("name")
+            dkm2 = float(near.get("distance_km") or 0.0)
+            if dkm2 > 0 and (not result.get("walk_minutes") or suspicious):
+                result["walk_minutes"] = max(1, min(120, int(round(dkm2 * 12.5))))
+            result.setdefault("_confidence", {})["station"] = "geocode_reconciled"
+        elif sid and sid in STATION_MAP:
+            result["station"] = STATION_MAP[sid]["name"]
 
     def _parse_land_shape(self, text: str) -> Optional[str]:
         """地形を抽出"""
