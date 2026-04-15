@@ -1,12 +1,15 @@
 """FastAPI Webアプリケーション - 地図UI + API"""
 import sys
+import os
 import re
 import json
+import math
+import hashlib
 import logging
 import statistics
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Any
+from typing import Optional, Any, Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -88,6 +91,13 @@ maisoku_agent = MaisokuAgent()
 
 # バックグラウンドタスク状態管理
 _bg_task_status = {"running": False, "step": "", "result": None, "error": None}
+METRO_PREFECTURE_CODES: Tuple[str, ...] = ("13", "14", "11", "12")
+PREF_LABELS: Dict[str, str] = {
+    "13": "東京都",
+    "14": "神奈川県",
+    "11": "埼玉県",
+    "12": "千葉県",
+}
 
 # 起動時にサンプル賃料データを読込 → DB + メモリ
 _sample_csv = DATA_DIR / "rental_comps_tokyo.csv"
@@ -109,6 +119,133 @@ def _reload_rental_agent():
     orchestrator.rental_agent._comps_db = rental_agent._comps_db
     orchestrator.valuation_agent.rental_agent._comps_db = rental_agent._comps_db
     logging.info(f"RentalAgent リロード: {len(rental_agent._comps_db)}件")
+
+
+def _expand_prefecture_codes(prefecture_code: str) -> List[str]:
+    pref = str(prefecture_code or "").strip()
+    if pref in ("metro", "1tokyo3", "13,14,11,12", "all_kanto"):
+        return list(METRO_PREFECTURE_CODES)
+    if "," in pref:
+        vals = [x.strip() for x in pref.split(",") if x.strip()]
+        if not vals:
+            return []
+        expanded: List[str] = []
+        for v in vals:
+            if v in ("metro", "1tokyo3", "all_kanto"):
+                expanded.extend(METRO_PREFECTURE_CODES)
+            else:
+                expanded.append(v)
+        # 順序維持で重複除去
+        uniq: List[str] = []
+        seen = set()
+        for v in expanded:
+            if v in seen:
+                continue
+            seen.add(v)
+            uniq.append(v)
+        return uniq
+    return [pref] if pref else []
+
+
+def _pref_where_clause(column: str, pref_codes: List[str]) -> Tuple[str, List[str]]:
+    if not pref_codes:
+        return f"{column} <> ''", []
+    if len(pref_codes) == 1:
+        return f"{column} = ?", [pref_codes[0]]
+    placeholders = ",".join(["?"] * len(pref_codes))
+    return f"{column} IN ({placeholders})", list(pref_codes)
+
+
+def _dedupe_properties_for_display(props: List[dict]) -> List[dict]:
+    """表示用に重複候補を除外（DB側統合の取りこぼし対策）"""
+    if not props:
+        return props
+
+    def _norm_text(v: Any) -> str:
+        s = str(v or "").strip().replace("　", " ")
+        return re.sub(r"\s+", "", s)
+
+    def _norm_addr(v: Any) -> str:
+        s = _norm_text(v)
+        s = s.replace("丁目", "-").replace("番地", "-").replace("番", "-").replace("号", "")
+        return re.sub(r"-{2,}", "-", s).strip("-")
+
+    def _norm_name(v: Any) -> str:
+        s = _norm_text(v)
+        s = re.sub(r"(new|NEW|新着|登録|更新|価格改定|値下げ|限定|公開).*", "", s)
+        s = re.sub(r"(第?\d+号棟|[A-Z]棟|[A-Z]号棟)", "", s)
+        return s.strip("-_")
+
+    seen = set()
+    unique_rows: List[dict] = []
+    rows = sorted(
+        list(props),
+        key=lambda x: (
+            sum(
+                1
+                for c in (
+                    "source_url", "address", "asking_price", "land_area", "building_area",
+                    "nearest_station", "latitude", "longitude",
+                )
+                if x.get(c) not in (None, "", 0)
+            ),
+            x.get("updated_at") or x.get("fetched_at") or "",
+        ),
+        reverse=True,
+    )
+
+    for p in rows:
+        keys = []
+        source_url = db._normalize_source_url(p.get("source_url"))
+        if source_url:
+            keys.append(f"url:{source_url}")
+
+        address = _norm_addr(p.get("address"))
+        station = _norm_text(p.get("nearest_station")).replace("駅", "")
+        name = _norm_name(p.get("name"))
+        pref = str(p.get("prefecture_code") or "")
+        try:
+            price = int(float(p.get("asking_price"))) if p.get("asking_price") is not None else None
+        except (TypeError, ValueError):
+            price = None
+        try:
+            land = round(float(p.get("land_area")), 1) if p.get("land_area") else None
+        except (TypeError, ValueError):
+            land = None
+        try:
+            bld = round(float(p.get("building_area")), 1) if p.get("building_area") else None
+        except (TypeError, ValueError):
+            bld = None
+
+        if address and price is not None and (land is not None or bld is not None):
+            keys.append(f"ap:{pref}|{address}|{price}|{land}|{bld}|{station}")
+
+        try:
+            lat = float(p.get("latitude")) if p.get("latitude") is not None else None
+            lng = float(p.get("longitude")) if p.get("longitude") is not None else None
+        except (TypeError, ValueError):
+            lat = lng = None
+        if lat is not None and lng is not None and price is not None and bld is not None:
+            keys.append(f"geo:{round(lat, 4)}|{round(lng, 4)}|{price}|{bld}")
+        if lat is not None and lng is not None and price is not None and station:
+            dist = p.get("station_distance_min")
+            try:
+                dist_bucket = int(float(dist) / 2) if dist is not None else -1
+            except (TypeError, ValueError):
+                dist_bucket = -1
+            keys.append(f"sgx:{pref}|{station}|{int(price/500000)}|{round(lat,3)}|{round(lng,3)}|{dist_bucket}")
+        if name and station and price is not None:
+            keys.append(f"snp:{pref}|{station}|{int(price/500000)}|{name[:24]}")
+
+        if not keys:
+            unique_rows.append(p)
+            continue
+        if any(k in seen for k in keys):
+            continue
+        unique_rows.append(p)
+        seen.update(keys)
+
+    return unique_rows
 
 
 # ===== ページ =====
@@ -137,20 +274,45 @@ async def healthz():
 @app.get("/api/cities/{prefecture_code}")
 async def get_cities(prefecture_code: str):
     """市区町村一覧"""
-    cities = CITY_MASTER.get(prefecture_code, [{"code": "", "name": "全域"}])
+    pref_codes = _expand_prefecture_codes(prefecture_code)
+    if len(pref_codes) <= 1:
+        key = pref_codes[0] if pref_codes else prefecture_code
+        cities = CITY_MASTER.get(key, [{"code": "", "name": "全域"}])
+    else:
+        cities = [{"code": "", "name": "全域(一都三県)"}]
+        for pref in pref_codes:
+            pref_name = PREF_LABELS.get(pref, pref)
+            for c in CITY_MASTER.get(pref, []):
+                code = str(c.get("code") or "").strip()
+                if not code:
+                    continue
+                cities.append({"code": code, "name": f"{pref_name} {c.get('name', code)}"})
     return JSONResponse(content={"cities": cities})
 
 
 @app.get("/api/stations/{prefecture_code}")
 async def get_stations(prefecture_code: str):
     """駅一覧（メトリクス付き）"""
-    stations = get_stations_by_prefecture(prefecture_code)
-    metrics = db.get_station_metrics(prefecture_code=prefecture_code)
+    pref_codes = _expand_prefecture_codes(prefecture_code)
+    if len(pref_codes) <= 1:
+        key = pref_codes[0] if pref_codes else prefecture_code
+        stations = get_stations_by_prefecture(key)
+        metrics = db.get_station_metrics(prefecture_code=key)
+    else:
+        stations = []
+        metrics = []
+        for pref in pref_codes:
+            stations.extend(get_stations_by_prefecture(pref))
+            metrics.extend(db.get_station_metrics(prefecture_code=pref))
     metrics_map = {m["station_id"]: m for m in metrics}
 
     result = []
+    seen_station_ids = set()
     for s in stations:
         sid = s["station_id"]
+        if sid in seen_station_ids:
+            continue
+        seen_station_ids.add(sid)
         m = metrics_map.get(sid, {})
         result.append({
             "station_id": sid,
@@ -176,23 +338,29 @@ async def get_stations(prefecture_code: str):
 async def get_sample_properties(
     include_land: bool = True,
     sort_by: str = "updated_at",
+    prefecture_code: str = "metro",
     station_filter: str = "",
     min_price: int = None,
     max_price: int = None,
     min_yield: float = None,
 ):
-    """サンプル物件 + DB物件 + 土地物件（建築プラン付き）の統合一覧"""
+    """DB物件 + 土地物件（必要時のみ静的サンプルを補完）"""
     props = []
-    # Static samples
-    sample_file = DATA_DIR / "sample_properties.json"
-    if sample_file.exists():
-        with open(sample_file, "r", encoding="utf-8") as f:
-            props = json.load(f)
     # DB properties (scraped etc)
     db_props = db.get_properties(limit=1000)
+    # DBが空の時だけ静的サンプルを補完（古いサンプル混入を防止）
+    if not db_props:
+        sample_file = DATA_DIR / "sample_properties.json"
+        if sample_file.exists():
+            with open(sample_file, "r", encoding="utf-8") as f:
+                props = json.load(f)
+            for p in props:
+                p.setdefault("_type", "property")
+                p["_building_presence"] = "building" if (p.get("building_area") or p.get("structure")) else "unknown"
     for p in db_props:
         p.pop("data_json", None)
         p["_type"] = "property"
+        p["_building_presence"] = "building" if (p.get("building_area") or p.get("structure")) else "unknown"
         props.append(p)
 
     # 土地物件+ベストプラン統合
@@ -247,10 +415,30 @@ async def get_sample_properties(
                 "source_url": ll.get("source_url"),
                 "grade": lj.get("grade") if lj else None,
                 "_type": "land",
+                "_building_presence": "land_only",
                 "_land_listing_id": ll.get("id"),
                 "_land_price": ll.get("land_price"),
             }
             props.append(prop)
+
+    pref_codes = _expand_prefecture_codes(prefecture_code)
+    if pref_codes:
+        def _pref_of(p: dict) -> str:
+            pref = str(p.get("prefecture_code") or "").strip()
+            if pref:
+                return pref
+            addr = str(p.get("address") or "")
+            if "東京都" in addr:
+                return "13"
+            if "神奈川県" in addr:
+                return "14"
+            if "埼玉県" in addr:
+                return "11"
+            if "千葉県" in addr:
+                return "12"
+            return ""
+
+        props = [p for p in props if _pref_of(p) in pref_codes]
 
     # フィルタ適用
     if station_filter:
@@ -264,6 +452,8 @@ async def get_sample_properties(
         props = [p for p in props if (p.get("asking_price") or 0) <= max_price]
     if min_yield is not None:
         props = [p for p in props if (p.get("gross_yield") or 0) >= min_yield]
+
+    props = _dedupe_properties_for_display(props)
 
     # ソート
     sort_keys = {
@@ -286,15 +476,88 @@ def _estimate_missing_coords(props: list):
     """座標なし物件に最寄駅+徒歩から推定座標を付与"""
     import random
     import math
+    from data.geocoder import Geocoder
 
-    # 駅マスタをキャッシュ
+    # 駅マスタをキャッシュ（同名駅の都県跨ぎを区別する）
     if not hasattr(_estimate_missing_coords, "_station_cache"):
         all_stations = db.get_stations()
-        _estimate_missing_coords._station_cache = {
-            s["station_name"]: (s["latitude"], s["longitude"])
-            for s in all_stations if s.get("latitude") and s.get("longitude")
-        }
+        station_map = {}
+        for s in all_stations:
+            if not s.get("latitude") or not s.get("longitude"):
+                continue
+            key = str(s.get("station_name") or "").replace("駅", "").strip()
+            if not key:
+                continue
+            station_map.setdefault(key, []).append({
+                "lat": float(s["latitude"]),
+                "lng": float(s["longitude"]),
+                "pref": str(s.get("prefecture_code") or ""),
+                "name": s.get("station_name"),
+            })
+        _estimate_missing_coords._station_cache = station_map
     station_coords = _estimate_missing_coords._station_cache
+    if not hasattr(_estimate_missing_coords, "_geocode_cache"):
+        _estimate_missing_coords._geocode_cache = {}
+    geocode_cache = _estimate_missing_coords._geocode_cache
+
+    def _pref_from_address(addr: str) -> str:
+        if not addr:
+            return ""
+        if "東京都" in addr:
+            return "13"
+        if "神奈川県" in addr:
+            return "14"
+        if "埼玉県" in addr:
+            return "11"
+        if "千葉県" in addr:
+            return "12"
+        return ""
+
+    def _coord_in_pref_bounds(lat: float, lng: float, pref_code: str) -> bool:
+        # 粗い境界（誤配置検出用）
+        bounds = {
+            "13": (35.45, 35.92, 139.45, 139.95),  # 東京
+            "14": (35.10, 35.75, 139.10, 139.90),  # 神奈川
+            "11": (35.70, 36.35, 138.70, 139.95),  # 埼玉
+            "12": (34.90, 36.20, 139.70, 140.95),  # 千葉
+        }
+        b = bounds.get(pref_code)
+        if not b:
+            return True
+        return b[0] <= lat <= b[1] and b[2] <= lng <= b[3]
+
+    def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+        r = 6371.0
+        p1 = math.radians(lat1)
+        p2 = math.radians(lat2)
+        dp = math.radians(lat2 - lat1)
+        dl = math.radians(lng2 - lng1)
+        a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        return 2 * r * math.asin(math.sqrt(max(0.0, min(1.0, a))))
+
+    def _pick_station_coord(name: str, pref_code: str):
+        if not name:
+            return None
+        sname = name.replace("駅", "").strip()
+        if not sname:
+            return None
+        cands = station_coords.get(sname, [])
+        if cands:
+            pref_hit = next((c for c in cands if pref_code and c.get("pref") == pref_code), None)
+            return pref_hit or cands[0]
+        # 部分一致は誤爆抑制のため、前方一致/後方一致かつ候補最小長に限定
+        if len(sname) < 3:
+            return None
+        partial = []
+        for key, vals in station_coords.items():
+            if key.startswith(sname) or key.endswith(sname) or sname.startswith(key):
+                partial.extend(vals)
+        if not partial:
+            return None
+        pref_hit = next((c for c in partial if pref_code and c.get("pref") == pref_code), None)
+        return pref_hit or partial[0]
+
+    updates = []
 
     # 区→代表座標のフォールバック
     WARD_CENTER = {
@@ -313,46 +576,97 @@ def _estimate_missing_coords(props: list):
     }
 
     for p in props:
-        if p.get("latitude") and p.get("longitude"):
-            continue  # 既に座標あり
+        pref_code = str(p.get("prefecture_code") or _pref_from_address(p.get("address", "")) or "")
+        has_coords = bool(p.get("latitude") and p.get("longitude"))
+        if has_coords:
+            # 座標はあるが都県範囲と明らかに矛盾する場合のみ補正
+            lat0 = float(p["latitude"])
+            lng0 = float(p["longitude"])
+            if _coord_in_pref_bounds(lat0, lng0, pref_code):
+                # 都県内でも、駅徒歩情報と距離が極端に矛盾する座標は補正対象にする
+                station_name0 = str(p.get("nearest_station") or "")
+                walk_min0 = p.get("station_distance_min")
+                try:
+                    walk_min0 = float(walk_min0) if walk_min0 is not None else None
+                except (TypeError, ValueError):
+                    walk_min0 = None
+                st0 = _pick_station_coord(station_name0, pref_code)
+                if st0 and walk_min0 is not None and walk_min0 > 0:
+                    dkm0 = _haversine_km(lat0, lng0, st0["lat"], st0["lng"])
+                    expected = max(0.08 * walk_min0, 0.2)
+                    if dkm0 <= max(1.5, expected * 4.0):
+                        continue
+                else:
+                    continue
 
         lat, lng = None, None
+        coord_source = None
+
+        # 0. 住所ジオコード（優先）
+        addr = (p.get("address") or "").strip()
+        if addr and len(addr) >= 6:
+            key = addr
+            if key in geocode_cache:
+                gc = geocode_cache[key]
+            else:
+                try:
+                    gc = Geocoder().geocode(addr)
+                except Exception:
+                    gc = None
+                geocode_cache[key] = gc
+            if gc:
+                glat, glng = gc
+                if _coord_in_pref_bounds(float(glat), float(glng), pref_code):
+                    lat, lng = float(glat), float(glng)
+                    coord_source = "geocode"
 
         # 1. 最寄駅名から座標取得
-        station_name = p.get("nearest_station") or ""
-        # "東武亀戸線/小村井駅" → "小村井"
-        for sep in ["/", "／", "線"]:
-            if sep in station_name:
-                station_name = station_name.split(sep)[-1]
-        station_name = station_name.replace("駅", "").strip()
-
-        if station_name and station_name in station_coords:
-            lat, lng = station_coords[station_name]
-        else:
-            # 部分一致
-            for sname, coords in station_coords.items():
-                if station_name and station_name in sname:
-                    lat, lng = coords
-                    break
+        if lat is None:
+            station_name = p.get("nearest_station") or ""
+            # "東武亀戸線/小村井駅" → "小村井"
+            for sep in ["/", "／", "線"]:
+                if sep in station_name:
+                    station_name = station_name.split(sep)[-1]
+            station_name = station_name.replace("駅", "").strip()
+            st = _pick_station_coord(station_name, pref_code)
+            if st:
+                lat, lng = st["lat"], st["lng"]
+                coord_source = "station"
 
         # 2. 駅が見つからない場合、city_codeから区の中心座標
         if lat is None:
             city = p.get("city_code", "")
             if city in WARD_CENTER:
                 lat, lng = WARD_CENTER[city]
+                coord_source = "city_center"
 
         if lat is None:
             continue
 
-        # 徒歩分数で駅からオフセット（1分≒80m、ランダム方向）
-        walk_min = p.get("station_distance_min") or 5
-        offset_km = walk_min * 0.08 / 111.0  # 緯度1度≒111km
-        # 物件IDのハッシュで決定論的な方向を付ける（再読込で位置が変わらない）
-        pid = hash(str(p.get("id", "") or p.get("name", "")))
-        angle = (pid % 360) * math.pi / 180
-        p["latitude"] = round(lat + offset_km * math.cos(angle), 6)
-        p["longitude"] = round(lng + offset_km * math.sin(angle) / math.cos(math.radians(lat)), 6)
-        p["_coords_estimated"] = True  # 推定フラグ
+        if coord_source == "geocode":
+            # ジオコードで得た座標は原点を保持（ズレを作らない）
+            p["latitude"] = round(lat, 6)
+            p["longitude"] = round(lng, 6)
+            p["_coords_estimated"] = False
+        else:
+            # 駅/市区中心からの推定時のみ徒歩オフセットを適用
+            walk_min = p.get("station_distance_min") or 5
+            offset_km = walk_min * 0.08 / 111.0  # 緯度1度≒111km
+            pid = hash(str(p.get("id", "") or p.get("name", "")))
+            angle = (pid % 360) * math.pi / 180
+            p["latitude"] = round(lat + offset_km * math.cos(angle), 6)
+            p["longitude"] = round(lng + offset_km * math.sin(angle) / max(0.1, math.cos(math.radians(lat))), 6)
+            p["_coords_estimated"] = True
+        if p.get("id"):
+            updates.append((p["latitude"], p["longitude"], str(p["id"])))
+
+    # 補正した座標はDBにも反映（次回以降の誤配置を抑止）
+    if updates:
+        with db._conn() as conn:
+            conn.executemany(
+                "UPDATE properties SET latitude=?, longitude=?, updated_at=datetime('now','localtime') WHERE id=?",
+                updates,
+            )
 
 
 def _load_market_context(lat: float, lng: float) -> Optional[dict]:
@@ -690,15 +1004,18 @@ async def get_land_prices(
 ):
     """地価データをGeoJSON（市区町村ベース集計）で返す"""
     features = []
+    pref_codes = _expand_prefecture_codes(prefecture_code)
+    pref_where, pref_params = _pref_where_clause("t.prefecture_code", pref_codes)
+
     with db._conn() as conn:
         sql = """
             SELECT t.city_code, AVG(t.price_per_sqm) as avg_price,
                    COUNT(*) as cnt
             FROM transactions t
-            WHERE t.prefecture_code = ? AND t.property_type = '宅地(土地)'
+            WHERE """ + pref_where + """ AND t.property_type = '宅地(土地)'
             AND t.price_per_sqm > 0 AND t.price_per_sqm < 10000000
         """
-        params = [prefecture_code]
+        params = list(pref_params)
         if city_code:
             sql += " AND t.city_code = ?"
             params.append(city_code)
@@ -707,7 +1024,9 @@ async def get_land_prices(
 
     # 市区町村の代表座標（reinfolib_clientから取得）
     from data.reinfolib_client import ReinfolibClient
-    city_centers = ReinfolibClient()._get_city_centers(prefecture_code)
+    city_centers = {}
+    for pref in pref_codes or [prefecture_code]:
+        city_centers.update(ReinfolibClient()._get_city_centers(pref))
     total_count = 0
     total_price = 0
 
@@ -749,7 +1068,7 @@ async def get_land_prices(
             "median_price": avg_all,
             "count": total_count,
             "area_count": len(features),
-            "city_name": CITY_NAME_MAP.get(city_code, ""),
+            "city_name": CITY_NAME_MAP.get(city_code, "一都三県" if len(pref_codes) > 1 else ""),
         },
     })
 
@@ -761,6 +1080,9 @@ async def get_transactions(
 ):
     """取引データをGeoJSON（市区町村ベース集計）で返す"""
     features = []
+    pref_codes = _expand_prefecture_codes(prefecture_code)
+    pref_where, pref_params = _pref_where_clause("t.prefecture_code", pref_codes)
+
     with db._conn() as conn:
         sql = """
             SELECT t.city_code, t.property_type,
@@ -768,9 +1090,9 @@ async def get_transactions(
                    AVG(t.transaction_price) as avg_total,
                    COUNT(*) as cnt
             FROM transactions t
-            WHERE t.prefecture_code = ? AND t.price_per_sqm > 0
+            WHERE """ + pref_where + """ AND t.price_per_sqm > 0
         """
-        params = [prefecture_code]
+        params = list(pref_params)
         if city_code:
             sql += " AND t.city_code = ?"
             params.append(city_code)
@@ -778,7 +1100,9 @@ async def get_transactions(
         rows = conn.execute(sql, params).fetchall()
 
     from data.reinfolib_client import ReinfolibClient
-    city_centers = ReinfolibClient()._get_city_centers(prefecture_code)
+    city_centers = {}
+    for pref in pref_codes or [prefecture_code]:
+        city_centers.update(ReinfolibClient()._get_city_centers(pref))
 
     for row in [dict(r) for r in rows]:
         cc = row.get("city_code", "")
@@ -1194,20 +1518,149 @@ def _analysis_digest(res: dict, scenario: str, market_context: Optional[dict] = 
     return digest
 
 
+def _analysis_cache_key(raw: dict) -> str:
+    """物件分析キャッシュキー（DB永続用）"""
+    d = dict(raw or {})
+    if d.get("_type") == "land" or d.get("_land_listing_id"):
+        lid = str(d.get("_land_listing_id") or d.get("id") or "").strip()
+        if lid:
+            return f"land:{lid}"
+    pid = str(d.get("id") or "").strip()
+    if pid:
+        return f"property:{pid}"
+    src = str(d.get("source_url") or "").strip().lower()
+    if src:
+        return f"url:{src}"
+    fallback = f"{d.get('name','')}|{d.get('address','')}"
+    return f"fallback:{hashlib.md5(fallback.encode('utf-8')).hexdigest()}"
+
+
+def _save_analysis_cache(raw: dict, selected: dict, as_is: Optional[dict], rebuild: Optional[dict]):
+    """分析結果をDBへ永続化"""
+    key = _analysis_cache_key(raw)
+    property_type = "land" if (raw.get("_type") == "land" or raw.get("_land_listing_id")) else "property"
+    if property_type == "land":
+        property_id = str(raw.get("_land_listing_id") or raw.get("id") or "")
+    else:
+        property_id = str(raw.get("id") or "")
+    db.upsert_property_analysis_cache(
+        analysis_key=key,
+        property_id=property_id or None,
+        property_type=property_type,
+        name=str(raw.get("name") or ""),
+        address=str(raw.get("address") or ""),
+        grade=selected.get("grade"),
+        score=selected.get("score"),
+        scenario=selected.get("scenario"),
+        selected=selected,
+        as_is=as_is or {},
+        rebuild=rebuild or {},
+    )
+
+
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """2点間距離(km)"""
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(max(0.0, min(1.0, a))))
+
+
+def _location_bucket(row: dict) -> str:
+    """ランキング分散用のエリアキー"""
+    city = str(row.get("city_code") or "").strip()
+    if city:
+        return f"city:{city}"
+    st = str(row.get("nearest_station") or "").strip()
+    if st:
+        return f"st:{st}"
+    addr = str(row.get("address") or "").strip()
+    return f"addr:{addr[:8]}" if addr else "unknown"
+
+
+def _spatial_diversify_ranking(rows: list[dict]) -> list[dict]:
+    """
+    スコア上位を維持しつつ、同一エリア集中を緩和して並べ替える。
+    - 同一bucketの重複を段階ペナルティ
+    - 近接距離（~2km）を追加ペナルティ
+    """
+    if not rows:
+        return []
+    remaining = list(rows)
+    selected = []
+
+    while remaining:
+        best_idx = 0
+        best_adj = -10**9
+        for i, cand in enumerate(remaining):
+            score = float(cand.get("score") or 0.0)
+            bucket = _location_bucket(cand)
+            same_bucket = sum(1 for s in selected if _location_bucket(s) == bucket)
+            penalty = same_bucket * 4.0
+
+            clat = cand.get("latitude")
+            clng = cand.get("longitude")
+            if clat is not None and clng is not None:
+                near_1km = 0
+                near_2km = 0
+                for s in selected:
+                    slat, slng = s.get("latitude"), s.get("longitude")
+                    if slat is None or slng is None:
+                        continue
+                    d = _haversine_km(float(clat), float(clng), float(slat), float(slng))
+                    if d < 1.0:
+                        near_1km += 1
+                    elif d < 2.0:
+                        near_2km += 1
+                penalty += near_1km * 6.0 + near_2km * 2.5
+
+            adjusted = score - penalty
+            if adjusted > best_adj:
+                best_adj = adjusted
+                best_idx = i
+
+        selected.append(remaining.pop(best_idx))
+    return selected
+
+
 @app.post("/api/analyze-batch")
 async def analyze_batch(request: Request):
     """複数物件の一括判定"""
     data = await request.json()
     properties = [Property.from_dict(p) for p in data.get("properties", [])]
     results = orchestrator.run_batch(properties)
+    ranked = []
+    for idx, r in enumerate(results):
+        j = r["judgment"]
+        p = properties[idx] if idx < len(properties) else None
+        ranked.append({
+            "name": j.property_name,
+            "grade": j.grade,
+            "score": j.overall_score,
+            "recommendation": j.recommendation,
+            "critic": r.get("critic_review", {}).get("reliability_grade", "?"),
+            "latitude": getattr(p, "latitude", None),
+            "longitude": getattr(p, "longitude", None),
+            "city_code": getattr(p, "city_code", None),
+            "nearest_station": getattr(p, "nearest_station", None),
+            "address": getattr(p, "address", None),
+        })
+    ranked.sort(key=lambda x: x["score"] or 0, reverse=True)
+    ranked = _spatial_diversify_ranking(ranked)
     return JSONResponse(content={
         "results": [r["judgment"].to_dict() for r in results],
         "ranking": [
-            {"name": r["judgment"].property_name, "grade": r["judgment"].grade,
-             "score": r["judgment"].overall_score,
-             "recommendation": r["judgment"].recommendation,
-             "critic": r.get("critic_review", {}).get("reliability_grade", "?")}
-            for r in sorted(results, key=lambda x: x["judgment"].overall_score, reverse=True)
+            {
+                "rank": i + 1,
+                "name": x["name"],
+                "grade": x["grade"],
+                "score": x["score"],
+                "recommendation": x["recommendation"],
+                "critic": x["critic"],
+            }
+            for i, x in enumerate(ranked)
         ],
     })
 
@@ -1255,6 +1708,8 @@ async def auto_analyze_properties(request: Request):
                 "client_index": raw.get("_client_index"),
                 "name": normalized.get("name"),
                 "address": normalized.get("address"),
+                "city_code": normalized.get("city_code"),
+                "nearest_station": normalized.get("nearest_station"),
                 "latitude": normalized.get("latitude"),
                 "longitude": normalized.get("longitude"),
                 "auto_filled": auto_filled,
@@ -1263,6 +1718,10 @@ async def auto_analyze_properties(request: Request):
                 "rebuild": rebuild,
             }
             results.append(row)
+            try:
+                _save_analysis_cache(raw=raw, selected=selected, as_is=as_is, rebuild=rebuild)
+            except Exception as e:
+                logging.warning(f"analysis cache save warning: {e}")
         except Exception as e:
             results.append({
                 "index": i - 1,
@@ -1272,7 +1731,20 @@ async def auto_analyze_properties(request: Request):
             })
 
     valid = [r for r in results if r.get("selected") and not r.get("error")]
-    ranking = sorted(valid, key=lambda x: x["selected"].get("score") or 0, reverse=True)
+    ranking_candidates = []
+    for r in valid:
+        sel = r.get("selected") or {}
+        ranking_candidates.append({
+            "row": r,
+            "score": sel.get("score") or 0,
+            "latitude": r.get("latitude"),
+            "longitude": r.get("longitude"),
+            "city_code": r.get("city_code"),
+            "nearest_station": (r.get("selected") or {}).get("market_context", {}).get("nearest_station") or r.get("nearest_station"),
+            "address": r.get("address"),
+        })
+    ranking_candidates.sort(key=lambda x: x.get("score") or 0, reverse=True)
+    ranking = [x["row"] for x in _spatial_diversify_ranking(ranking_candidates)]
     ranking_rows = [
         {
             "rank": idx + 1,
@@ -1286,6 +1758,7 @@ async def auto_analyze_properties(request: Request):
             "hold_sell_roi": (r.get("selected") or {}).get("hold_sell_roi"),
             "exit_cap_rate": (r.get("selected") or {}).get("exit_cap_rate"),
             "client_index": r.get("client_index"),
+            "id": raw_props[r.get("client_index")].get("id") if isinstance(r.get("client_index"), int) and 0 <= r.get("client_index") < len(raw_props) else None,
         }
         for idx, r in enumerate(ranking)
     ]
@@ -1298,6 +1771,82 @@ async def auto_analyze_properties(request: Request):
     })
 
 
+@app.post("/api/properties/analysis-cache/bulk")
+async def get_analysis_cache_bulk(request: Request):
+    payload = await request.json()
+    keys = payload.get("keys", []) or []
+    data = db.get_property_analysis_cache_bulk(keys)
+    return JSONResponse(content={"count": len(data), "items": data})
+
+
+@app.get("/api/properties/analysis-cache/{analysis_key}")
+async def get_analysis_cache(analysis_key: str):
+    row = db.get_property_analysis_cache(analysis_key)
+    return JSONResponse(content={"item": row})
+
+
+@app.post("/api/properties/analyze-unanalyzed")
+async def analyze_unanalyzed_properties(request: Request):
+    """未分析物件のみ自動分析してDBへ保存"""
+    payload = await request.json()
+    raw_props = payload.get("properties", []) or []
+    include_rebuild = bool(payload.get("include_rebuild", True))
+    limit = max(1, min(int(payload.get("limit", 600) or 600), 1000))
+    raw_props = raw_props[:limit]
+
+    key_map = {idx: _analysis_cache_key(raw) for idx, raw in enumerate(raw_props)}
+    existing = db.get_property_analysis_cache_bulk(list(key_map.values()))
+    pending = [raw for i, raw in enumerate(raw_props) if key_map.get(i) not in existing]
+
+    analyzed = []
+    errors = []
+    for i, raw in enumerate(pending, 1):
+        try:
+            normalized = _normalize_property_input(raw, default_name=f"未分析物件{i}")
+            prop = Property.from_dict(normalized)
+
+            market_context = None
+            if prop.latitude and prop.longitude:
+                market_context, _ = _apply_market_context_to_property(prop, normalized)
+
+            as_is_res = orchestrator.run(prop)
+            as_is = _analysis_digest(as_is_res, "as_is", market_context=market_context)
+            selected = as_is
+            rebuild = None
+
+            if include_rebuild:
+                rebuild_pair = _build_rebuild_scenario_input(normalized, market_context)
+                if rebuild_pair:
+                    rebuild_input, assumptions = rebuild_pair
+                    rb_prop = Property.from_dict(_normalize_property_input(rebuild_input, default_name=f"未分析物件{i} 建替"))
+                    if rb_prop.latitude and rb_prop.longitude:
+                        _apply_market_context_to_property(rb_prop, rebuild_input)
+                    rb_res = orchestrator.run(rb_prop)
+                    rebuild = _analysis_digest(rb_res, "rebuild", market_context=market_context, assumptions=assumptions)
+                    if (rebuild.get("score") or 0) > (as_is.get("score") or 0):
+                        selected = rebuild
+
+            _save_analysis_cache(raw=raw, selected=selected, as_is=as_is, rebuild=rebuild)
+            analyzed.append({
+                "analysis_key": _analysis_cache_key(raw),
+                "name": normalized.get("name"),
+                "selected": selected,
+                "as_is": as_is,
+                "rebuild": rebuild,
+            })
+        except Exception as e:
+            errors.append({"name": raw.get("name") or raw.get("address") or f"物件{i}", "error": str(e)})
+
+    return JSONResponse(content={
+        "requested": len(raw_props),
+        "skipped_already_analyzed": len(raw_props) - len(pending),
+        "analyzed": len(analyzed),
+        "errors": len(errors),
+        "results": analyzed,
+        "error_rows": errors[:100],
+    })
+
+
 # ===== スクレイピングAPI =====
 
 @app.get("/api/scrape")
@@ -1306,26 +1855,109 @@ async def scrape_properties(
     sources: str = "rakumachi,kenbiya,rals",
     max_pages: int = 10,
     split_by_price: bool = False,
+    auto_judge: bool = True,
+    analyze_limit: int = 80,
 ):
-    """複数ソースから収益物件をスクレイピング"""
+    """複数ソースから収益物件をスクレイピング → 重複統合 → 自動判定"""
     try:
+        pref_codes = _expand_prefecture_codes(prefecture_code) or ["13"]
         source_list = [s.strip() for s in sources.split(",") if s.strip()]
-        props = scraper_agent.run(
-            prefecture_code=prefecture_code,
-            sources=source_list,
-            max_pages=max_pages,
-            split_by_price=split_by_price,
-        )
+        props = []
+        for pref in pref_codes:
+            pref_props = scraper_agent.run(
+                prefecture_code=pref,
+                sources=source_list,
+                max_pages=max_pages,
+                split_by_price=split_by_price,
+            )
+            props.extend(pref_props)
         # DB保存
         for p in props:
             try:
                 db.upsert_property(p.to_dict())
             except Exception:
                 pass
+        # スクレイピング直後に駅名補正（抽出ミスの後処理）
+        try:
+            db.reconcile_station_refs("properties", limit=10000)
+        except Exception:
+            pass
+
+        # 1) スクレイピング直後に重複統合
+        dedupe_result = db.merge_duplicate_properties(
+            dry_run=False,
+            min_group_size=2,
+            max_groups=5000,
+        )
+
+        analyzed = 0
+        ranking_rows = []
+        errors = []
+        # 2) 統合後のDBレコードを対象に自動判定
+        if auto_judge:
+            with db._conn() as conn:
+                qmarks = ",".join(["?"] * len(source_list)) if source_list else "?"
+                pref_marks = ",".join(["?"] * len(pref_codes))
+                params = list(pref_codes) + source_list + [max(1, int(analyze_limit))]
+                rows = conn.execute(f"""
+                    SELECT *
+                    FROM properties
+                    WHERE prefecture_code IN ({pref_marks})
+                      AND source IN ({qmarks})
+                      AND asking_price IS NOT NULL
+                      AND asking_price > 0
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                """, params).fetchall()
+
+            analyzed_rows = []
+            for r in rows:
+                try:
+                    prop = Property.from_dict(dict(r))
+                    result = orchestrator.run(prop)
+                    j = result.get("judgment")
+                    analyzed += 1
+                    analyzed_rows.append({
+                        "name": prop.name,
+                        "grade": j.grade if j else None,
+                        "score": float(j.overall_score) if j and j.overall_score is not None else 0.0,
+                        "recommendation": j.recommendation if j else "",
+                        "latitude": prop.latitude,
+                        "longitude": prop.longitude,
+                        "city_code": prop.city_code,
+                        "nearest_station": prop.nearest_station,
+                        "address": prop.address,
+                    })
+                except Exception as e:
+                    errors.append(str(e))
+                    continue
+
+            analyzed_rows.sort(key=lambda x: (x.get("score") or 0.0), reverse=True)
+            diversified = _spatial_diversify_ranking(analyzed_rows)
+            ranking_rows = [
+                {
+                    "rank": i + 1,
+                    "name": x.get("name"),
+                    "grade": x.get("grade"),
+                    "score": x.get("score"),
+                    "recommendation": x.get("recommendation"),
+                }
+                for i, x in enumerate(diversified[:50])
+            ]
+
         return JSONResponse(content={
             "count": len(props),
+            "prefecture_codes": pref_codes,
             "sources": source_list,
             "properties": [p.to_dict() for p in props],
+            "dedupe": {
+                "group_count": dedupe_result.get("group_count", 0),
+                "merged_records": dedupe_result.get("merged_records", 0),
+                "relinked_judgments": dedupe_result.get("relinked_judgments", 0),
+            },
+            "auto_judged": analyzed,
+            "ranking": ranking_rows,
+            "errors": errors[:10],
         })
     except Exception as e:
         return JSONResponse(
@@ -1504,18 +2136,32 @@ async def scrape_rentals(
 ):
     """SUUMO賃貸から賃料データをスクレイピング"""
     try:
-        rentals = scraper_agent.scrape_rentals(
-            prefecture_code=prefecture_code,
-            city_code=city_code,
-            max_pages=max_pages,
-        )
+        pref_codes = _expand_prefecture_codes(prefecture_code) or ["13"]
+        rentals = []
+        for pref in pref_codes:
+            rentals.extend(scraper_agent.scrape_rentals(
+                prefecture_code=pref,
+                city_code=city_code,
+                max_pages=max_pages,
+            ))
         # DB保存
         saved = db.upsert_rental_comps(rentals)
+        try:
+            db.reconcile_station_refs("rental_comps", limit=10000)
+        except Exception:
+            pass
+        dedupe = db.merge_duplicate_rental_comps(
+            dry_run=False,
+            min_group_size=2,
+            max_groups=5000,
+        )
         # インメモリのrental_agentも更新
         _reload_rental_agent()
         return JSONResponse(content={
             "count": len(rentals),
             "saved": saved,
+            "prefecture_codes": pref_codes,
+            "dedupe": dedupe,
             "rentals": rentals[:50],
         })
     except Exception as e:
@@ -1554,6 +2200,27 @@ async def dedupe_properties(request: Request):
         )
 
 
+@app.post("/api/stations/reconcile")
+async def reconcile_stations(request: Request):
+    """既存データの駅名/駅IDを実在駅に補正"""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    limit = int(data.get("limit", 10000) or 10000)
+    try:
+        p = db.reconcile_station_refs("properties", limit=limit)
+        r = db.reconcile_station_refs("rental_comps", limit=limit)
+        return JSONResponse(content={
+            "status": "ok",
+            "updated_properties": p,
+            "updated_rentals": r,
+            "updated_total": p + r,
+        })
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "error": str(e)}, status_code=500)
+
+
 # ===== URL物件取込API =====
 
 @app.post("/api/scrape-url")
@@ -1582,17 +2249,42 @@ async def scrape_url(request: Request):
 
         # DB保存
         db.upsert_property(prop.to_dict())
+        dedupe_result = db.merge_duplicate_properties(
+            dry_run=False,
+            min_group_size=2,
+            max_groups=5000,
+        )
+
+        analyze_target = prop
+        try:
+            with db._conn() as conn:
+                row = conn.execute("""
+                    SELECT *
+                    FROM properties
+                    WHERE source_url = ?
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                """, (prop.source_url or "",)).fetchone()
+            if row:
+                analyze_target = Property.from_dict(dict(row))
+        except Exception:
+            pass
 
         result = {
             "status": "ok",
             "property": prop.to_dict(),
             "saved_to_db": True,
+            "dedupe": {
+                "group_count": dedupe_result.get("group_count", 0),
+                "merged_records": dedupe_result.get("merged_records", 0),
+                "relinked_judgments": dedupe_result.get("relinked_judgments", 0),
+            },
         }
 
         # 自動分析
         if auto_analyze:
             try:
-                analysis = orchestrator.run(prop)
+                analysis = orchestrator.run(analyze_target)
                 judgment = analysis["judgment"]
                 result["judgment"] = judgment.to_dict()
                 result["summary"] = judgment.summary_text
@@ -1960,15 +2652,27 @@ async def scrape_land_listings(request: Request):
         _bg_task_status = {"running": True, "step": "スクレイピング中...", "result": None, "error": None}
         try:
             _bg_task_status["step"] = "スクレイピング中..."
-            result = batch_processor.run_land_pipeline(
-                source=data.get("source", "suumo"),
-                pref=data.get("prefecture_code", "13"),
-                price_min=data.get("price_min"),
-                price_max=data.get("price_max"),
-                area_min=data.get("area_min"),
-                walk_max=data.get("walk_max"),
-                max_pages=data.get("max_pages", 3),
-            )
+            pref_codes = data.get("prefecture_codes")
+            if isinstance(pref_codes, str):
+                pref_codes = _expand_prefecture_codes(pref_codes)
+            if not pref_codes:
+                pref_codes = _expand_prefecture_codes(data.get("prefecture_code", "13")) or ["13"]
+
+            total = {"listings_saved": 0, "plans_generated": 0, "asset_scores_generated": 0}
+            for pref in pref_codes:
+                part = batch_processor.run_land_pipeline(
+                    source=data.get("source", "suumo"),
+                    pref=pref,
+                    price_min=data.get("price_min"),
+                    price_max=data.get("price_max"),
+                    area_min=data.get("area_min"),
+                    walk_max=data.get("walk_max"),
+                    max_pages=data.get("max_pages", 3),
+                ) or {}
+                total["listings_saved"] += int(part.get("listings_saved") or 0)
+                total["plans_generated"] += int(part.get("plans_generated") or 0)
+                total["asset_scores_generated"] += int(part.get("asset_scores_generated") or 0)
+            result = {"prefecture_codes": pref_codes, **total}
             _bg_task_status["result"] = result
             _bg_task_status["step"] = "完了"
         except Exception as e:
@@ -2982,7 +3686,15 @@ async def batch_logs(limit: int = 30):
 @app.get("/api/analysis/distortion")
 async def station_distortion(prefecture_code: str = "13"):
     """駅単位歪み分析"""
-    results = area_analyzer.analyze_all_areas(prefecture_code)
+    pref_codes = _expand_prefecture_codes(prefecture_code)
+    if len(pref_codes) <= 1:
+        key = pref_codes[0] if pref_codes else prefecture_code
+        results = area_analyzer.analyze_all_areas(key)
+    else:
+        results = []
+        for pref in pref_codes:
+            results.extend(area_analyzer.analyze_all_areas(pref))
+        results.sort(key=lambda x: x.distortion_score or 0, reverse=True)
     geojson = area_analyzer.build_distortion_geojson(results)
     from dataclasses import asdict
     ranking = [asdict(r) for r in results]
@@ -3399,6 +4111,31 @@ async def analyze_full(request: Request):
             asset_score = asset_result.to_dict()
         except Exception as e:
             logging.warning(f"資産性分析スキップ: {e}")
+
+    # 単体分析結果も永続化（後から即再表示できるようにする）
+    try:
+        selected = {
+            "scenario": "as_is",
+            "grade": judgment.grade,
+            "score": round(float(judgment.overall_score or 0), 2),
+            "recommendation": judgment.recommendation,
+            "confidence": judgment.confidence,
+            "gross_yield": getattr(result.get("valuation"), "gross_yield", None),
+            "net_yield": getattr(result.get("valuation"), "net_yield", None),
+            "expense_rate": getattr(result.get("valuation"), "expense_rate", None),
+            "irr": getattr(result.get("simulation"), "irr", None),
+            "dscr": getattr(result.get("simulation"), "dscr", None),
+            "year1_cash_flow": getattr(result.get("simulation"), "year1_cash_flow", None),
+            "exit_cap_rate": getattr(result.get("simulation"), "hold_sell_exit_cap_base", None),
+            "exit_cap_rate_stress": getattr(result.get("simulation"), "hold_sell_exit_cap_stress", None),
+            "hold_sell_roi": getattr(result.get("simulation"), "hold_sell_roi_65", None),
+            "hold_sell_total_return": getattr(result.get("simulation"), "hold_sell_total_return_65", None),
+            "summary": judgment.summary_text,
+            "market_context": market_context,
+        }
+        _save_analysis_cache(raw=data, selected=selected, as_is=selected, rebuild=None)
+    except Exception as e:
+        logging.warning(f"analyze-full cache save warning: {e}")
 
     return JSONResponse(content={
         "judgment": judgment.to_dict(),
@@ -6565,9 +7302,12 @@ async def pipeline_grow(
     })
 
 
-# スケジューラ自動起動
+# スケジューラ自動起動（重いバッチがAPI応答を阻害しやすいため既定OFF）
 from engine.scheduler import scheduler as _scheduler
-_scheduler.start()
+if os.getenv("RE_SCHEDULER_AUTOSTART", "0").strip().lower() in {"1", "true", "yes", "on"}:
+    _scheduler.start()
+else:
+    logging.info("Scheduler autostart disabled (set RE_SCHEDULER_AUTOSTART=1 to enable)")
 
 if __name__ == "__main__":
     import uvicorn

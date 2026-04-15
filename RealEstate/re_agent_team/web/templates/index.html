@@ -379,7 +379,9 @@
                         <button id="btn-reload-props" class="btn-secondary" style="height:28px;font-size:0.72rem;" onclick="loadSampleProperties()">検索</button>
                         <button id="btn-batch-analyze" class="btn-secondary" style="height:28px;font-size:0.72rem;">一括判定</button>
                         <button id="btn-auto-analyze-map" class="btn-primary" style="height:28px;font-size:0.72rem;">自動分析→ランク反映</button>
+                        <button id="btn-auto-analyze-save" class="btn-primary" style="height:28px;font-size:0.72rem;">未分析を自動分析・保存</button>
                     </div>
+                    <div id="auto-analyze-save-result" style="font-size:0.72rem;color:#90a4ae;margin-bottom:4px;"></div>
                     <div class="form-row" style="gap:4px;margin-bottom:6px;">
                         <label style="font-size:0.7rem;color:#90a4ae;">
                             <input type="checkbox" id="auto-include-rebuild" checked>
@@ -484,6 +486,10 @@
                     <div id="result-scores"></div>
                     <div id="result-metrics"></div>
                     <div id="result-swot"></div>
+                </div>
+                <div class="panel" id="saved-analysis-panel" style="display:none;">
+                    <h3>保存済み分析詳細</h3>
+                    <div id="saved-analysis-content" style="font-size:0.75rem;"></div>
                 </div>
 
                 <!-- 資産性スコアは投資判定結果パネル内に統合 -->

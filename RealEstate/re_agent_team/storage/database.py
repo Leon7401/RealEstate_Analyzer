@@ -175,6 +175,22 @@ class Database:
                     judged_at TEXT DEFAULT (datetime('now','localtime'))
                 );
 
+                CREATE TABLE IF NOT EXISTS property_analysis_cache (
+                    analysis_key TEXT PRIMARY KEY,
+                    property_id TEXT,
+                    property_type TEXT DEFAULT 'property',
+                    name TEXT,
+                    address TEXT,
+                    grade TEXT,
+                    score REAL,
+                    scenario TEXT,
+                    selected_json TEXT,
+                    as_is_json TEXT,
+                    rebuild_json TEXT,
+                    analyzed_at TEXT DEFAULT (datetime('now','localtime')),
+                    updated_at TEXT DEFAULT (datetime('now','localtime'))
+                );
+
                 CREATE TABLE IF NOT EXISTS batch_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     batch_type TEXT NOT NULL,
@@ -351,6 +367,9 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_ll_zoning ON land_listings(zoning);
                 CREATE INDEX IF NOT EXISTS idx_bp_structure ON building_plans(structure_type, floors);
                 CREATE INDEX IF NOT EXISTS idx_lj_grade ON land_judgments(grade);
+                CREATE INDEX IF NOT EXISTS idx_pac_property_id ON property_analysis_cache(property_id);
+                CREATE INDEX IF NOT EXISTS idx_pac_grade ON property_analysis_cache(grade);
+                CREATE INDEX IF NOT EXISTS idx_pac_score ON property_analysis_cache(score DESC);
 
                 -- 土地資産性スコア
                 CREATE TABLE IF NOT EXISTS land_asset_scores (
@@ -1404,6 +1423,100 @@ class Database:
                 json.dumps(result.get("key_metrics", {}), ensure_ascii=False),
                 json.dumps(result, ensure_ascii=False),
             ))
+
+    def upsert_property_analysis_cache(
+        self,
+        analysis_key: str,
+        property_id: Optional[str],
+        property_type: str,
+        name: str,
+        address: str,
+        grade: Optional[str],
+        score: Optional[float],
+        scenario: Optional[str],
+        selected: Optional[Dict],
+        as_is: Optional[Dict],
+        rebuild: Optional[Dict],
+    ):
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO property_analysis_cache
+                    (analysis_key, property_id, property_type, name, address,
+                     grade, score, scenario, selected_json, as_is_json, rebuild_json,
+                     analyzed_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'), datetime('now','localtime'))
+                ON CONFLICT(analysis_key) DO UPDATE SET
+                    property_id=excluded.property_id,
+                    property_type=excluded.property_type,
+                    name=excluded.name,
+                    address=excluded.address,
+                    grade=excluded.grade,
+                    score=excluded.score,
+                    scenario=excluded.scenario,
+                    selected_json=excluded.selected_json,
+                    as_is_json=excluded.as_is_json,
+                    rebuild_json=excluded.rebuild_json,
+                    analyzed_at=datetime('now','localtime'),
+                    updated_at=datetime('now','localtime')
+                """,
+                (
+                    analysis_key,
+                    property_id,
+                    property_type or "property",
+                    name or "",
+                    address or "",
+                    grade,
+                    score,
+                    scenario,
+                    json.dumps(selected or {}, ensure_ascii=False),
+                    json.dumps(as_is or {}, ensure_ascii=False),
+                    json.dumps(rebuild or {}, ensure_ascii=False),
+                ),
+            )
+
+    def get_property_analysis_cache(self, analysis_key: str) -> Optional[Dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM property_analysis_cache WHERE analysis_key=? LIMIT 1",
+                (analysis_key,),
+            ).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            for k in ("selected_json", "as_is_json", "rebuild_json"):
+                try:
+                    d[k.replace("_json", "")] = json.loads(d.get(k) or "{}")
+                except Exception:
+                    d[k.replace("_json", "")] = {}
+            return d
+
+    def get_property_analysis_cache_bulk(self, analysis_keys: List[str]) -> Dict[str, Dict]:
+        keys = [str(k or "").strip() for k in (analysis_keys or []) if str(k or "").strip()]
+        if not keys:
+            return {}
+        rows = []
+        with self._conn() as conn:
+            chunk = 900
+            for i in range(0, len(keys), chunk):
+                part = keys[i:i + chunk]
+                placeholders = ",".join("?" for _ in part)
+                rows.extend(
+                    conn.execute(
+                        f"SELECT * FROM property_analysis_cache WHERE analysis_key IN ({placeholders})",
+                        part,
+                    ).fetchall()
+                )
+        out: Dict[str, Dict] = {}
+        for row in rows:
+            d = dict(row)
+            for k in ("selected_json", "as_is_json", "rebuild_json"):
+                try:
+                    d[k.replace("_json", "")] = json.loads(d.get(k) or "{}")
+                except Exception:
+                    d[k.replace("_json", "")] = {}
+            out[str(d.get("analysis_key") or "")] = d
+        return out
 
     # ===== バッチログ =====
 

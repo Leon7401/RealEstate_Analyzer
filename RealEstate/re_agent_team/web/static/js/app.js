@@ -28,6 +28,17 @@ function getPropertyCacheKeys(p) {
     return keys;
 }
 
+function getAnalysisCacheKey(p) {
+    if (!p) return '';
+    if (p._type === 'land' || p._land_listing_id) {
+        const lid = p._land_listing_id || p.id;
+        return lid != null ? `land:${lid}` : '';
+    }
+    if (p.id != null) return `property:${p.id}`;
+    if (p.source_url) return `url:${_safeLower(p.source_url)}`;
+    return '';
+}
+
 function loadAnalysisCache() {
     try {
         const raw = localStorage.getItem(ANALYSIS_CACHE_KEY);
@@ -89,6 +100,50 @@ function persistPropertyAnalysisResult(p, row) {
     };
     const keys = getPropertyCacheKeys(p);
     keys.forEach(k => { analysisCache[k] = payload; });
+}
+
+function applyServerCachedAnalysisToProperty(p, cacheRow) {
+    if (!p || !cacheRow) return;
+    const selected = cacheRow.selected || {};
+    if (selected.grade) {
+        p._analysis_grade = selected.grade;
+        p.grade = selected.grade;
+    }
+    if (selected.gross_yield != null) p.gross_yield = selected.gross_yield;
+    if (selected.net_yield != null) p.net_yield = selected.net_yield;
+    if (selected.score != null) p._analysis_score = selected.score;
+    if (selected.recommendation) p._analysis_recommendation = selected.recommendation;
+    if (selected.scenario) p._analysis_scenario = selected.scenario;
+    if (selected.confidence != null) p._analysis_confidence = selected.confidence;
+    p._scenario_as_is = cacheRow.as_is || p._scenario_as_is || null;
+    p._scenario_rebuild = cacheRow.rebuild || p._scenario_rebuild || null;
+    p._analysis_cache = cacheRow;
+}
+
+async function loadServerAnalysisCacheForProperties(props) {
+    const list = Array.isArray(props) ? props : [];
+    const keyToProp = new Map();
+    list.forEach(p => {
+        const key = getAnalysisCacheKey(p);
+        if (key) keyToProp.set(key, p);
+    });
+    if (!keyToProp.size) return;
+    try {
+        const resp = await fetch('/api/properties/analysis-cache/bulk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keys: Array.from(keyToProp.keys()) }),
+        });
+        const data = await resp.json();
+        const items = data.items || {};
+        Object.entries(items).forEach(([key, row]) => {
+            const p = keyToProp.get(key);
+            if (!p) return;
+            applyServerCachedAnalysisToProperty(p, row);
+        });
+    } catch (e) {
+        console.debug('analysis-cache bulk fetch failed:', e);
+    }
 }
 
 // ===== スクレイパー切替 =====
@@ -187,6 +242,8 @@ function initMap(center, zoom) {
     document.getElementById('btn-batch-analyze').addEventListener('click', batchAnalyze);
     const autoAnalyzeBtn = document.getElementById('btn-auto-analyze-map');
     if (autoAnalyzeBtn) autoAnalyzeBtn.addEventListener('click', autoAnalyzeAndReflect);
+    const autoAnalyzeSaveBtn = document.getElementById('btn-auto-analyze-save');
+    if (autoAnalyzeSaveBtn) autoAnalyzeSaveBtn.addEventListener('click', analyzeUnanalyzedAndSave);
     const rankingCloseBtn = document.getElementById('ranking-close-btn');
     if (rankingCloseBtn) rankingCloseBtn.addEventListener('click', hideRankingPanel);
     const rankingToggleBtn = document.getElementById('ranking-toggle-btn');
@@ -318,6 +375,7 @@ function initMap(center, zoom) {
 
     // 凡例
     try { addLegendControl(); _hookLegendUpdate(); } catch(e) {}
+    window.addEventListener('resize', () => setTimeout(adjustRankingPanelPosition, 50));
 
     // 初期読込
     loadCities();
@@ -327,6 +385,7 @@ function initMap(center, zoom) {
     loadScrapeConfigs();
     loadLandStats();
     loadDbLayersFromDatabase();
+    setTimeout(adjustRankingPanelPosition, 200);
 }
 
 function switchTab(tabId) {
@@ -390,6 +449,7 @@ async function loadSampleProperties() {
         const data = await resp.json();
         sampleProperties = data.properties || [];
         sampleProperties.forEach(applyCachedAnalysisToProperty);
+        await loadServerAnalysisCacheForProperties(sampleProperties);
 
         // クライアントサイド種別フィルタ
         let filtered = getFilteredProperties(sampleProperties, typeFilter);
@@ -536,6 +596,12 @@ async function analyzePropertiesForRanking(targets, includeRebuild = true, btn =
             p._analysis_confidence = selected.confidence;
             p._scenario_as_is = r.as_is || null;
             p._scenario_rebuild = r.rebuild || null;
+            p._analysis_cache = {
+                analysis_key: getAnalysisCacheKey(p),
+                selected: selected,
+                as_is: r.as_is || null,
+                rebuild: r.rebuild || null,
+            };
             p._analysis_updated_at = new Date().toISOString();
             persistPropertyAnalysisResult(p, r);
         });
@@ -629,6 +695,7 @@ function selectProperty(idx) {
     let filtered = sampleProperties;
     if (typeFilter) filtered = sampleProperties.filter(pp => (pp._type || 'property') === typeFilter);
     renderPropertyList(filtered);
+    renderSavedAnalysisDetail(p);
 }
 
 function plotSampleProperties(propsToPlot) {
@@ -865,30 +932,9 @@ async function loadDbLayersFromDatabase() {
 
 function renderLandPrices(geojson) {
     if (landPriceLayer) map.removeLayer(landPriceLayer);
-
-    landPriceLayer = L.geoJSON(geojson, {
-        pointToLayer: (f, ll) => L.circleMarker(ll, {
-            radius: 6, fillColor: f.properties.color,
-            color: '#fff', weight: 1, fillOpacity: 0.8,
-        }),
-        onEachFeature: (f, layer) => {
-            const p = f.properties;
-            let changeStr = '';
-            if (p.change_rate != null) {
-                const sign = p.change_rate >= 0 ? '+' : '';
-                changeStr = `<br>前年比: ${sign}${(p.change_rate * 100).toFixed(1)}%`;
-            }
-            layer.bindPopup(`
-                <div class="popup-title">${p.type}</div>
-                <div class="popup-price">${p.price_label}</div>
-                <div class="popup-detail">
-                    ${p.address}<br>用途: ${p.use_zone}${changeStr}
-                    ${p.station ? '<br>最寄駅: ' + p.station : ''}
-                </div>
-            `);
-        },
-    });
-    if (isLayerEnabled('layer-land-price', true)) landPriceLayer.addTo(map);
+    // 地価ポイント（円マーカー）は表示しない。
+    // 地価データは統計・他レイヤーのみで利用する。
+    landPriceLayer = null;
 }
 
 function renderTransactions(geojson) {
@@ -963,6 +1009,10 @@ async function analyzeProperty() {
     const presetIdx = document.getElementById('preset-select').value;
     if (presetIdx !== '' && sampleProperties[parseInt(presetIdx)]) {
         const sp = sampleProperties[parseInt(presetIdx)];
+        if (sp.id != null) propData.id = sp.id;
+        if (sp._type) propData._type = sp._type;
+        if (sp._land_listing_id != null) propData._land_listing_id = sp._land_listing_id;
+        if (sp.source_url) propData.source_url = sp.source_url;
         if (sp.latitude) propData.latitude = sp.latitude;
         if (sp.longitude) propData.longitude = sp.longitude;
         if (sp.road_frontage) propData.road_frontage = sp.road_frontage;
@@ -1008,6 +1058,27 @@ async function analyzeProperty() {
             p._analysis_score = data.judgment.overall_score ?? p._analysis_score;
             p._analysis_recommendation = data.judgment.recommendation || p._analysis_recommendation;
             p._analysis_updated_at = new Date().toISOString();
+            p._analysis_cache = {
+                analysis_key: getAnalysisCacheKey(p),
+                selected: {
+                    scenario: p._analysis_scenario || 'as_is',
+                    grade: p.grade,
+                    score: p._analysis_score,
+                    recommendation: p._analysis_recommendation,
+                    confidence: data.judgment.confidence,
+                    gross_yield: p.gross_yield,
+                    net_yield: p.net_yield,
+                },
+                as_is: p._scenario_as_is || {
+                    scenario: 'as_is',
+                    grade: p.grade,
+                    score: p._analysis_score,
+                    recommendation: p._analysis_recommendation,
+                    gross_yield: p.gross_yield,
+                    net_yield: p.net_yield,
+                },
+                rebuild: p._scenario_rebuild || null,
+            };
 
             // キャッシュも更新
             persistPropertyAnalysisResult(p, {
@@ -1033,6 +1104,7 @@ async function analyzeProperty() {
             renderPropertyList(sorted);
             plotSampleProperties(sorted);
             showRanking(buildRankingFromProperties(sorted));
+            renderSavedAnalysisDetail(p);
         }
         switchTab('tab-property');
     } catch (err) {
@@ -1089,6 +1161,72 @@ async function autoAnalyzeAndReflect() {
     } catch (err) {
         console.error('自動分析エラー:', err);
         alert('自動分析に失敗しました');
+    }
+}
+
+async function analyzeUnanalyzedAndSave() {
+    const btn = document.getElementById('btn-auto-analyze-save');
+    const resultEl = document.getElementById('auto-analyze-save-result');
+    const includeRebuild = document.getElementById('auto-include-rebuild')?.checked !== false;
+    const typeFilter = document.getElementById('prop-filter-type')?.value || '';
+    const sortBy = document.getElementById('prop-sort')?.value || 'updated_at';
+    const targets = getFilteredProperties(sampleProperties, typeFilter);
+    if (!targets.length) {
+        if (resultEl) resultEl.textContent = '分析対象物件がありません';
+        return;
+    }
+
+    const oldText = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '未分析を分析中...'; }
+    if (resultEl) resultEl.textContent = `未分析物件を判定中... (${targets.length}件)`;
+    try {
+        const payloadProps = targets.map(p => ({
+            ...p,
+            _client_index: sampleProperties.indexOf(p),
+        })).filter(p => p._client_index >= 0);
+        const resp = await fetch('/api/properties/analyze-unanalyzed', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                properties: payloadProps,
+                include_rebuild: includeRebuild,
+                limit: 1000,
+            }),
+        });
+        const data = await resp.json();
+        const rows = data.results || [];
+        rows.forEach(r => {
+            const key = r.analysis_key || '';
+            const idx = payloadProps.findIndex(pp => getAnalysisCacheKey(pp) === key);
+            if (idx < 0) return;
+            const clientIdx = payloadProps[idx]._client_index;
+            const p = sampleProperties[clientIdx];
+            if (!p) return;
+            applyServerCachedAnalysisToProperty(p, {
+                analysis_key: key,
+                selected: r.selected || {},
+                as_is: r.as_is || {},
+                rebuild: r.rebuild || {},
+            });
+            persistPropertyAnalysisResult(p, { selected: r.selected || {}, as_is: r.as_is || {}, rebuild: r.rebuild || {} });
+        });
+        saveAnalysisCache();
+
+        const refreshed = getFilteredProperties(sampleProperties, typeFilter);
+        const sorted = sortPropertiesForView(refreshed, sortBy);
+        applyRankOrderToProperties(sorted);
+        renderPropertyList(sorted);
+        plotSampleProperties(sorted);
+        showRanking(buildRankingFromProperties(sorted));
+
+        if (resultEl) {
+            resultEl.innerHTML = `<span style="color:#66bb6a;">保存完了: 新規分析 ${data.analyzed || 0}件 / 既分析スキップ ${data.skipped_already_analyzed || 0}件</span>`;
+        }
+    } catch (e) {
+        console.error('未分析自動分析エラー:', e);
+        if (resultEl) resultEl.innerHTML = `<span style="color:#ef5350;">エラー: ${e.message}</span>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = oldText || '未分析を自動分析・保存'; }
     }
 }
 
@@ -1314,6 +1452,75 @@ function showJudgmentResult(
     panel.scrollIntoView({behavior: 'smooth', block: 'start'});
 }
 
+function _fmtPct(v, digits = 1) {
+    if (v == null || Number.isNaN(Number(v))) return '-';
+    return `${(Number(v) * 100).toFixed(digits)}%`;
+}
+
+function _fmtNum(v) {
+    if (v == null || Number.isNaN(Number(v))) return '-';
+    return Number(v).toLocaleString();
+}
+
+function _fmtYen(v) {
+    if (v == null || Number.isNaN(Number(v))) return '-';
+    return `¥${Math.round(Number(v)).toLocaleString()}`;
+}
+
+function renderSavedAnalysisDetail(p) {
+    const panel = document.getElementById('saved-analysis-panel');
+    const content = document.getElementById('saved-analysis-content');
+    if (!panel || !content) return;
+    const cache = p?._analysis_cache;
+    if (!cache || !cache.selected) {
+        panel.style.display = 'none';
+        content.innerHTML = '';
+        return;
+    }
+
+    const selected = cache.selected || {};
+    const asIs = cache.as_is || {};
+    const rebuild = cache.rebuild || {};
+    const hasRebuild = !!(rebuild && Object.keys(rebuild).length);
+    const assumptions = rebuild.assumptions || {};
+
+    const row = (label, v1, v2) => `
+        <div style="display:grid;grid-template-columns:120px 1fr 1fr;gap:8px;padding:2px 0;border-bottom:1px solid #1a2744;">
+            <span style="color:#78909c;">${label}</span>
+            <span>${v1}</span>
+            <span>${v2}</span>
+        </div>
+    `;
+
+    content.innerHTML = `
+        <div style="padding:6px 8px;background:#101b2d;border:1px solid #1a2744;border-radius:6px;margin-bottom:8px;">
+            <div style="font-weight:700;">採用シナリオ: ${selected.scenario === 'rebuild' ? '建替' : '現況'} / ${selected.grade || '-'} / Score ${_fmtNum(selected.score)}</div>
+            <div style="color:#90a4ae;font-size:0.72rem;">${selected.recommendation || ''}</div>
+        </div>
+        <div style="font-size:0.72rem;color:#90a4ae;margin-bottom:4px;">現況案 / 建替案 比較</div>
+        ${row('スコア', _fmtNum(asIs.score), hasRebuild ? _fmtNum(rebuild.score) : '-')}
+        ${row('正味利回り', _fmtPct(asIs.net_yield), hasRebuild ? _fmtPct(rebuild.net_yield) : '-')}
+        ${row('IRR', _fmtPct(asIs.irr), hasRebuild ? _fmtPct(rebuild.irr) : '-')}
+        ${row('DSCR', _fmtNum(asIs.dscr), hasRebuild ? _fmtNum(rebuild.dscr) : '-')}
+        ${row('初年度CF', _fmtYen(asIs.year1_cash_flow), hasRebuild ? _fmtYen(rebuild.year1_cash_flow) : '-')}
+        ${row('8年ROI', _fmtPct(asIs.hold_sell_roi, 0), hasRebuild ? _fmtPct(rebuild.hold_sell_roi, 0) : '-')}
+        ${row('出口Cap', _fmtPct(asIs.exit_cap_rate), hasRebuild ? _fmtPct(rebuild.exit_cap_rate) : '-')}
+        ${hasRebuild ? `
+        <div style="margin-top:8px;padding:6px;border:1px solid #1a2744;border-radius:6px;background:#0f172a;">
+            <div style="font-weight:700;color:#81d4fa;margin-bottom:4px;">建替コスト前提</div>
+            <div style="display:grid;grid-template-columns:140px 1fr;gap:6px;">
+                <span style="color:#78909c;">増分総額</span><span>${_fmtYen(assumptions.rebuild_incremental_cost)}</span>
+                <span style="color:#78909c;">建築本体</span><span>${_fmtYen(assumptions.rebuild_cost_hard)}</span>
+                <span style="color:#78909c;">付帯・諸経費</span><span>${_fmtYen(assumptions.rebuild_cost_overhead)}</span>
+                <span style="color:#78909c;">セットバック補正</span><span>${_fmtYen(assumptions.rebuild_cost_setback)}</span>
+                <span style="color:#78909c;">解体費</span><span>${_fmtYen(assumptions.demolition_cost)}</span>
+                <span style="color:#78909c;">採用プラン</span><span>${assumptions.selected_plan || '-'}</span>
+            </div>
+        </div>` : ''}
+    `;
+    panel.style.display = 'block';
+}
+
 function showAssetScoreInResult(data) {
     /**
      * 投資判定結果パネル内に資産性スコアを統合表示する
@@ -1363,6 +1570,7 @@ function showRanking(ranking) {
     if (toggleBtn) toggleBtn.textContent = rankingPanelCollapsed ? '展開' : '折りたたむ';
     if (wrap) wrap.style.display = rankingPanelCollapsed ? 'none' : 'block';
     panel.style.display = 'block';
+    adjustRankingPanelPosition();
 
     let html = '';
     ranking.forEach((r, i) => {
@@ -1392,6 +1600,7 @@ function showRanking(ranking) {
             await openRankingItem(ci, pid);
         });
     });
+    requestAnimationFrame(adjustRankingPanelPosition);
 }
 
 async function openRankingItem(clientIndex, propertyId) {
@@ -1404,6 +1613,11 @@ async function openRankingItem(clientIndex, propertyId) {
     }
     if (!resolved) return;
     switchTab('tab-property');
+    const selected = (_selectedPropIdx >= 0 ? sampleProperties[_selectedPropIdx] : null);
+    if (selected && selected._analysis_cache) {
+        renderSavedAnalysisDetail(selected);
+        return;
+    }
     try {
         await analyzeProperty();
     } catch (e) {
@@ -1415,6 +1629,7 @@ function hideRankingPanel() {
     const panel = document.getElementById('ranking-panel');
     if (!panel) return;
     panel.style.display = 'none';
+    panel.style.bottom = '16px';
 }
 
 function toggleRankingPanel() {
@@ -1423,6 +1638,22 @@ function toggleRankingPanel() {
     const toggleBtn = document.getElementById('ranking-toggle-btn');
     if (wrap) wrap.style.display = rankingPanelCollapsed ? 'none' : 'block';
     if (toggleBtn) toggleBtn.textContent = rankingPanelCollapsed ? '展開' : '折りたたむ';
+    adjustRankingPanelPosition();
+}
+
+function adjustRankingPanelPosition() {
+    const panel = document.getElementById('ranking-panel');
+    if (!panel) return;
+    let bottom = 16;
+    const legend = document.getElementById('map-legend');
+    if (legend && legend.style.display !== 'none') {
+        const rect = legend.getBoundingClientRect();
+        if (rect.height > 0) {
+            // 凡例高さ + 余白分だけランキングパネルを上に逃がす
+            bottom = Math.max(bottom, Math.round(window.innerHeight - rect.top + 12));
+        }
+    }
+    panel.style.bottom = `${bottom}px`;
 }
 
 // ===== CSV取込 =====
@@ -4411,6 +4642,7 @@ function updateLegend() {
 
     div.innerHTML = html;
     div.style.display = show ? 'block' : 'none';
+    adjustRankingPanelPosition();
 }
 
 function _hookLegendUpdate() {
