@@ -186,3 +186,47 @@
     font-weight: 600;
     margin-top: 6px;
 }
+
+/* トレンド可視化 */
+.trend-chart {
+    min-height: 96px;
+    border: 1px solid #1a2744;
+    border-radius: 6px;
+    padding: 8px;
+    background: #0f172a;
+}
+
+.trend-bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    min-height: 92px;
+    overflow-x: auto;
+}
+
+.trend-bar-wrap {
+    min-width: 28px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+}
+
+.trend-bar {
+    width: 18px;
+    border-radius: 3px 3px 0 0;
+    background: linear-gradient(180deg, #4fc3f7 0%, #1e88e5 100%);
+}
+
+.trend-bar-positive {
+    background: linear-gradient(180deg, #66bb6a 0%, #2e7d32 100%);
+}
+
+.trend-bar-negative {
+    background: linear-gradient(180deg, #ef5350 0%, #b71c1c 100%);
+}
+
+.trend-year {
+    font-size: 0.68rem;
+    color: #90a4ae;
+}

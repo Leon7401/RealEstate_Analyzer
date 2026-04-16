@@ -2526,23 +2526,31 @@ async def consistency_check_properties(request: Request):
         "with_dedupe": true
       }
     """
+    import threading
+    import time
+    global _bg_task_status
+
     try:
         data = await request.json()
     except Exception:
         data = {}
     limit = int(data.get("limit", 50000) or 50000)
-    max_rescrape = int(data.get("max_rescrape", 300) or 300)
+    max_rescrape = int(data.get("max_rescrape", 120) or 120)
     use_browser = bool(data.get("use_browser", False))
     strict_nearest = bool(data.get("strict_nearest", True))
     with_dedupe = bool(data.get("with_dedupe", True))
+    run_in_background = bool(data.get("run_in_background", True))
+    max_runtime_sec = int(data.get("max_runtime_sec", 900) or 900)
 
-    scanned = 0
-    suspicious = 0
-    rescape_attempted = 0
-    rescape_updated = 0
-    samples: List[Dict[str, Any]] = []
+    def _run_job() -> Dict[str, Any]:
+        started = time.time()
+        scanned = 0
+        suspicious = 0
+        rescape_attempted = 0
+        rescape_updated = 0
+        timed_out = False
+        samples: List[Dict[str, Any]] = []
 
-    try:
         with db._conn() as conn:
             rows = conn.execute(
                 """
@@ -2555,9 +2563,15 @@ async def consistency_check_properties(request: Request):
             ).fetchall()
         scanned = len(rows)
 
-        for row in rows:
+        for idx, row in enumerate(rows, 1):
+            if (time.time() - started) >= max_runtime_sec:
+                timed_out = True
+                break
+
             raw = dict(row)
             if _is_station_address_consistent(raw):
+                if idx % 100 == 0:
+                    _bg_task_status["step"] = f"整合チェック中... {idx}/{scanned}"
                 continue
             suspicious += 1
             if len(samples) < 20:
@@ -2569,16 +2583,19 @@ async def consistency_check_properties(request: Request):
                     "station_distance_min": raw.get("station_distance_min"),
                     "source_url": raw.get("source_url"),
                 })
-            if rescape_attempted >= max(1, max_rescrape):
-                continue
-            if not str(raw.get("source_url") or "").strip():
-                continue
-            rescape_attempted += 1
-            refreshed = _refresh_property_from_source(raw, use_browser=use_browser)
-            if refreshed.get("updated"):
-                rescape_updated += 1
+            if rescape_attempted < max(1, max_rescrape) and str(raw.get("source_url") or "").strip():
+                rescape_attempted += 1
+                _bg_task_status["step"] = (
+                    f"再スクレイプ中... {rescape_attempted}/{max_rescrape} "
+                    f"(checked {idx}/{scanned})"
+                )
+                refreshed = _refresh_property_from_source(raw, use_browser=use_browser)
+                if refreshed.get("updated"):
+                    rescape_updated += 1
+            elif idx % 100 == 0:
+                _bg_task_status["step"] = f"整合チェック中... {idx}/{scanned}"
 
-        # 再スクレイプ後に駅整合を強制再計算
+        _bg_task_status["step"] = "駅再突合中..."
         rp = db.reconcile_station_refs("properties", limit=limit, force_nearest=strict_nearest)
         rr = db.reconcile_station_refs("rental_comps", limit=limit, force_nearest=strict_nearest)
         rl = db.reconcile_land_listing_station_refs(limit=limit, force_nearest=strict_nearest)
@@ -2587,11 +2604,12 @@ async def consistency_check_properties(request: Request):
         dedupe_rentals = {}
         land_dup_marked = 0
         if with_dedupe:
+            _bg_task_status["step"] = "重複整理中..."
             dedupe_props = db.merge_duplicate_properties(dry_run=False, min_group_size=2, max_groups=5000)
             dedupe_rentals = db.merge_duplicate_rental_comps(dry_run=False, min_group_size=2, max_groups=5000)
             land_dup_marked = db.detect_duplicates()
 
-        return JSONResponse(content={
+        return {
             "status": "ok",
             "scanned": scanned,
             "suspicious": suspicious,
@@ -2605,9 +2623,64 @@ async def consistency_check_properties(request: Request):
             "dedupe_rentals": dedupe_rentals,
             "land_duplicates_marked": land_dup_marked,
             "sample_suspicious": samples,
+            "timed_out": timed_out,
+            "elapsed_sec": round(time.time() - started, 2),
+        }
+
+    if run_in_background:
+        if _bg_task_status.get("running"):
+            return JSONResponse(content={
+                "status": "running",
+                "message": f"実行中: {_bg_task_status.get('step', '')}",
+            })
+
+        def _runner():
+            global _bg_task_status
+            _bg_task_status = {
+                "running": True,
+                "step": "整合チェック開始...",
+                "result": None,
+                "error": None,
+                "task_type": "properties_consistency_check",
+            }
+            try:
+                result = _run_job()
+                _bg_task_status["result"] = result
+                _bg_task_status["step"] = "完了"
+            except Exception as e:
+                _bg_task_status["error"] = str(e)
+                _bg_task_status["step"] = f"エラー: {e}"
+            finally:
+                _bg_task_status["running"] = False
+
+        threading.Thread(target=_runner, daemon=True).start()
+        return JSONResponse(content={
+            "status": "ok",
+            "message": "整合チェックをバックグラウンド開始しました。/api/task-status で進捗確認できます。",
+            "task_type": "properties_consistency_check",
+            "limit": limit,
+            "max_rescrape": max_rescrape,
+            "max_runtime_sec": max_runtime_sec,
         })
+
+    try:
+        _bg_task_status = {
+            "running": True,
+            "step": "整合チェック実行中...",
+            "result": None,
+            "error": None,
+            "task_type": "properties_consistency_check",
+        }
+        result = _run_job()
+        _bg_task_status["result"] = result
+        _bg_task_status["step"] = "完了"
+        return JSONResponse(content=result)
     except Exception as e:
+        _bg_task_status["error"] = str(e)
+        _bg_task_status["step"] = f"エラー: {e}"
         return JSONResponse(content={"status": "error", "error": str(e)}, status_code=500)
+    finally:
+        _bg_task_status["running"] = False
 
 
 # ===== URL物件取込API =====

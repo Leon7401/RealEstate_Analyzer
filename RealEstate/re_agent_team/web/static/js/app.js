@@ -266,6 +266,8 @@ function initMap(center, zoom) {
     if (rankingToggleBtn) rankingToggleBtn.addEventListener('click', toggleRankingPanel);
     document.getElementById('btn-upload-csv').addEventListener('click', uploadCSV);
     document.getElementById('btn-scrape').addEventListener('click', scrapeProperties);
+    const consistencyBtn = document.getElementById('btn-consistency-check');
+    if (consistencyBtn) consistencyBtn.addEventListener('click', startConsistencyCheck);
     document.getElementById('btn-scrape-url').addEventListener('click', scrapeUrl);
     const reportsBtn = document.getElementById('btn-refresh-reports');
     if (reportsBtn) reportsBtn.addEventListener('click', loadReports);
@@ -401,6 +403,7 @@ function initMap(center, zoom) {
     loadScrapeConfigs();
     loadLandStats();
     loadDbLayersFromDatabase();
+    setTimeout(resumeTaskProgressUI, 500);
     setTimeout(adjustRankingPanelPosition, 200);
 }
 
@@ -1858,6 +1861,65 @@ async function scrapeProperties() {
     }
 }
 
+async function startConsistencyCheck() {
+    const btn = document.getElementById('btn-consistency-check');
+    const resultEl = document.getElementById('consistency-result');
+    if (!btn || !resultEl) return;
+
+    btn.disabled = true;
+    btn.textContent = '整合チェック開始中...';
+    resultEl.innerHTML = '<div class="loading">バックグラウンド処理を起動中...</div>';
+
+    try {
+        const resp = await fetch('/api/properties/consistency-check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                limit: 50000,
+                max_rescrape: 120,
+                run_in_background: true,
+                max_runtime_sec: 900,
+                strict_nearest: true,
+                with_dedupe: true,
+            }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+        if (data.status === 'running') {
+            resultEl.innerHTML = `<span style="color:#ffa726;">${data.message || 'すでに実行中です'}</span>
+                <div id="consistency-progress" style="color:#ffa726;font-size:0.72rem;margin-top:4px;">実行中...</div>`;
+        } else {
+            resultEl.innerHTML = `<span style="color:#66bb6a;">${data.message || '整合チェックを開始しました'}</span>
+                <div id="consistency-progress" style="color:#ffa726;font-size:0.72rem;margin-top:4px;">実行中...</div>`;
+        }
+        pollTaskStatus({
+            targetElId: 'consistency-progress',
+            taskType: 'properties_consistency_check',
+            onComplete: (taskData) => {
+                btn.disabled = false;
+                btn.textContent = '住所/駅/座標 整合チェック（自動補正）';
+                const result = (taskData && taskData.result) || {};
+                if (taskData && taskData.error) return;
+                const summary = [
+                    `checked ${result.scanned || 0}件`,
+                    `疑義 ${result.suspicious || 0}件`,
+                    `再取得更新 ${result.rescrape_updated || 0}件`,
+                    result.timed_out ? '※時間上限到達' : '',
+                ].filter(Boolean).join(' / ');
+                resultEl.innerHTML = `<span style="color:#66bb6a;">完了: ${summary}</span>
+                    <div id="consistency-progress" style="color:#90a4ae;font-size:0.72rem;margin-top:4px;">完了</div>`;
+                loadSampleProperties();
+                loadLandListings();
+            },
+        });
+    } catch (e) {
+        resultEl.innerHTML = `<span style="color:#ef5350;">エラー: ${e.message}</span>`;
+        btn.disabled = false;
+        btn.textContent = '住所/駅/座標 整合チェック（自動補正）';
+    }
+}
+
 async function quickEvaluateLand() {
     const btn = document.getElementById('btn-quick-land-eval');
     const resultEl = document.getElementById('quick-land-result');
@@ -2934,13 +2996,45 @@ async function batchGeocode() {
 // ===== バックグラウンドタスク進捗ポーリング =====
 
 let _pollTimer = null;
-function pollTaskStatus() {
+let _pollContext = {
+    targetElId: 'scrape-progress',
+    taskType: null,
+    onComplete: null,
+};
+
+function _renderTaskDoneMessage(data) {
+    if (data.task_type === 'properties_consistency_check') {
+        const r = data.result || {};
+        const timed = r.timed_out ? ' / 時間上限到達' : '';
+        return `完了: checked ${r.scanned || 0}件 / 疑義 ${r.suspicious || 0}件 / 再取得更新 ${r.rescrape_updated || 0}件${timed}`;
+    }
+    const r = data.result || {};
+    return `完了: ${r.listings_saved || 0}物件, ${r.plans_generated || 0}プラン, ${r.asset_scores_generated || 0}スコア`;
+}
+
+function pollTaskStatus(options = {}) {
+    _pollContext = {
+        targetElId: options.targetElId || _pollContext.targetElId || 'scrape-progress',
+        taskType: options.taskType || null,
+        onComplete: typeof options.onComplete === 'function' ? options.onComplete : null,
+    };
     if (_pollTimer) clearInterval(_pollTimer);
     _pollTimer = setInterval(async () => {
         try {
             const resp = await fetch('/api/task-status');
             const data = await resp.json();
-            const el = document.getElementById('scrape-progress');
+            const el = document.getElementById(_pollContext.targetElId);
+            if (
+                _pollContext.taskType &&
+                data.running &&
+                data.task_type &&
+                data.task_type !== _pollContext.taskType
+            ) {
+                if (el) {
+                    el.textContent = `他タスク実行中: ${data.step || ''}`;
+                }
+                return;
+            }
             if (el) {
                 el.textContent = data.step || '実行中...';
             }
@@ -2951,16 +3045,53 @@ function pollTaskStatus() {
                     if (data.error) {
                         el.innerHTML = `<span style="color:#ef5350;">エラー: ${data.error}</span>`;
                     } else {
-                        const r = data.result || {};
-                        el.innerHTML = `<span style="color:#66bb6a;">完了: ${r.listings_saved || 0}物件, ${r.plans_generated || 0}プラン, ${r.asset_scores_generated || 0}スコア</span>`;
+                        el.innerHTML = `<span style="color:#66bb6a;">${_renderTaskDoneMessage(data)}</span>`;
                     }
                 }
-                loadLandListings();
+                if (typeof _pollContext.onComplete === 'function') {
+                    _pollContext.onComplete(data);
+                } else {
+                    loadLandListings();
+                }
             }
         } catch (e) {
             console.debug('poll error:', e);
         }
     }, 5000);
+}
+
+async function resumeTaskProgressUI() {
+    try {
+        const resp = await fetch('/api/task-status');
+        const data = await resp.json();
+        if (!data || !data.running) return;
+        if (data.task_type === 'properties_consistency_check') {
+            const btn = document.getElementById('btn-consistency-check');
+            const resultEl = document.getElementById('consistency-result');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '整合チェック実行中...';
+            }
+            if (resultEl) {
+                resultEl.innerHTML = `<span style="color:#ffa726;">整合チェックが進行中です</span>
+                    <div id="consistency-progress" style="color:#ffa726;font-size:0.72rem;margin-top:4px;">${data.step || '実行中...'}</div>`;
+            }
+            pollTaskStatus({
+                targetElId: 'consistency-progress',
+                taskType: 'properties_consistency_check',
+                onComplete: () => {
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = '住所/駅/座標 整合チェック（自動補正）';
+                    }
+                    loadSampleProperties();
+                    loadLandListings();
+                },
+            });
+        }
+    } catch (e) {
+        console.debug('resumeTaskProgressUI error:', e);
+    }
 }
 
 // ===== 一括資産性スコアリング =====
