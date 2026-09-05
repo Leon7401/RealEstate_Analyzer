@@ -2022,12 +2022,17 @@ async function scrapeUrl() {
 
 async function scrapeProperties() {
     const btn = document.getElementById('btn-scrape');
+    const resultEl = document.getElementById('scrape-result');
     btn.disabled = true;
     btn.textContent = 'スクレイピング中...';
-    document.getElementById('scrape-result').innerHTML = '<div class="loading">複数ソースから取得中...</div>';
+    resultEl.innerHTML =
+        '<div class="loading">バックグラウンドで取得開始...</div>' +
+        '<div id="scrape-progress" style="color:#ffa726;font-size:0.72rem;margin-top:4px;">準備中...</div>';
 
     const pref = getPrefectureParam('scrape-property', ['13', '14', '11', '12']);
-    const pages = document.getElementById('scrape-pages').value;
+    // ブラウザタイムアウト回避のため既定ページ数を抑える
+    const pagesRaw = Number(document.getElementById('scrape-pages').value || 3);
+    const pages = Math.max(1, Math.min(pagesRaw || 3, 10));
 
     // マルチソース選択
     const sources = [];
@@ -2040,30 +2045,63 @@ async function scrapeProperties() {
     try {
         const resp = await fetch(
             `/api/scrape?prefecture_code=${pref}&max_pages=${pages}` +
-            `&sources=${sources.join(',')}${splitPrice}`
+            `&sources=${sources.join(',')}${splitPrice}&run_in_background=true`
         );
         const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
-        if (data.count > 0) {
-            const dedupe = data.dedupe || {};
-            const judged = Number(data.auto_judged || 0);
-            document.getElementById('scrape-result').innerHTML =
-                `<span style="color:#66bb6a">${data.count}件取得 (${(data.sources||[]).join(', ')})</span>` +
-                `<br><span style="color:#90caf9;font-size:0.72rem;">重複統合: ${dedupe.merged_records || 0}件 / 自動判定: ${judged}件</span>`;
-            sampleProperties = sampleProperties.concat(data.properties);
-            loadSampleProperties();
-            plotSampleProperties();
-            if (Array.isArray(data.ranking) && data.ranking.length) {
-                showRanking(data.ranking);
-            }
-        } else {
-            document.getElementById('scrape-result').innerHTML =
-                '<span style="color:#ffa726">物件が見つかりませんでした</span>';
-        }
+        resultEl.innerHTML =
+            `<span style="color:#ffa726">${data.message || 'スクレイピングを開始しました'}</span>` +
+            `<div id="scrape-progress" style="color:#ffa726;font-size:0.72rem;margin-top:4px;">実行中...</div>`;
+
+        pollTaskStatus({
+            targetElId: 'scrape-progress',
+            taskType: 'property_scrape',
+            onComplete: (taskData) => {
+                btn.disabled = false;
+                btn.textContent = '収益物件スクレイピング';
+                if (taskData && taskData.error) {
+                    resultEl.innerHTML =
+                        `<span style="color:#ef5350">エラー: ${taskData.error}</span>` +
+                        `<div id="scrape-progress" style="color:#ef5350;font-size:0.72rem;margin-top:4px;">失敗</div>`;
+                    return;
+                }
+                const result = (taskData && taskData.result) || {};
+                const count = Number(result.count || 0);
+                const dedupe = result.dedupe || {};
+                const judged = Number(result.auto_judged || 0);
+                const sourceErrors = result.source_errors || {};
+                const sourceErrText = Object.keys(sourceErrors).length
+                    ? `<br><span style="color:#ef9a9a;font-size:0.72rem;">取得詳細: ${
+                        Object.entries(sourceErrors).map(([k,v]) => `${k}=${v}`).join(' / ')
+                      }</span>`
+                    : '';
+                if (count > 0) {
+                    resultEl.innerHTML =
+                        `<span style="color:#66bb6a">${count}件取得 (${(result.sources || sources).join(', ')})</span>` +
+                        `<br><span style="color:#90caf9;font-size:0.72rem;">重複統合: ${dedupe.merged_records || 0}件 / 自動判定: ${judged}件</span>` +
+                        sourceErrText +
+                        `<div id="scrape-progress" style="color:#66bb6a;font-size:0.72rem;margin-top:4px;">完了</div>`;
+                    if (Array.isArray(result.properties) && result.properties.length) {
+                        sampleProperties = sampleProperties.concat(result.properties);
+                    }
+                    loadSampleProperties();
+                    plotSampleProperties();
+                    if (Array.isArray(result.ranking) && result.ranking.length) {
+                        showRanking(result.ranking);
+                    }
+                } else {
+                    resultEl.innerHTML =
+                        `<span style="color:#ffa726">${result.message || '物件が見つかりませんでした'}</span>` +
+                        sourceErrText +
+                        '<div id="scrape-progress" style="color:#90a4ae;font-size:0.72rem;margin-top:4px;">完了</div>';
+                }
+            },
+        });
     } catch (e) {
-        document.getElementById('scrape-result').innerHTML =
-            `<span style="color:#ef5350">エラー: ${e.message}</span>`;
-    } finally {
+        resultEl.innerHTML =
+            `<span style="color:#ef5350">エラー: ${e.message}</span>` +
+            `<div style="color:#90a4ae;font-size:0.72rem;margin-top:4px;">※長時間処理はバックグラウンド化済みです。再試行してください</div>`;
         btn.disabled = false;
         btn.textContent = '収益物件スクレイピング';
     }
@@ -3215,6 +3253,10 @@ function _renderTaskDoneMessage(data) {
         const r = data.result || {};
         const timed = r.timed_out ? ' / 時間上限到達' : '';
         return `完了: checked ${r.scanned || 0}件 / 疑義 ${r.suspicious || 0}件 / 再取得更新 ${r.rescrape_updated || 0}件${timed}`;
+    }
+    if (data.task_type === 'property_scrape') {
+        const r = data.result || {};
+        return `完了: ${r.count || 0}件取得 / 自動判定 ${r.auto_judged || 0}件`;
     }
     const r = data.result || {};
     return `完了: ${r.listings_saved || 0}物件, ${r.plans_generated || 0}プラン, ${r.asset_scores_generated || 0}スコア`;

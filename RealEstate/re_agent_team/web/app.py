@@ -2002,11 +2002,74 @@ async def scrape_properties(
     split_by_price: bool = False,
     auto_judge: bool = True,
     analyze_limit: int = 80,
+    run_in_background: bool = True,
 ):
-    """複数ソースから収益物件をスクレイピング → 重複統合 → 座標検証 → 自動判定"""
+    """複数ソースから収益物件をスクレイピング → 重複統合 → 座標検証 → 自動判定
+
+    既定ではバックグラウンド実行し、進捗は /api/task-status で確認する。
+    （同期実行はブラウザの Failed to fetch タイムアウトを起こしやすい）
+    """
+    import threading
+
+    global _bg_task_status
+    pref_codes = _expand_prefecture_codes(prefecture_code) or ["13"]
+    source_list = [s.strip() for s in sources.split(",") if s.strip()] or ["rakumachi"]
+    max_pages = max(1, min(int(max_pages or 1), 20))
+    analyze_limit = max(1, min(int(analyze_limit or 1), 200))
+
+    def _run_scrape():
+        global _bg_task_status
+        try:
+            _bg_task_status["step"] = (
+                f"スクレイピング中... pref={','.join(pref_codes)} sources={','.join(source_list)}"
+            )
+            result = ingest_pipeline.scrape_and_process(
+                prefecture_codes=pref_codes,
+                sources=source_list,
+                max_pages=max_pages,
+                split_by_price=split_by_price,
+                auto_judge=auto_judge,
+                analyze_limit=analyze_limit,
+            )
+            _bg_task_status["result"] = result
+            _bg_task_status["step"] = (
+                f"完了: {result.get('count', 0)}件取得 / "
+                f"自動判定 {result.get('auto_judged', 0)}件"
+            )
+        except Exception as e:
+            logging.exception("property scrape failed")
+            _bg_task_status["error"] = str(e)
+            _bg_task_status["step"] = f"エラー: {e}"
+        finally:
+            _bg_task_status["running"] = False
+
+    if run_in_background:
+        if _bg_task_status.get("running"):
+            return JSONResponse(content={
+                "status": "running",
+                "message": f"実行中: {_bg_task_status.get('step', '')}",
+                "count": 0,
+                "properties": [],
+            })
+        _bg_task_status = {
+            "running": True,
+            "step": "スクレイピング開始...",
+            "result": None,
+            "error": None,
+            "task_type": "property_scrape",
+        }
+        threading.Thread(target=_run_scrape, daemon=True).start()
+        return JSONResponse(content={
+            "status": "started",
+            "message": "スクレイピングをバックグラウンドで開始しました",
+            "prefecture_codes": pref_codes,
+            "sources": source_list,
+            "max_pages": max_pages,
+            "count": 0,
+            "properties": [],
+        })
+
     try:
-        pref_codes = _expand_prefecture_codes(prefecture_code) or ["13"]
-        source_list = [s.strip() for s in sources.split(",") if s.strip()]
         result = ingest_pipeline.scrape_and_process(
             prefecture_codes=pref_codes,
             sources=source_list,

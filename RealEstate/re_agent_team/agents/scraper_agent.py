@@ -108,9 +108,21 @@ class ScraperAgent(BaseAgent):
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
+            "Chrome/126.0.0.0 Safari/537.36"
         ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "sec-ch-ua": '"Chromium";v="126", "Not.A/Brand";v="24", "Google Chrome";v="126"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
     }
 
     def __init__(self):
@@ -120,6 +132,14 @@ class ScraperAgent(BaseAgent):
         self._rate_limit = 3.0
         self._last_request = 0.0
         self.url_scraper = UrlScraperAgent()
+        self.last_source_errors: Dict[str, str] = {}
+
+    def _warm_session(self, url: str):
+        """一覧取得前にトップへアクセスして Cookie を温める（403対策）"""
+        try:
+            self.session.get(url, timeout=12)
+        except requests.RequestException:
+            pass
 
     # ================================================================
     # 収益物件スクレイピング (楽待)
@@ -151,10 +171,16 @@ class ScraperAgent(BaseAgent):
 
         all_properties = []
         seen_urls = set()
+        self.last_source_errors = {}
         source_handlers = {
             "rakumachi": self._scrape_rakumachi_page,
             "kenbiya": self._scrape_kenbiya_page,
             "rals": self._scrape_rals_page,
+        }
+        warm_urls = {
+            "rakumachi": self.RAKUMACHI_BASE + "/",
+            "kenbiya": "https://www.kenbiya.com/",
+            "rals": "https://www.rals.co.jp/",
         }
 
         for src in srcs:
@@ -162,23 +188,33 @@ class ScraperAgent(BaseAgent):
             if not handler:
                 self.logger.info(f"  [{src}] 未対応ソースのためスキップ")
                 continue
+            if warm_urls.get(src):
+                self._warm_session(warm_urls[src])
+            got_any = False
             for page in range(1, max_pages + 1):
                 self.logger.info(f"  [{src}] ページ {page}/{max_pages}...")
                 try:
                     props = handler(prefecture_code, page)
                     if not props:
-                        if page == 1:
+                        if page == 1 and src not in self.last_source_errors:
+                            self.last_source_errors[src] = "取得0件（ブロックまたはHTML構造変更の可能性）"
                             self.logger.info(f"  [{src}] 取得0件")
                         break
+                    got_any = True
                     for p in props:
-                        url = p.source_url or ""
+                        url = getattr(p, "source_url", None) or ""
                         if url and url not in seen_urls:
                             seen_urls.add(url)
                             all_properties.append(p)
+                        elif not url:
+                            all_properties.append(p)
                     self.logger.info(f"  [{src}] ページ {page}: {len(props)}件")
                 except Exception as e:
+                    self.last_source_errors[src] = str(e)
                     self.logger.warning(f"  [{src}] ページ {page} エラー: {e}")
                     break
+            if got_any and src in self.last_source_errors:
+                self.last_source_errors.pop(src, None)
 
         self.logger.info(f"収益物件スクレイピング完了: {len(all_properties)}件")
         return all_properties
@@ -204,10 +240,19 @@ class ScraperAgent(BaseAgent):
         }
 
         try:
-            resp = self.session.get(url, params=params, timeout=15)
+            headers = {
+                "Referer": f"{self.RAKUMACHI_BASE}/",
+                "Sec-Fetch-Site": "same-origin",
+            }
+            resp = self.session.get(url, params=params, timeout=20, headers=headers)
+            if resp.status_code == 403:
+                self.last_source_errors["rakumachi"] = "HTTP 403 (サイト側ブロック)"
+                self.logger.error("楽待 HTTP 403 Forbidden")
+                return []
             resp.raise_for_status()
             resp.encoding = "utf-8"
         except requests.RequestException as e:
+            self.last_source_errors["rakumachi"] = f"HTTP error: {e}"
             self.logger.error(f"楽待 HTTP error: {e}")
             return []
 

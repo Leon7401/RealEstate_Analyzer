@@ -45,11 +45,13 @@ class IngestPipeline:
     ) -> Dict[str, Any]:
         props: List[Property] = []
         source_list = [s.strip().lower() for s in sources if s and s.strip()]
+        source_errors: Dict[str, str] = {}
         for pref in prefecture_codes:
             for src in source_list:
                 adapter = self.adapters.get(src)
                 if adapter is None:
                     logger.warning("unknown source adapter: %s", src)
+                    source_errors[src] = "未登録アダプタ"
                     continue
                 try:
                     fetched = adapter.fetch_list(
@@ -58,8 +60,18 @@ class IngestPipeline:
                         split_by_price=split_by_price,
                     )
                     props.extend(fetched or [])
+                    # adapter / scraper 側のエラーを集約
+                    for k, v in (getattr(adapter, "last_errors", {}) or {}).items():
+                        source_errors[k] = v
+                    scraper = getattr(adapter, "_scraper", None)
+                    if scraper is not None:
+                        for k, v in (getattr(scraper, "last_source_errors", {}) or {}).items():
+                            source_errors[k] = v
+                    if not fetched and src not in source_errors:
+                        source_errors[src] = "取得0件"
                 except Exception as e:
                     logger.exception("fetch_list failed source=%s pref=%s: %s", src, pref, e)
+                    source_errors[src] = str(e)
 
         saved = 0
         for p in props:
@@ -180,6 +192,13 @@ class IngestPipeline:
             "auto_judged": analyzed,
             "ranking": ranking_rows,
             "errors": errors[:10],
+            "source_errors": source_errors,
+            "message": (
+                None if props else (
+                    "物件を取得できませんでした。"
+                    + (" 詳細: " + "; ".join(f"{k}={v}" for k, v in source_errors.items()) if source_errors else "")
+                )
+            ),
         }
 
     def ingest_url(

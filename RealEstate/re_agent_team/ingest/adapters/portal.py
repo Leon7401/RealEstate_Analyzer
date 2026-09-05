@@ -23,12 +23,15 @@ class PortalListAdapter(SourceAdapter):
         split_by_price: bool = False,
         **kwargs,
     ) -> List[Property]:
-        return self._scraper.run(
+        props = self._scraper.run(
             prefecture_code=prefecture_code,
             sources=[self.name],
             max_pages=max_pages,
             split_by_price=split_by_price,
         ) or []
+        # 呼び出し側が参照できるよう直近エラーを保持
+        self.last_errors = dict(getattr(self._scraper, "last_source_errors", {}) or {})
+        return props
 
     def parse_detail(
         self,
