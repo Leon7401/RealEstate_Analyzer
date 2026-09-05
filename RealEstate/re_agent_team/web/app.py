@@ -3808,8 +3808,9 @@ async def dedup_land_listings():
 async def start_scheduler():
     """定期スクレイピング開始"""
     from engine.scheduler import scheduler
+    scheduler.set_pipeline(ingest_pipeline)
     scheduler.start()
-    return JSONResponse(content={"status": "ok", "running": scheduler.is_running})
+    return JSONResponse(content={"status": "ok", **scheduler.get_status()})
 
 
 @app.post("/api/scheduler/stop")
@@ -3817,14 +3818,51 @@ async def stop_scheduler():
     """定期スクレイピング停止"""
     from engine.scheduler import scheduler
     scheduler.stop()
-    return JSONResponse(content={"status": "ok", "running": scheduler.is_running})
+    return JSONResponse(content={"status": "ok", **scheduler.get_status()})
+
+
+@app.post("/api/scheduler/run-now")
+async def run_scheduler_now():
+    """自動取得を即時1回実行（バックグラウンド）"""
+    import threading
+    from engine.scheduler import scheduler
+
+    scheduler.set_pipeline(ingest_pipeline)
+
+    def _run():
+        try:
+            scheduler._run_property_ingest()
+        except Exception as e:
+            logging.exception("manual scheduler run failed: %s", e)
+            scheduler.status["property"]["last_error"] = str(e)
+
+    if not scheduler.is_running:
+        scheduler.start()
+    threading.Thread(target=_run, daemon=True, name="scheduler-run-now").start()
+    return JSONResponse(content={
+        "status": "started",
+        "message": "自動取得を即時開始しました",
+        **scheduler.get_status(),
+    })
 
 
 @app.get("/api/scheduler/status")
 async def scheduler_status():
-    """スケジューラ状態"""
+    """スケジューラ状態（自動スクレイプの進捗含む）"""
     from engine.scheduler import scheduler
-    return JSONResponse(content={"running": scheduler.is_running})
+    from storage.database import Database
+
+    payload = scheduler.get_status()
+    try:
+        stats = Database().get_db_stats()
+        payload["db"] = {
+            "properties": stats.get("properties", 0),
+            "land_listings": stats.get("land_listings", 0),
+            "judgments": stats.get("judgments", 0),
+        }
+    except Exception:
+        payload["db"] = {}
+    return JSONResponse(content=payload)
 
 
 # ===== データ大量収集API =====
@@ -7741,10 +7779,12 @@ async def pipeline_grow(
     })
 
 
-# スケジューラ自動起動（重いバッチがAPI応答を阻害しやすいため既定OFF）
+# スケジューラ自動起動（既定ON: ボタンなしで収益物件を定期取得してDB保存）
 from engine.scheduler import scheduler as _scheduler
-if os.getenv("RE_SCHEDULER_AUTOSTART", "0").strip().lower() in {"1", "true", "yes", "on"}:
+_scheduler.set_pipeline(ingest_pipeline)
+if os.getenv("RE_SCHEDULER_AUTOSTART", "1").strip().lower() in {"1", "true", "yes", "on"}:
     _scheduler.start()
+    logging.info("Scheduler autostart enabled (set RE_SCHEDULER_AUTOSTART=0 to disable)")
 else:
     logging.info("Scheduler autostart disabled (set RE_SCHEDULER_AUTOSTART=1 to enable)")
 

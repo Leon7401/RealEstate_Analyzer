@@ -205,7 +205,13 @@
 
                     <!-- 収益物件 -->
                     <div id="scraper-property" class="scraper-sub-panel active">
-                        <p class="hint">楽待 / 健美家 / 不動産投資連合隊 から収益物件を一括取得。拒否時はブラウザ取得に自動切替。楽待はCloudflareでクラウドIPが弾かれることがあるため、まずは連合隊を推奨。</p>
+                        <div id="auto-scrape-status" style="margin-bottom:8px;padding:8px 10px;border:1px solid #1e3a5f;border-radius:6px;background:#0b1220;font-size:0.72rem;line-height:1.5;color:#90caf9;">
+                            自動取得: 状態確認中...
+                        </div>
+                        <div style="display:flex;gap:8px;margin-bottom:8px;">
+                            <button id="btn-auto-scrape-now" class="btn-secondary" type="button" style="font-size:0.72rem;">今すぐ自動取得</button>
+                        </div>
+                        <p class="hint">起動後はボタンなしで自動取得→DB保存します（既定: 連合隊 / 6時間ごと）。手動実行も可能。楽待はCloudflareでクラウドIPが弾かれることがあるため、自動取得は連合隊を推奨。</p>
                         <div class="form-row">
                             <div class="form-group" style="flex:1">
                                 <label>都道府県（複数選択）</label>

@@ -448,9 +448,68 @@ function initMap(center, zoom) {
     loadScrapeConfigs();
     loadLandStats();
     loadDbLayersFromDatabase();
+    refreshAutoScrapeStatus();
+    setInterval(refreshAutoScrapeStatus, 10000);
     setTimeout(resumeTaskProgressUI, 500);
     setTimeout(adjustRankingPanelPosition, 200);
 }
+
+async function refreshAutoScrapeStatus() {
+    const el = document.getElementById('auto-scrape-status');
+    if (!el) return;
+    try {
+        const resp = await fetch('/api/scheduler/status');
+        const s = await resp.json();
+        const prop = s.property || {};
+        const db = s.db || {};
+        const running = s.running ? '稼働中' : '停止中';
+        const last = prop.last_run_at || '未実行';
+        const next = prop.next_run_at || '-';
+        const result = prop.last_result || {};
+        const err = prop.last_error;
+        const count = result.count != null ? result.count : '-';
+        const saved = result.saved != null ? result.saved : count;
+        const sources = (result.sources || ['rals']).join(',');
+        let line = `自動取得: ${running} / 最終: ${last} / 次回: ${next} / 直近 ${saved}件保存 (${sources})`;
+        if (db.properties != null) line += ` / DB物件 ${db.properties}件`;
+        if (err) line += ` / エラー: ${err}`;
+        el.textContent = line;
+        el.style.color = err ? '#ef9a9a' : (s.running ? '#90caf9' : '#ffcc80');
+    } catch (e) {
+        el.textContent = '自動取得: 状態取得失敗';
+        el.style.color = '#ef9a9a';
+    }
+}
+
+async function runAutoScrapeNow() {
+    const btn = document.getElementById('btn-auto-scrape-now');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '自動取得中...';
+    }
+    try {
+        const resp = await fetch('/api/scheduler/run-now', { method: 'POST' });
+        const data = await resp.json();
+        await refreshAutoScrapeStatus();
+        if (data.status !== 'started' && data.status !== 'ok') {
+            alert(data.message || data.error || '自動取得の開始に失敗しました');
+        }
+    } catch (e) {
+        alert('通信エラー: ' + e.message);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '今すぐ自動取得';
+        }
+        setTimeout(refreshAutoScrapeStatus, 3000);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const btn = document.getElementById('btn-auto-scrape-now');
+    if (btn) btn.addEventListener('click', runAutoScrapeNow);
+});
+
 
 function switchTab(tabId) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));

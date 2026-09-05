@@ -25,3 +25,15 @@ services:
         value: 3.11.9
       - key: SCRAPE_USE_BROWSER
         value: "1"
+      - key: RE_SCHEDULER_AUTOSTART
+        value: "1"
+      - key: RE_AUTO_PROPERTY_SCRAPE
+        value: "1"
+      - key: RE_AUTO_PROPERTY_SOURCES
+        value: "rals"
+      - key: RE_AUTO_PROPERTY_PREFS
+        value: "13,14,11,12"
+      - key: RE_AUTO_PROPERTY_MAX_PAGES
+        value: "3"
+      - key: RE_AUTO_PROPERTY_INTERVAL_HOURS
+        value: "6"
