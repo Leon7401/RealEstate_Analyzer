@@ -3,152 +3,81 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>不動産投資判定マップ</title>
+    <title>不動産投資判定</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <link rel="stylesheet" href="/static/css/style.css?v={{ cache_bust }}" />
 </head>
 <body>
-    <!-- サイドバー -->
     <div id="sidebar">
         <div class="sidebar-header">
-            <h1>不動産投資判定システム</h1>
+            <div>
+                <h1>不動産投資判定</h1>
+                <p class="product-tagline">収益物件を自動取得し、地図で投資判断する</p>
+            </div>
             <div id="api-status" class="status-badge {{ 'status-ok' if api_configured else 'status-warn' }}">
-                {{ 'API接続済' if api_configured else 'オフラインモード' }}
+                {{ 'API接続済' if api_configured else 'オフライン' }}
             </div>
         </div>
 
-        <!-- タブ切替: 3タブに統合 -->
         <div class="tabs">
-            <button class="tab active" data-tab="tab-map">地図・分析</button>
-            <button class="tab" data-tab="tab-property">物件・土地</button>
-            <button class="tab" data-tab="tab-data">全物件比較</button>
+            <button class="tab active" data-tab="tab-map">地図</button>
+            <button class="tab" data-tab="tab-property">物件</button>
         </div>
 
-        <!-- ===== 地図・分析タブ（エリア歪み分析を統合） ===== -->
+        <!-- ===== 地図 ===== -->
         <div id="tab-map" class="tab-content active">
-            <div class="panel">
-                <h3>エリア選択</h3>
-                <div class="form-row">
-                    <div class="form-group" style="flex:1">
-                        <label>都道府県（複数選択）</label>
-                        <div style="display:flex;gap:10px;flex-wrap:wrap;padding:6px 8px;border:1px solid #1e3a5f;border-radius:6px;background:#0f172a;">
-                            <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="map" value="13" checked> 東京都</label>
-                            <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="map" value="14" checked> 神奈川県</label>
-                            <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="map" value="11" checked> 埼玉県</label>
-                            <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="map" value="12" checked> 千葉県</label>
-                        </div>
-                    </div>
-                    <div class="form-group" style="flex:1">
-                        <select id="city-select">
-                            <option value="">全域</option>
-                        </select>
-                    </div>
+            <div class="panel focus-panel">
+                <h3>表示エリア</h3>
+                <div class="pref-chips">
+                    <label><input type="checkbox" data-pref-group="map" value="13" checked> 東京</label>
+                    <label><input type="checkbox" data-pref-group="map" value="14" checked> 神奈川</label>
+                    <label><input type="checkbox" data-pref-group="map" value="11" checked> 埼玉</label>
+                    <label><input type="checkbox" data-pref-group="map" value="12" checked> 千葉</label>
                 </div>
-                <div class="form-row" style="gap:4px;">
-                    <button id="btn-load-data" class="btn-primary" style="flex:1;">地価データ読込</button>
-                    <button id="btn-run-distortion" class="btn-secondary" style="flex:1;">歪み分析</button>
-                </div>
-                <div class="form-row" style="gap:4px;margin-top:4px;">
-                    <button id="btn-fill-rental" class="btn-secondary" style="flex:1;font-size:0.72rem;" onclick="fillGaps('rental')">賃料補完</button>
-                    <button id="btn-fill-lp" class="btn-secondary" style="flex:1;font-size:0.72rem;" onclick="fillGaps('land_price')">地価補完</button>
-                    <button id="btn-fill-tx" class="btn-secondary" style="flex:1;font-size:0.72rem;" onclick="fillGaps('transactions')">取引補完</button>
-                </div>
-                <div id="fill-gaps-result" style="font-size:0.72rem;margin-top:4px;"></div>
-            </div>
-
-            <div class="panel">
-                <h3>土地クイック診断</h3>
-                <p class="hint">住所と面積を入力すると、収益性と価格妥当ラインを即時算出します</p>
-                <div class="form-group">
-                    <label>住所</label>
-                    <input type="text" id="quick-land-address" placeholder="例: 東京都杉並区高円寺南4-1-1">
-                </div>
-                <div class="form-row">
-                    <div class="form-group" style="flex:1">
-                        <label>土地面積(㎡)</label>
-                        <input type="number" id="quick-land-area" min="1" step="0.1" placeholder="120">
-                    </div>
-                    <div class="form-group" style="flex:1">
-                        <label>土地価格(円,任意)</label>
-                        <input type="number" id="quick-land-price" min="0" step="10000" placeholder="50000000">
-                    </div>
-                </div>
-                <div class="form-row">
-                    <div class="form-group" style="flex:1">
-                        <label>建蔽率(%,任意)</label>
-                        <input type="number" id="quick-land-bcr" min="20" max="100" step="1" placeholder="60">
-                    </div>
-                    <div class="form-group" style="flex:1">
-                        <label>容積率(%,任意)</label>
-                        <input type="number" id="quick-land-far" min="50" max="800" step="10" placeholder="200">
-                    </div>
-                </div>
-                <button id="btn-quick-land-eval" class="btn-primary">収益性・価格ライン算出</button>
-                <div id="quick-land-result" style="margin-top:6px;font-size:0.75rem;"></div>
-            </div>
-
-            <div class="panel">
-                <h3>投資分析レイヤー <span style="font-size:0.65rem;color:#546e7a;">250mメッシュ</span></h3>
-                <div style="font-size:0.72rem;color:#78909c;margin-bottom:4px;">市場ヒートマップ</div>
-                <label><input type="checkbox" id="layer-mesh-landprice"> 地価</label>
-                <label><input type="checkbox" id="layer-mesh-rent"> 賃料</label>
-                <select id="mesh-rent-layout" style="font-size:0.68rem;margin-left:18px;width:calc(100% - 18px);margin-top:-2px;margin-bottom:2px;" onchange="if(document.getElementById('layer-mesh-rent').checked) loadMeshLayer('rent', true)">
-                    <option value="">全間取り</option>
-                    <option value="1K">1K（投資用）</option>
-                    <option value="1DK">1DK</option>
-                    <option value="1LDK">1LDK</option>
-                    <option value="2K,2DK">2K/2DK</option>
-                    <option value="2LDK,3LDK">2LDK+</option>
+                <select id="city-select">
+                    <option value="">全域</option>
                 </select>
-                <label><input type="checkbox" id="layer-mesh-yield"> 利回り</label>
-                <label><input type="checkbox" id="layer-mesh-pop"> 人口</label>
-                <select id="pop-metric-select" style="font-size:0.68rem;margin-left:18px;width:calc(100% - 18px);margin-top:-2px;margin-bottom:2px;" onchange="if(document.getElementById('layer-mesh-pop').checked){meshLayers['population']&&map.removeLayer(meshLayers['population']);delete meshLayers['population'];meshLayers['pop_density']&&map.removeLayer(meshLayers['pop_density']);delete meshLayers['pop_density'];delete meshCache['population'];delete meshRectCache['population'];delete meshCache['pop_density'];delete meshRectCache['pop_density'];loadMeshLayer(this.value,true)}">
-                    <option value="pop_density">人口密度 (人/km²)</option>
-                    <option value="population">増減率 (%)</option>
-                </select>
-                <label><input type="checkbox" id="layer-mesh-facility"> 施設密度</label>
-                <div style="margin-top:6px;padding-top:6px;border-top:1px solid #1e3a5f;">
-                    <div style="font-size:0.72rem;color:#78909c;margin-bottom:4px;">事実ベースレイヤー</div>
-                    <label><input type="checkbox" id="layer-zoning-points"> 用途地域（領域）</label>
-                    <label><input type="checkbox" id="layer-railway-lines"> 路線別駅表示</label>
-                    <label><input type="checkbox" id="layer-road-type"> 道路種別</label>
-                </div>
-                <div style="margin-top:6px;padding-top:6px;border-top:1px solid #1e3a5f;">
-                    <div style="font-size:0.72rem;color:#78909c;margin-bottom:4px;">駅・圏域分析</div>
-                    <label><input type="checkbox" id="layer-iv-stationpower"> 駅力ヒートマップ</label>
-                    <label><input type="checkbox" id="layer-iv-yield"> 駅別利回り・歪み</label>
-                </div>
-                <div style="margin-top:6px;padding-top:6px;border-top:1px solid #1e3a5f;">
-                    <div style="font-size:0.72rem;color:#78909c;margin-bottom:4px;">物件</div>
-                    <label><input type="checkbox" id="layer-properties" checked> 分析物件</label>
-                    <label><input type="checkbox" id="layer-land-listings" checked> 土地物件</label>
-                    <label><input type="checkbox" id="layer-stations"> 駅マーカー</label>
-                </div>
-                <div style="margin-top:6px;padding-top:6px;border-top:1px solid #1e3a5f;">
-                    <div style="font-size:0.72rem;color:#78909c;margin-bottom:4px;">ハザード</div>
-                    <label><input type="checkbox" id="layer-hazard-flood"> 洪水浸水想定</label>
-                    <label><input type="checkbox" id="layer-hazard-landslide"> 土砂災害</label>
-                    <label><input type="checkbox" id="layer-hazard-tsunami"> 津波浸水想定</label>
-                    <label><input type="checkbox" id="layer-hazard-storm"> 高潮浸水想定</label>
-                    <label><input type="checkbox" id="layer-hazard-terrain"> 地形分類</label>
+                <div class="form-row" style="gap:6px;margin-top:8px;">
+                    <button id="btn-load-data" class="btn-primary" style="flex:1;">地図を更新</button>
                 </div>
             </div>
 
-            <!-- エリア統計 -->
+            <div class="panel focus-panel">
+                <h3>地図表示</h3>
+                <p class="hint">まずは判定済みの収益物件だけを見る</p>
+                <label class="layer-main"><input type="checkbox" id="layer-properties" checked> 収益物件</label>
+                <label class="layer-main"><input type="checkbox" id="layer-land-listings"> 土地物件</label>
+                <label class="layer-main"><input type="checkbox" id="layer-stations"> 駅</label>
+            </div>
+
+            <div class="panel" id="result-panel" style="display:none;">
+                <h3>判定結果</h3>
+                <div id="result-header">
+                    <div id="result-grade" class="grade-badge"></div>
+                    <div id="result-meta">
+                        <div id="result-recommendation"></div>
+                        <div id="result-score"></div>
+                    </div>
+                </div>
+                <div id="result-scores"></div>
+                <div id="result-metrics"></div>
+                <div id="result-swot"></div>
+            </div>
+            <div class="panel" id="saved-analysis-panel" style="display:none;">
+                <h3>保存済み分析</h3>
+                <div id="saved-analysis-content" style="font-size:0.75rem;"></div>
+            </div>
+
+            <div class="panel" id="station-detail-panel" style="display:none;">
+                <h3 id="station-detail-title">駅データ</h3>
+                <div id="station-detail-content"></div>
+            </div>
+
             <div class="panel" id="stats-panel" style="display:none;">
                 <h3>エリア統計</h3>
                 <div id="area-stats"></div>
             </div>
 
-            <!-- 賃料統計（折りたたみ: 詳細はデータ収集タブで管理） -->
-            <details class="panel-details">
-                <summary class="panel-summary">賃料データ</summary>
-                <div class="panel">
-                    <div id="rental-stats">読込中...</div>
-                </div>
-            </details>
-
-            <!-- 歪み分析ランキング（旧/analysis画面の機能を統合） -->
             <div class="panel" id="distortion-panel" style="display:none;">
                 <h3>エリア歪みランキング</h3>
                 <div class="form-row" style="margin-bottom:6px;">
@@ -163,85 +92,209 @@
                 <div id="distortion-ranking" style="max-height:300px;overflow-y:auto;font-size:0.75rem;"></div>
             </div>
 
-            <!-- 駅詳細パネル（駅クリック時に表示） -->
-            <div class="panel" id="station-detail-panel" style="display:none;">
-                <h3 id="station-detail-title">駅データ</h3>
-                <div id="station-detail-content"></div>
-            </div>
-
-            <!-- 競合分析パネル -->
-            <div class="panel">
-                <h3>競合・市場分析</h3>
-                <div class="form-row">
-                    <div class="form-group" style="flex:2">
-                        <input type="text" id="comp-station" placeholder="駅名（例: 練馬）">
-                    </div>
-                    <button id="btn-competition" class="btn-secondary" style="flex:1;height:30px;">分析</button>
+            <details class="panel-details advanced-tools">
+                <summary class="panel-summary">詳細レイヤー・分析ツール</summary>
+                <div class="panel">
+                    <h3>ヒートマップ</h3>
+                    <label><input type="checkbox" id="layer-mesh-landprice"> 地価</label>
+                    <label><input type="checkbox" id="layer-mesh-rent"> 賃料</label>
+                    <select id="mesh-rent-layout" style="font-size:0.68rem;margin-left:18px;width:calc(100% - 18px);" onchange="if(document.getElementById('layer-mesh-rent').checked) loadMeshLayer('rent', true)">
+                        <option value="">全間取り</option>
+                        <option value="1K">1K</option>
+                        <option value="1DK">1DK</option>
+                        <option value="1LDK">1LDK</option>
+                        <option value="2K,2DK">2K/2DK</option>
+                        <option value="2LDK,3LDK">2LDK+</option>
+                    </select>
+                    <label><input type="checkbox" id="layer-mesh-yield"> 利回り</label>
+                    <label><input type="checkbox" id="layer-mesh-pop"> 人口</label>
+                    <select id="pop-metric-select" style="font-size:0.68rem;margin-left:18px;width:calc(100% - 18px);" onchange="if(document.getElementById('layer-mesh-pop').checked){meshLayers['population']&&map.removeLayer(meshLayers['population']);delete meshLayers['population'];meshLayers['pop_density']&&map.removeLayer(meshLayers['pop_density']);delete meshLayers['pop_density'];delete meshCache['population'];delete meshRectCache['population'];delete meshCache['pop_density'];delete meshRectCache['pop_density'];loadMeshLayer(this.value,true)}">
+                        <option value="pop_density">人口密度</option>
+                        <option value="population">増減率</option>
+                    </select>
+                    <label><input type="checkbox" id="layer-mesh-facility"> 施設密度</label>
+                    <label><input type="checkbox" id="layer-zoning-points"> 用途地域</label>
+                    <label><input type="checkbox" id="layer-railway-lines"> 路線別駅</label>
+                    <label><input type="checkbox" id="layer-road-type"> 道路種別</label>
+                    <label><input type="checkbox" id="layer-iv-stationpower"> 駅力</label>
+                    <label><input type="checkbox" id="layer-iv-yield"> 駅別利回り・歪み</label>
+                    <label><input type="checkbox" id="layer-hazard-flood"> 洪水</label>
+                    <label><input type="checkbox" id="layer-hazard-landslide"> 土砂</label>
+                    <label><input type="checkbox" id="layer-hazard-tsunami"> 津波</label>
+                    <label><input type="checkbox" id="layer-hazard-storm"> 高潮</label>
+                    <label><input type="checkbox" id="layer-hazard-terrain"> 地形分類</label>
                 </div>
-                <div id="competition-result" style="margin-top:8px;"></div>
-            </div>
+                <div class="panel">
+                    <h3>土地クイック診断</h3>
+                    <div class="form-group">
+                        <label>住所</label>
+                        <input type="text" id="quick-land-address" placeholder="例: 東京都杉並区高円寺南4-1-1">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group" style="flex:1">
+                            <label>土地面積(㎡)</label>
+                            <input type="number" id="quick-land-area" min="1" step="0.1" placeholder="120">
+                        </div>
+                        <div class="form-group" style="flex:1">
+                            <label>土地価格(円,任意)</label>
+                            <input type="number" id="quick-land-price" min="0" step="10000" placeholder="50000000">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group" style="flex:1">
+                            <label>建蔽率(%)</label>
+                            <input type="number" id="quick-land-bcr" min="20" max="100" step="1" placeholder="60">
+                        </div>
+                        <div class="form-group" style="flex:1">
+                            <label>容積率(%)</label>
+                            <input type="number" id="quick-land-far" min="50" max="800" step="10" placeholder="200">
+                        </div>
+                    </div>
+                    <button id="btn-quick-land-eval" class="btn-secondary">価格ライン算出</button>
+                    <div id="quick-land-result" style="margin-top:6px;font-size:0.75rem;"></div>
+                </div>
+                <div class="panel">
+                    <h3>歪み・競合</h3>
+                    <div class="form-row" style="gap:4px;">
+                        <button id="btn-run-distortion" class="btn-secondary" style="flex:1;">歪み分析</button>
+                        <button id="btn-fill-rental" class="btn-secondary" style="flex:1;font-size:0.72rem;" onclick="fillGaps('rental')">賃料補完</button>
+                    </div>
+                    <div class="form-row" style="gap:4px;margin-top:4px;">
+                        <button id="btn-fill-lp" class="btn-secondary" style="flex:1;font-size:0.72rem;" onclick="fillGaps('land_price')">地価補完</button>
+                        <button id="btn-fill-tx" class="btn-secondary" style="flex:1;font-size:0.72rem;" onclick="fillGaps('transactions')">取引補完</button>
+                    </div>
+                    <div id="fill-gaps-result" style="font-size:0.72rem;margin-top:4px;"></div>
+                    <div class="form-row" style="margin-top:8px;">
+                        <input type="text" id="comp-station" placeholder="駅名（例: 練馬）" style="flex:2;">
+                        <button id="btn-competition" class="btn-secondary" style="flex:1;">競合分析</button>
+                    </div>
+                    <div id="competition-result" style="margin-top:8px;"></div>
+                </div>
+                <details class="panel-details">
+                    <summary class="panel-summary">賃料データ</summary>
+                    <div class="panel">
+                        <div id="rental-stats">読込中...</div>
+                    </div>
+                </details>
+            </details>
         </div>
 
-        <!-- ===== 物件・土地タブ（旧: 土地+分析+スクレイピングを統合） ===== -->
+        <!-- ===== 物件 ===== -->
         <div id="tab-property" class="tab-content">
-            <!-- DB統計バー -->
-            <div id="land-stats-bar" style="padding:6px 10px;background:#0f3460;border-radius:6px;margin-bottom:8px;font-size:0.72rem;color:#78909c;display:flex;gap:12px;flex-wrap:wrap;">
-                読込中...
+            <div id="land-stats-bar" class="stats-strip">読込中...</div>
+
+            <div class="panel focus-panel">
+                <h3>自動取得</h3>
+                <div id="auto-scrape-status" class="auto-status">状態確認中...</div>
+                <div class="form-row" style="gap:6px;">
+                    <button id="btn-auto-scrape-now" class="btn-secondary" type="button" style="flex:1;">今すぐ取得</button>
+                    <button id="btn-auto-analyze-map" class="btn-primary" style="flex:1;">判定して地図へ</button>
+                </div>
+                <p class="hint">起動後は自動で連合隊から取得→DB保存します</p>
             </div>
 
-            <!-- ==== セクション: データ収集 ==== -->
-            <details class="panel-details" open>
-                <summary class="panel-summary">データ収集（スクレイピング）</summary>
+            <div class="panel focus-panel">
+                <h3>物件一覧 <span id="prop-total-count" class="muted-count"></span></h3>
+                <div class="form-row" style="gap:4px;margin-bottom:6px;">
+                    <input type="text" id="prop-filter-station" placeholder="駅・住所で検索" style="flex:2;">
+                    <select id="prop-filter-type" style="flex:1;">
+                        <option value="property" selected>収益物件</option>
+                        <option value="">全て</option>
+                        <option value="land">土地</option>
+                    </select>
+                </div>
+                <div class="form-row" style="gap:4px;margin-bottom:6px;">
+                    <select id="prop-sort" style="flex:1;">
+                        <option value="rank_desc" selected>ランク高い順</option>
+                        <option value="yield_desc">利回り高い順</option>
+                        <option value="price_asc">価格安い順</option>
+                        <option value="updated_at">更新日順</option>
+                        <option value="rank_asc">ランク低い順</option>
+                        <option value="price_desc">価格高い順</option>
+                        <option value="grade">グレード順</option>
+                        <option value="station_near">駅近い順</option>
+                    </select>
+                    <button id="btn-reload-props" class="btn-secondary" style="height:28px;" onclick="loadSampleProperties()">更新</button>
+                </div>
+                <div class="form-row" style="gap:4px;margin-bottom:6px;">
+                    <button id="btn-batch-analyze" class="btn-secondary" style="flex:1;height:28px;font-size:0.72rem;">一括判定</button>
+                    <button id="btn-auto-analyze-save" class="btn-secondary" style="flex:1;height:28px;font-size:0.72rem;">未分析を保存</button>
+                </div>
+                <div id="auto-analyze-save-result" class="hint"></div>
+                <label class="tiny-check"><input type="checkbox" id="auto-include-rebuild" checked> 建替え比較も含める</label>
+                <label class="tiny-check"><input type="checkbox" id="prop-include-delisted"> 掲載終了も表示</label>
+                <div id="prop-list" class="prop-list">
+                    <div style="padding:8px;color:#78909c;font-size:0.75rem;">読込中...</div>
+                </div>
+                <select id="preset-select" style="display:none;">
+                    <option value="">-- サンプル物件を選択 --</option>
+                </select>
+            </div>
+
+            <div class="panel focus-panel">
+                <h3>比較 <span id="compare-total" class="muted-count"></span></h3>
+                <div class="form-row" style="margin-bottom:6px;gap:4px;">
+                    <input type="text" id="compare-station" placeholder="駅名" style="flex:1;">
+                    <select id="compare-sort" style="flex:1;">
+                        <option value="judge_score">判定スコア順</option>
+                        <option value="estimated_yield">利回り順</option>
+                        <option value="asset_score">資産性順</option>
+                        <option value="land_price">価格順</option>
+                        <option value="walk_minutes">駅距離順</option>
+                        <option value="land_area_sqm">面積順</option>
+                    </select>
+                    <select id="compare-grade" style="width:56px;">
+                        <option value="">全</option>
+                        <option value="S">S</option>
+                        <option value="A">A</option>
+                        <option value="B">B</option>
+                        <option value="C">C</option>
+                    </select>
+                </div>
+                <button onclick="loadCompareTable()" class="btn-primary" style="width:100%;margin-bottom:6px;">比較を表示</button>
+                <div id="compare-table" class="compare-table"></div>
+            </div>
+
+            <details class="panel-details advanced-tools">
+                <summary class="panel-summary">データ収集・入力（詳細）</summary>
 
                 <div class="panel scraper-switcher">
-                    <div class="form-row" style="gap:4px;margin-bottom:6px;">
-                        <select id="scraper-mode" style="flex:1;" onchange="switchScraperPanel(this.value)">
-                            <option value="property">収益物件</option>
-                            <option value="land">土地物件</option>
-                            <option value="rental">賃料データ</option>
-                            <option value="individual">個別取込・CSV</option>
-                        </select>
-                    </div>
+                    <select id="scraper-mode" style="width:100%;margin-bottom:8px;" onchange="switchScraperPanel(this.value)">
+                        <option value="property">収益物件スクレイプ</option>
+                        <option value="land">土地スクレイプ</option>
+                        <option value="rental">賃料データ</option>
+                        <option value="individual">URL / CSV取込</option>
+                    </select>
 
-                    <!-- 収益物件 -->
                     <div id="scraper-property" class="scraper-sub-panel active">
-                        <div id="auto-scrape-status" style="margin-bottom:8px;padding:8px 10px;border:1px solid #1e3a5f;border-radius:6px;background:#0b1220;font-size:0.72rem;line-height:1.5;color:#90caf9;">
-                            自動取得: 状態確認中...
-                        </div>
-                        <div style="display:flex;gap:8px;margin-bottom:8px;">
-                            <button id="btn-auto-scrape-now" class="btn-secondary" type="button" style="font-size:0.72rem;">今すぐ自動取得</button>
-                        </div>
-                        <p class="hint">起動後はボタンなしで自動取得→DB保存します（既定: 連合隊 / 6時間ごと）。手動実行も可能。楽待はCloudflareでクラウドIPが弾かれることがあるため、自動取得は連合隊を推奨。</p>
                         <div class="form-row">
                             <div class="form-group" style="flex:1">
-                                <label>都道府県（複数選択）</label>
-                                <div style="display:flex;gap:10px;flex-wrap:wrap;padding:6px 8px;border:1px solid #1e3a5f;border-radius:6px;background:#0f172a;">
-                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-property" value="13" checked> 東京都</label>
-                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-property" value="14" checked> 神奈川県</label>
-                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-property" value="11" checked> 埼玉県</label>
-                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-property" value="12" checked> 千葉県</label>
+                                <label>都道府県</label>
+                                <div class="pref-chips">
+                                    <label><input type="checkbox" data-pref-group="scrape-property" value="13" checked> 東京</label>
+                                    <label><input type="checkbox" data-pref-group="scrape-property" value="14" checked> 神奈川</label>
+                                    <label><input type="checkbox" data-pref-group="scrape-property" value="11" checked> 埼玉</label>
+                                    <label><input type="checkbox" data-pref-group="scrape-property" value="12" checked> 千葉</label>
                                 </div>
                             </div>
                             <div class="form-group" style="flex:1">
                                 <label>ページ数</label>
-                                <input type="number" id="scrape-pages" value="10" min="1" max="30">
+                                <input type="number" id="scrape-pages" value="3" min="1" max="30">
                             </div>
                         </div>
                         <div class="form-row">
                             <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-rakumachi"> 楽待</label>
                             <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-kenbiya"> 健美家</label>
-                            <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-rals" checked> 不動産投資連合隊</label>
+                            <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-rals" checked> 連合隊</label>
                             <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-split-price"> 価格帯分割</label>
                         </div>
-                        <button id="btn-scrape" class="btn-primary" style="margin-top:6px;">収益物件スクレイピング</button>
+                        <button id="btn-scrape" class="btn-secondary" style="margin-top:6px;">手動スクレイプ</button>
                         <div id="scrape-result" style="margin-top:6px;font-size:0.75rem;"></div>
-                        <button id="btn-consistency-check" class="btn-secondary" style="margin-top:8px;">住所/駅/座標 整合チェック（自動補正）</button>
+                        <button id="btn-consistency-check" class="btn-secondary" style="margin-top:8px;">整合チェック</button>
                         <div id="consistency-result" style="margin-top:6px;font-size:0.75rem;"></div>
                     </div>
 
-                    <!-- 土地物件 -->
                     <div id="scraper-land" class="scraper-sub-panel">
-                        <p class="hint">SUUMO/楽待/athome/HOME'Sから土地物件を検索取得</p>
                         <div class="form-row">
                             <div class="form-group" style="flex:1">
                                 <label>ソース</label>
@@ -254,73 +307,55 @@
                             </div>
                             <div class="form-group" style="flex:1">
                                 <label>都道府県</label>
-                                <div style="display:flex;gap:10px;flex-wrap:wrap;padding:6px 8px;border:1px solid #1e3a5f;border-radius:6px;background:#0f172a;">
-                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-land" value="13" checked> 東京都</label>
-                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-land" value="14" checked> 神奈川県</label>
-                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-land" value="11" checked> 埼玉県</label>
-                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-land" value="12" checked> 千葉県</label>
+                                <div class="pref-chips">
+                                    <label><input type="checkbox" data-pref-group="scrape-land" value="13" checked> 東京</label>
+                                    <label><input type="checkbox" data-pref-group="scrape-land" value="14" checked> 神奈川</label>
+                                    <label><input type="checkbox" data-pref-group="scrape-land" value="11" checked> 埼玉</label>
+                                    <label><input type="checkbox" data-pref-group="scrape-land" value="12" checked> 千葉</label>
                                 </div>
                             </div>
                         </div>
                         <div class="form-row">
-                            <div class="form-group">
-                                <label>価格下限(万円)</label>
-                                <input type="number" id="land-price-min" placeholder="1000">
-                            </div>
-                            <div class="form-group">
-                                <label>価格上限(万円)</label>
-                                <input type="number" id="land-price-max" placeholder="6000">
-                            </div>
+                            <div class="form-group"><label>価格下限(万円)</label><input type="number" id="land-price-min" placeholder="1000"></div>
+                            <div class="form-group"><label>価格上限(万円)</label><input type="number" id="land-price-max" placeholder="6000"></div>
                         </div>
                         <div class="form-row">
-                            <div class="form-group">
-                                <label>面積下限(㎡)</label>
-                                <input type="number" id="land-area-min" placeholder="60">
-                            </div>
-                            <div class="form-group">
-                                <label>徒歩上限(分)</label>
-                                <input type="number" id="land-walk-max" placeholder="10">
-                            </div>
-                            <div class="form-group">
-                                <label>ページ数</label>
-                                <input type="number" id="land-max-pages" value="10" min="1" max="30">
-                            </div>
+                            <div class="form-group"><label>面積下限(㎡)</label><input type="number" id="land-area-min" placeholder="60"></div>
+                            <div class="form-group"><label>徒歩上限(分)</label><input type="number" id="land-walk-max" placeholder="10"></div>
+                            <div class="form-group"><label>ページ数</label><input type="number" id="land-max-pages" value="5" min="1" max="30"></div>
                         </div>
-                        <button id="btn-land-scrape" class="btn-primary">土地スクレイピング実行</button>
+                        <button id="btn-land-scrape" class="btn-secondary">土地スクレイプ</button>
                         <div id="land-scrape-result" style="margin-top:8px;"></div>
                     </div>
 
-                    <!-- 賃料 -->
                     <div id="scraper-rental" class="scraper-sub-panel">
-                        <p class="hint">SUUMO賃貸から賃料相場データを取得しDBに蓄積</p>
                         <div class="form-row">
                             <div class="form-group" style="flex:1">
-                                <label>都道府県（複数選択）</label>
-                                <div style="display:flex;gap:10px;flex-wrap:wrap;padding:6px 8px;border:1px solid #1e3a5f;border-radius:6px;background:#0f172a;">
-                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-rental" value="13" checked> 東京都</label>
-                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-rental" value="14" checked> 神奈川県</label>
-                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-rental" value="11" checked> 埼玉県</label>
-                                    <label style="font-size:0.75rem;"><input type="checkbox" data-pref-group="scrape-rental" value="12" checked> 千葉県</label>
+                                <label>都道府県</label>
+                                <div class="pref-chips">
+                                    <label><input type="checkbox" data-pref-group="scrape-rental" value="13" checked> 東京</label>
+                                    <label><input type="checkbox" data-pref-group="scrape-rental" value="14" checked> 神奈川</label>
+                                    <label><input type="checkbox" data-pref-group="scrape-rental" value="11" checked> 埼玉</label>
+                                    <label><input type="checkbox" data-pref-group="scrape-rental" value="12" checked> 千葉</label>
                                 </div>
                             </div>
                             <div class="form-group" style="flex:1">
                                 <label>ページ数</label>
-                                <input type="number" id="rental-scrape-pages" value="10" min="1" max="30">
+                                <input type="number" id="rental-scrape-pages" value="5" min="1" max="30">
                             </div>
                         </div>
-                        <button id="btn-rental-scrape" class="btn-primary">賃料スクレイピング</button>
+                        <button id="btn-rental-scrape" class="btn-secondary">賃料スクレイプ</button>
                         <div id="rental-scrape-result" style="margin-top:6px;font-size:0.75rem;"></div>
                     </div>
 
-                    <!-- 個別取込・CSV -->
                     <div id="scraper-individual" class="scraper-sub-panel">
                         <div class="form-group">
-                            <label>URL物件取込 (OCR対応)</label>
-                            <input type="text" id="scrape-url" placeholder="https://www.rakumachi.jp/syuuekibukken/detail/...">
+                            <label>URL物件取込</label>
+                            <input type="text" id="scrape-url" placeholder="https://www.rakumachi.jp/...">
                         </div>
                         <div class="form-row">
                             <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-ocr" checked> OCR</label>
-                            <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-browser"> ブラウザ描画</label>
+                            <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-browser"> ブラウザ</label>
                             <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-auto-analyze"> 自動分析</label>
                         </div>
                         <button id="btn-scrape-url" class="btn-secondary" style="margin-top:6px;">URL取込</button>
@@ -330,105 +365,41 @@
                             <div style="flex:1">
                                 <label style="font-size:0.75rem;">土地CSV</label>
                                 <input type="file" id="land-csv-upload" accept=".csv" style="font-size:0.7rem;" />
-                                <button id="btn-land-csv" class="btn-secondary" style="margin-top:4px;">土地CSV取込</button>
+                                <button id="btn-land-csv" class="btn-secondary" style="margin-top:4px;">取込</button>
                             </div>
                             <div style="flex:1">
                                 <label style="font-size:0.75rem;">賃料CSV</label>
                                 <input type="file" id="csv-upload" accept=".csv" style="font-size:0.7rem;" />
-                                <button id="btn-upload-csv" class="btn-secondary" style="margin-top:4px;">賃料CSV取込</button>
+                                <button id="btn-upload-csv" class="btn-secondary" style="margin-top:4px;">取込</button>
                             </div>
                         </div>
                         <div id="land-csv-result" style="font-size:0.75rem;"></div>
                         <div id="csv-result" style="font-size:0.75rem;"></div>
                     </div>
                 </div>
-            </details>
 
-            <!-- ==== セクション: 物件分析 ==== -->
-            <details class="panel-details" open>
-                <summary class="panel-summary">物件分析・投資判定</summary>
-
-                <!-- 一括処理パネル -->
                 <div class="panel">
                     <h3>一括処理</h3>
                     <div class="form-row" style="gap:4px;">
-                        <button id="btn-geocode" class="btn-secondary" style="flex:1;">座標取得</button>
-                        <button id="btn-generate-plans" class="btn-secondary" style="flex:1;">プラン生成</button>
-                        <button id="btn-batch-judge" class="btn-secondary" style="flex:1;">投資判定</button>
-                        <button id="btn-collect-data" class="btn-secondary" style="flex:1;">全データ収集</button>
-                        <button id="btn-ingest-api" class="btn-secondary" style="flex:1;font-size:0.72rem;">API取得</button>
+                        <button id="btn-geocode" class="btn-secondary" style="flex:1;">座標</button>
+                        <button id="btn-generate-plans" class="btn-secondary" style="flex:1;">プラン</button>
+                        <button id="btn-batch-judge" class="btn-secondary" style="flex:1;">判定</button>
+                    </div>
+                    <div class="form-row" style="gap:4px;margin-top:4px;">
+                        <button id="btn-collect-data" class="btn-secondary" style="flex:1;">全収集</button>
+                        <button id="btn-ingest-api" class="btn-secondary" style="flex:1;">API取得</button>
+                        <button id="btn-verify-listings" class="btn-secondary" style="flex:1;">掲載チェック</button>
                     </div>
                     <div id="batch-action-result" style="margin-top:8px;font-size:0.75rem;"></div>
+                    <span id="verify-listings-result" style="font-size:0.7rem;color:#90a4ae;"></span>
                 </div>
 
-                <!-- 統合物件選択パネル -->
                 <div class="panel">
-                    <h3>物件選択 <span id="prop-total-count" style="color:#78909c;font-size:0.75rem;"></span></h3>
-                    <!-- フィルタ行 -->
-                    <div class="form-row" style="gap:4px;margin-bottom:4px;">
-                        <input type="text" id="prop-filter-station" placeholder="駅名・住所で絞込" style="flex:2;font-size:0.72rem;">
-                        <select id="prop-filter-type" style="flex:1;font-size:0.72rem;">
-                            <option value="">全種別</option>
-                            <option value="property">収益物件</option>
-                            <option value="land">土地物件</option>
-                        </select>
-                    </div>
-                    <div class="form-row" style="gap:4px;margin-bottom:4px;">
-                        <select id="prop-sort" style="flex:1;font-size:0.72rem;">
-                            <option value="rank_desc">ランク高い順（自動分析）</option>
-                            <option value="rank_asc">ランク低い順（自動分析）</option>
-                            <option value="yield_desc">利回り高い順</option>
-                            <option value="price_asc">価格安い順</option>
-                            <option value="price_desc">価格高い順</option>
-                            <option value="grade">グレード順</option>
-                            <option value="station_near">駅近い順</option>
-                            <option value="updated_at" selected>更新日順</option>
-                        </select>
-                        <button id="btn-reload-props" class="btn-secondary" style="height:28px;font-size:0.72rem;" onclick="loadSampleProperties()">検索</button>
-                        <button id="btn-batch-analyze" class="btn-secondary" style="height:28px;font-size:0.72rem;">一括判定</button>
-                        <button id="btn-auto-analyze-map" class="btn-primary" style="height:28px;font-size:0.72rem;">自動分析→ランク反映</button>
-                        <button id="btn-auto-analyze-save" class="btn-primary" style="height:28px;font-size:0.72rem;">未分析を自動分析・保存</button>
-                    </div>
-                    <div id="auto-analyze-save-result" style="font-size:0.72rem;color:#90a4ae;margin-bottom:4px;"></div>
-                    <div class="form-row" style="gap:4px;margin-bottom:6px;">
-                        <label style="font-size:0.7rem;color:#90a4ae;">
-                            <input type="checkbox" id="auto-include-rebuild" checked>
-                            中古は建替えシナリオも比較
-                        </label>
-                        <label style="font-size:0.7rem;color:#90a4ae;">
-                            <input type="checkbox" id="prop-include-delisted">
-                            掲載終了も表示
-                        </label>
-                    </div>
-                    <div class="form-row" style="gap:4px;margin-bottom:6px;">
-                        <button id="btn-verify-listings" class="btn-secondary" style="flex:1;height:28px;font-size:0.72rem;">掲載チェック今すぐ実行</button>
-                        <span id="verify-listings-result" style="flex:2;font-size:0.7rem;color:#90a4ae;align-self:center;"></span>
-                    </div>
-                    <!-- 物件一覧（スクロール） -->
-                    <div id="prop-list" style="max-height:250px;overflow-y:auto;margin-bottom:6px;border:1px solid #1e3a5f;border-radius:4px;">
-                        <div style="padding:8px;color:#78909c;font-size:0.75rem;">読込中...</div>
-                    </div>
-                    <select id="preset-select" style="display:none;">
-                        <option value="">-- サンプル物件を選択 --</option>
-                    </select>
-                </div>
-
-                <!-- 手動入力 -->
-                <div class="panel">
-                    <h3>物件情報入力</h3>
-                    <div class="form-group">
-                        <label>物件名</label>
-                        <input type="text" id="prop-name" placeholder="例: 渋谷区RC一棟マンション">
-                    </div>
-                    <div class="form-group">
-                        <label>住所</label>
-                        <input type="text" id="prop-address" placeholder="例: 東京都渋谷区神宮前3丁目">
-                    </div>
+                    <h3>手動入力</h3>
+                    <div class="form-group"><label>物件名</label><input type="text" id="prop-name" placeholder="例: 渋谷区RC一棟"></div>
+                    <div class="form-group"><label>住所</label><input type="text" id="prop-address" placeholder="例: 東京都渋谷区..."></div>
                     <div class="form-row">
-                        <div class="form-group">
-                            <label>売出価格(万円)</label>
-                            <input type="number" id="prop-price" placeholder="15000">
-                        </div>
+                        <div class="form-group"><label>売出価格(万円)</label><input type="number" id="prop-price" placeholder="15000"></div>
                         <div class="form-group">
                             <label>構造</label>
                             <select id="prop-structure">
@@ -440,185 +411,85 @@
                         </div>
                     </div>
                     <div class="form-row">
-                        <div class="form-group">
-                            <label>土地面積(m2)</label>
-                            <input type="number" id="prop-land-area" placeholder="120">
-                        </div>
-                        <div class="form-group">
-                            <label>建物面積(m2)</label>
-                            <input type="number" id="prop-building-area" placeholder="300">
-                        </div>
+                        <div class="form-group"><label>土地面積(m2)</label><input type="number" id="prop-land-area" placeholder="120"></div>
+                        <div class="form-group"><label>建物面積(m2)</label><input type="number" id="prop-building-area" placeholder="300"></div>
                     </div>
                     <div class="form-row">
-                        <div class="form-group">
-                            <label>最寄駅(手動修正用)</label>
-                            <input type="text" id="prop-nearest-station" placeholder="例: 中山">
-                        </div>
-                        <div class="form-group">
-                            <label>築年数</label>
-                            <input type="number" id="prop-age" placeholder="15">
-                        </div>
-                        <div class="form-group">
-                            <label>駅徒歩(分)</label>
-                            <input type="number" id="prop-station" placeholder="5">
-                        </div>
+                        <div class="form-group"><label>最寄駅</label><input type="text" id="prop-nearest-station" placeholder="例: 中山"></div>
+                        <div class="form-group"><label>築年数</label><input type="number" id="prop-age" placeholder="15"></div>
+                        <div class="form-group"><label>駅徒歩</label><input type="number" id="prop-station" placeholder="5"></div>
                     </div>
                     <div class="form-row">
-                        <div class="form-group">
-                            <label>年間賃料(万円)</label>
-                            <input type="number" id="prop-rent" placeholder="960">
-                        </div>
-                        <div class="form-group">
-                            <label>戸数</label>
-                            <input type="number" id="prop-units" placeholder="8">
-                        </div>
+                        <div class="form-group"><label>年間賃料(万円)</label><input type="number" id="prop-rent" placeholder="960"></div>
+                        <div class="form-group"><label>戸数</label><input type="number" id="prop-units" placeholder="8"></div>
                     </div>
                     <div class="form-row">
-                        <div class="form-group">
-                            <label>緯度(手動プロット補正)</label>
-                            <input type="number" id="prop-latitude" step="0.000001" placeholder="35.514697">
-                        </div>
-                        <div class="form-group">
-                            <label>経度(手動プロット補正)</label>
-                            <input type="number" id="prop-longitude" step="0.000001" placeholder="139.539533">
-                        </div>
+                        <div class="form-group"><label>緯度</label><input type="number" id="prop-latitude" step="0.000001"></div>
+                        <div class="form-group"><label>経度</label><input type="number" id="prop-longitude" step="0.000001"></div>
                     </div>
                     <details class="loan-details">
                         <summary>ローン条件</summary>
                         <div class="form-row">
-                            <div class="form-group">
-                                <label>金利(%)</label>
-                                <input type="number" id="loan-rate" value="2.0" step="0.1">
-                            </div>
-                            <div class="form-group">
-                                <label>期間(年)</label>
-                                <input type="number" id="loan-term" value="35">
-                            </div>
-                            <div class="form-group">
-                                <label>LTV(%)</label>
-                                <input type="number" id="loan-ltv" value="80">
-                            </div>
+                            <div class="form-group"><label>金利(%)</label><input type="number" id="loan-rate" value="2.0" step="0.1"></div>
+                            <div class="form-group"><label>期間(年)</label><input type="number" id="loan-term" value="35"></div>
+                            <div class="form-group"><label>LTV(%)</label><input type="number" id="loan-ltv" value="80"></div>
                         </div>
                     </details>
                     <button id="btn-analyze" class="btn-primary" style="margin-top:8px;">投資判定実行</button>
-                    <button id="btn-save-manual-update" class="btn-secondary" style="margin-top:8px;">選択中プロットをDBへ手動保存</button>
+                    <button id="btn-save-manual-update" class="btn-secondary" style="margin-top:8px;">プロットをDB保存</button>
                     <div id="manual-update-result" style="margin-top:6px;font-size:0.75rem;"></div>
                 </div>
 
-                <!-- 判定結果 -->
-                <div class="panel" id="result-panel" style="display:none;">
-                    <h3>判定結果</h3>
-                    <div id="result-header">
-                        <div id="result-grade" class="grade-badge"></div>
-                        <div id="result-meta">
-                            <div id="result-recommendation"></div>
-                            <div id="result-score"></div>
-                        </div>
-                    </div>
-                    <div id="result-scores"></div>
-                    <div id="result-metrics"></div>
-                    <div id="result-swot"></div>
-                </div>
-                <div class="panel" id="saved-analysis-panel" style="display:none;">
-                    <h3>保存済み分析詳細</h3>
-                    <div id="saved-analysis-content" style="font-size:0.75rem;"></div>
-                </div>
-
-                <!-- 資産性スコアは投資判定結果パネル内に統合 -->
-            </details>
-
-            <!-- ==== セクション: 土地物件一覧 ==== -->
-            <details class="panel-details" open>
-                <summary class="panel-summary">土地物件一覧・建築プラン</summary>
-
                 <div class="panel">
-                    <h3>土地物件一覧 <span id="land-count" style="color:#888;font-size:0.8rem;"></span></h3>
+                    <h3>土地一覧 <span id="land-count" class="muted-count"></span></h3>
                     <div class="form-row" style="margin-bottom:6px;">
-                        <div class="form-group" style="flex:1">
-                            <select id="land-sort">
-                                <option value="estimated_yield">利回り順</option>
-                                <option value="total_investment">投資額順</option>
-                                <option value="max_units">戸数順</option>
-                            </select>
-                        </div>
+                        <select id="land-sort" style="flex:1;">
+                            <option value="estimated_yield">利回り順</option>
+                            <option value="total_investment">投資額順</option>
+                            <option value="max_units">戸数順</option>
+                        </select>
                         <button id="btn-refresh-land" class="btn-secondary" style="height:28px;">更新</button>
-                        <a href="/api/land-listings/export/csv" class="btn-secondary" style="height:28px;text-decoration:none;display:inline-flex;align-items:center;padding:0 8px;font-size:0.75rem;">土地CSV</a>
-                        <a href="/api/properties/export/csv" class="btn-secondary" style="height:28px;text-decoration:none;display:inline-flex;align-items:center;padding:0 8px;font-size:0.75rem;">物件CSV</a>
                     </div>
-                    <div id="land-listings-list" style="max-height:400px;overflow-y:auto;"></div>
+                    <div id="land-listings-list" style="max-height:220px;overflow-y:auto;"></div>
+                    <div id="land-detail-panel" style="display:none;margin-top:8px;">
+                        <h3>土地詳細・建築プラン</h3>
+                        <div id="land-detail"></div>
+                        <div id="building-plans-table" style="margin-top:8px;"></div>
+                    </div>
                 </div>
 
-                <!-- 定期スクレイピング設定 -->
                 <div class="panel">
-                    <h3>定期スクレイピング設定</h3>
-                    <p class="hint">検索条件を保存し定期実行</p>
+                    <h3>定期設定</h3>
                     <div class="form-row">
-                        <div class="form-group" style="flex:2">
-                            <input type="text" id="config-name" placeholder="設定名（例: 練馬区3000万以下）">
-                        </div>
-                        <div class="form-group" style="flex:1">
-                            <select id="config-interval">
-                                <option value="6">6時間毎</option>
-                                <option value="12">12時間毎</option>
-                                <option value="24" selected>24時間毎</option>
-                            </select>
-                        </div>
+                        <input type="text" id="config-name" placeholder="設定名" style="flex:2;">
+                        <select id="config-interval" style="flex:1;">
+                            <option value="6">6時間</option>
+                            <option value="12">12時間</option>
+                            <option value="24" selected>24時間</option>
+                        </select>
                     </div>
-                    <button id="btn-save-config" class="btn-secondary">検索条件を保存</button>
+                    <button id="btn-save-config" class="btn-secondary" style="margin-top:6px;">条件を保存</button>
                     <div id="saved-configs" style="margin-top:8px;font-size:0.75rem;"></div>
                 </div>
 
-                <!-- 土地詳細パネル -->
-                <div class="panel" id="land-detail-panel" style="display:none;">
-                    <h3>土地詳細・建築プラン</h3>
-                    <div id="land-detail"></div>
-                    <div id="building-plans-table" style="margin-top:8px;"></div>
-                </div>
-            </details>
-        </div>
-
-        <!-- ===== 履歴・データタブ → 全物件比較 ===== -->
-        <div id="tab-data" class="tab-content">
-            <!-- 全物件比較テーブル -->
-            <div class="panel">
-                <h3>全物件比較 <span id="compare-total" style="color:#78909c;font-size:0.75rem;"></span></h3>
-                <div class="form-row" style="margin-bottom:6px;gap:4px;">
-                    <input type="text" id="compare-station" placeholder="駅名フィルタ" style="flex:1;">
-                    <select id="compare-sort" style="flex:1;">
-                        <option value="estimated_yield">利回り順</option>
-                        <option value="asset_score">資産性スコア順</option>
-                        <option value="judge_score">判定スコア順</option>
-                        <option value="land_price">価格順</option>
-                        <option value="land_area_sqm">面積順</option>
-                        <option value="walk_minutes">駅距離順</option>
-                    </select>
-                    <select id="compare-grade" style="width:60px;">
-                        <option value="">全グレード</option>
-                        <option value="S">S</option>
-                        <option value="A">A</option>
-                        <option value="B">B</option>
-                        <option value="C">C</option>
-                    </select>
-                    <button onclick="loadCompareTable()" class="btn-primary" style="height:28px;">検索</button>
-                    <a href="/api/land-listings/export/csv" class="btn-secondary" style="height:28px;text-decoration:none;display:inline-flex;align-items:center;padding:0 6px;font-size:0.72rem;">CSV</a>
-                </div>
-                <div id="compare-table" style="max-height:calc(100vh - 200px);overflow:auto;font-size:0.68rem;"></div>
-            </div>
-
-            <!-- DB統計 -->
-            <details class="panel-details">
-                <summary class="panel-summary">DB統計・設定</summary>
                 <div class="panel">
+                    <h3>DB統計</h3>
                     <div id="db-stats-display" style="font-size:0.75rem;"></div>
                     <div id="env-status"></div>
+                    <div class="form-row" style="margin-top:8px;gap:6px;">
+                        <a href="/api/properties/export/csv" class="btn-secondary" style="flex:1;text-decoration:none;text-align:center;">物件CSV</a>
+                        <a href="/api/land-listings/export/csv" class="btn-secondary" style="flex:1;text-decoration:none;text-align:center;">土地CSV</a>
+                    </div>
                 </div>
             </details>
         </div>
 
-        <!-- 一括判定ランキング（非占有・折りたたみ可能） -->
+        <!-- 互換: 旧タブID参照を壊さない -->
+        <div id="tab-data" class="tab-content" style="display:none !important;" aria-hidden="true"></div>
+
         <div class="panel" id="ranking-panel" style="display:none;">
             <div class="ranking-panel-header">
-                <h3 style="margin:0;border:0;padding:0;">一括判定ランキング</h3>
+                <h3 style="margin:0;border:0;padding:0;">判定ランキング</h3>
                 <div style="display:flex;gap:6px;">
                     <button id="ranking-toggle-btn" class="btn-secondary ranking-mini-btn" type="button">折りたたむ</button>
                     <button id="ranking-close-btn" class="btn-secondary ranking-mini-btn" type="button">閉じる</button>
@@ -630,8 +501,18 @@
         </div>
     </div>
 
-    <!-- 地図 -->
     <div id="map"></div>
+
+    <!-- 互換用: 旧UIのレイヤーID（非表示） -->
+    <div id="legacy-layer-hooks" hidden aria-hidden="true">
+        <input type="checkbox" id="layer-land-price">
+        <input type="checkbox" id="layer-transactions">
+        <input type="checkbox" id="layer-heatmap">
+        <input type="checkbox" id="layer-official-land-price">
+        <input type="checkbox" id="layer-mesh-zoning">
+        <button id="btn-refresh-reports" type="button"></button>
+        <button id="btn-unified-load" type="button"></button>
+    </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>

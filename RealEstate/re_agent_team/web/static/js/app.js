@@ -292,15 +292,15 @@ function initMap(center, zoom) {
             loadDbLayersFromDatabase();
         });
     }
-    document.getElementById('btn-load-data').addEventListener('click', loadAreaData);
-    document.getElementById('btn-analyze').addEventListener('click', analyzeProperty);
+    document.getElementById('btn-load-data')?.addEventListener('click', loadAreaData);
+    document.getElementById('btn-analyze')?.addEventListener('click', analyzeProperty);
     const manualSaveBtn = document.getElementById('btn-save-manual-update');
     if (manualSaveBtn) manualSaveBtn.addEventListener('click', saveManualPropertyUpdate);
     const verifyBtn = document.getElementById('btn-verify-listings');
     if (verifyBtn) verifyBtn.addEventListener('click', verifyListingSources);
     const inclDelisted = document.getElementById('prop-include-delisted');
     if (inclDelisted) inclDelisted.addEventListener('change', loadSampleProperties);
-    document.getElementById('btn-batch-analyze').addEventListener('click', batchAnalyze);
+    document.getElementById('btn-batch-analyze')?.addEventListener('click', batchAnalyze);
     const autoAnalyzeBtn = document.getElementById('btn-auto-analyze-map');
     if (autoAnalyzeBtn) autoAnalyzeBtn.addEventListener('click', autoAnalyzeAndReflect);
     const autoAnalyzeSaveBtn = document.getElementById('btn-auto-analyze-save');
@@ -309,26 +309,26 @@ function initMap(center, zoom) {
     if (rankingCloseBtn) rankingCloseBtn.addEventListener('click', hideRankingPanel);
     const rankingToggleBtn = document.getElementById('ranking-toggle-btn');
     if (rankingToggleBtn) rankingToggleBtn.addEventListener('click', toggleRankingPanel);
-    document.getElementById('btn-upload-csv').addEventListener('click', uploadCSV);
-    document.getElementById('btn-scrape').addEventListener('click', scrapeProperties);
+    document.getElementById('btn-upload-csv')?.addEventListener('click', uploadCSV);
+    document.getElementById('btn-scrape')?.addEventListener('click', scrapeProperties);
     const consistencyBtn = document.getElementById('btn-consistency-check');
     if (consistencyBtn) consistencyBtn.addEventListener('click', startConsistencyCheck);
-    document.getElementById('btn-scrape-url').addEventListener('click', scrapeUrl);
+    document.getElementById('btn-scrape-url')?.addEventListener('click', scrapeUrl);
     const reportsBtn = document.getElementById('btn-refresh-reports');
     if (reportsBtn) reportsBtn.addEventListener('click', loadReports);
-    document.getElementById('preset-select').addEventListener('change', fillPreset);
+    document.getElementById('preset-select')?.addEventListener('change', fillPreset);
 
     // 土地タブイベント
-    document.getElementById('btn-land-scrape').addEventListener('click', scrapeLandListings);
-    document.getElementById('btn-land-csv').addEventListener('click', uploadLandCSV);
-    document.getElementById('btn-generate-plans').addEventListener('click', batchGeneratePlans);
-    document.getElementById('btn-geocode').addEventListener('click', batchGeocode);
-    document.getElementById('btn-batch-judge').addEventListener('click', batchJudgeLand);
-    document.getElementById('btn-collect-data').addEventListener('click', collectAllData);
-    document.getElementById('btn-ingest-api').addEventListener('click', ingestRealData);
-    document.getElementById('btn-save-config').addEventListener('click', saveScrapeConfig);
-    document.getElementById('btn-competition').addEventListener('click', loadCompetition);
-    document.getElementById('btn-refresh-land').addEventListener('click', () => loadLandListings());
+    document.getElementById('btn-land-scrape')?.addEventListener('click', scrapeLandListings);
+    document.getElementById('btn-land-csv')?.addEventListener('click', uploadLandCSV);
+    document.getElementById('btn-generate-plans')?.addEventListener('click', batchGeneratePlans);
+    document.getElementById('btn-geocode')?.addEventListener('click', batchGeocode);
+    document.getElementById('btn-batch-judge')?.addEventListener('click', batchJudgeLand);
+    document.getElementById('btn-collect-data')?.addEventListener('click', collectAllData);
+    document.getElementById('btn-ingest-api')?.addEventListener('click', ingestRealData);
+    document.getElementById('btn-save-config')?.addEventListener('click', saveScrapeConfig);
+    document.getElementById('btn-competition')?.addEventListener('click', loadCompetition);
+    document.getElementById('btn-refresh-land')?.addEventListener('click', () => loadLandListings());
     const unifiedBtn = document.getElementById('btn-unified-load');
     if (unifiedBtn) unifiedBtn.addEventListener('click', () => loadUnifiedData(0));
 
@@ -512,11 +512,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
 function switchTab(tabId) {
+    // 旧「全物件比較」タブは物件タブへ統合
+    if (tabId === 'tab-data') tabId = 'tab-property';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-    document.querySelector(`.tab[data-tab="${tabId}"]`).classList.add('active');
-    document.getElementById(tabId).classList.add('active');
-    if (tabId === 'tab-data') loadCompareTable();
+    const tabBtn = document.querySelector(`.tab[data-tab="${tabId}"]`);
+    const tabPane = document.getElementById(tabId);
+    if (tabBtn) tabBtn.classList.add('active');
+    if (tabPane) tabPane.classList.add('active');
+    if (tabId === 'tab-property') {
+        try { loadCompareTable(); } catch (e) {}
+        try { refreshAutoScrapeStatus(); } catch (e) {}
+    }
 }
 
 // ===== 市区町村ロード =====
