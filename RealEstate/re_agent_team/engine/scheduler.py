@@ -234,7 +234,7 @@ class ScrapeScheduler:
         return self._pipeline
 
     def _run_property_ingest(self) -> None:
-        sources = _env_list("RE_AUTO_PROPERTY_SOURCES", ["rals"])
+        sources = _env_list("RE_AUTO_PROPERTY_SOURCES", ["rals", "rakumachi", "kenbiya", "athome"])
         prefs = _env_list("RE_AUTO_PROPERTY_PREFS", list(BATCH_TARGET_PREFECTURES))
         max_pages = int(
             os.getenv(

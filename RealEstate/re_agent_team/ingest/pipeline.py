@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from contracts.listing import ListingDTO
 from contracts.analysis import AnalysisResultDTO
 from models.property import Property
+from ingest.source_ids import canonicalize_source, expand_sources_for_query
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,8 @@ class IngestPipeline:
         saved = 0
         for p in props:
             try:
+                if getattr(p, "source", None):
+                    p.source = canonicalize_source(p.source) or p.source
                 self.db.upsert_property(p.to_dict())
                 saved += 1
             except Exception:
@@ -137,9 +140,10 @@ class IngestPipeline:
         errors: List[str] = []
         if auto_judge and self.orchestrator is not None:
             with self.db._conn() as conn:
-                qmarks = ",".join(["?"] * len(source_list)) if source_list else "?"
+                judge_sources = expand_sources_for_query(source_list or ["rakumachi"])
+                qmarks = ",".join(["?"] * len(judge_sources))
                 pref_marks = ",".join(["?"] * len(prefecture_codes))
-                params = list(prefecture_codes) + (source_list or ["rakumachi"]) + [max(1, int(analyze_limit))]
+                params = list(prefecture_codes) + judge_sources + [max(1, int(analyze_limit))]
                 rows = conn.execute(f"""
                     SELECT *
                     FROM properties

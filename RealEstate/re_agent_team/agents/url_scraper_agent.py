@@ -30,6 +30,7 @@ from bs4 import BeautifulSoup, Tag
 
 from .base_agent import BaseAgent
 from models.property import Property
+from ingest.source_ids import canonicalize_source
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +155,7 @@ class UrlScraperAgent(BaseAgent):
             floors=prop_data.get("floors"),
             units=prop_data.get("units"),
             occupancy_rate=prop_data.get("occupancy_rate"),
-            source=site,
+            source=canonicalize_source(site) or site,
             source_url=url,
         )
 

@@ -30,7 +30,7 @@ services:
       - key: RE_AUTO_PROPERTY_SCRAPE
         value: "1"
       - key: RE_AUTO_PROPERTY_SOURCES
-        value: "rals"
+        value: "rals,rakumachi,kenbiya,athome"
       - key: RE_AUTO_PROPERTY_PREFS
         value: "13,14,11,12"
       - key: RE_AUTO_PROPERTY_MAX_PAGES

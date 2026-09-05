@@ -33,9 +33,25 @@ class ScraperAgent(BaseAgent):
     RAKUMACHI_SEARCH = "https://www.rakumachi.jp/syuuekibukken/area/"
     KENBIYA_SEARCH = "https://www.kenbiya.com/pp0/s/{pref_slug}/"
     RALS_SEARCH = "https://www.rals.co.jp/invest/index.php"
+    ATHOME_BASE = "https://www.athome.co.jp"
+    ATHOME_BUY_OTHER = "https://www.athome.co.jp/buy_other/{pref_slug}/list/"
+    ATHOME_PREF_MAP = {
+        "13": "tokyo", "14": "kanagawa", "11": "saitama", "12": "chiba",
+    }
+    ATHOME_LIST_KEYWORDS = (
+        "一棟売アパート", "一棟売マンション", "売ビル", "一棟アパート",
+        "一棟マンション", "一棟売", "投資",
+    )
+    ATHOME_LIST_EXCLUDE = (
+        "売駐車場", "中古一戸建て", "売倉庫", "戸建て", "区分", "借地",
+    )
 
     # 対象物件種別（タイトル先頭で判定）
-    ALLOWED_PROPERTY_TYPES = ["1棟アパート", "1棟マンション", "一棟アパート", "一棟マンション", "1棟商業ビル", "土地"]
+    ALLOWED_PROPERTY_TYPES = [
+        "1棟アパート", "1棟マンション", "一棟アパート", "一棟マンション",
+        "1棟商業ビル", "土地",
+        "一棟売アパート", "一棟売マンション", "売ビル", "一棟売",
+    ]
     # 除外キーワード（借地権・区分・PR広告等）
     EXCLUDED_KEYWORDS = ["借地", "定借", "定期借地", "地上権", "区分"]
     EXCLUDED_PREFIXES = ["PR"]  # PR広告物件
@@ -233,11 +249,13 @@ class ScraperAgent(BaseAgent):
             "rakumachi": self._scrape_rakumachi_page,
             "kenbiya": self._scrape_kenbiya_page,
             "rals": self._scrape_rals_page,
+            "athome": self._scrape_athome_page,
         }
         warm_urls = {
             "rakumachi": self.RAKUMACHI_BASE + "/",
             "kenbiya": "https://www.kenbiya.com/",
             "rals": "https://www.rals.co.jp/",
+            "athome": self.ATHOME_BASE + "/",
         }
 
         for src in srcs:
@@ -507,7 +525,7 @@ class ScraperAgent(BaseAgent):
             current_rent_annual=(
                 int(price * gross_yield) if price and gross_yield else None
             ),
-            source="楽待",
+            source="rakumachi",
             source_url=source_url,
         )
 
@@ -518,7 +536,7 @@ class ScraperAgent(BaseAgent):
         url = self.KENBIYA_SEARCH.format(pref_slug=pref_slug)
         params = {"page": str(page)}
         return self._crawl_detail_urls(
-            source_name="健美家",
+            source_name="kenbiya",
             list_url=url,
             params=params,
             url_pattern=r"kenbiya\.com/.+/(?:detail|view|bukken|estate)",
@@ -533,10 +551,32 @@ class ScraperAgent(BaseAgent):
             "area": pref_map.get(pref_code, "tokyo"),
         }
         return self._crawl_detail_urls(
-            source_name="不動産投資連合隊",
+            source_name="rals",
             list_url=self.RALS_SEARCH,
             params=params,
-            url_pattern=r"(rals\.co\.jp|fudosan\.cbiz\.ne\.jp).*(?:detail|index|invest)",
+            url_pattern=r"fudosan\.cbiz\.ne\.jp/detailPage/",
+        )
+
+
+    def _scrape_athome_page(self, pref_code: str, page: int = 1) -> List[Property]:
+        """アットホーム事業用（一棟売等）一覧から詳細URLを収集して構造化"""
+        self._throttle()
+        pref_slug = self.ATHOME_PREF_MAP.get(pref_code, "tokyo")
+        if page <= 1:
+            list_url = self.ATHOME_BUY_OTHER.format(pref_slug=pref_slug)
+        else:
+            list_url = (
+                self.ATHOME_BUY_OTHER.format(pref_slug=pref_slug).rstrip("/")
+                + f"/page{page}/"
+            )
+        return self._crawl_detail_urls(
+            source_name="athome",
+            list_url=list_url,
+            params={},
+            url_pattern=r"athome\.co\.jp/buy_other/\d+",
+            prefer_browser=True,
+            list_text_include=self.ATHOME_LIST_KEYWORDS,
+            list_text_exclude=self.ATHOME_LIST_EXCLUDE,
         )
 
     def _crawl_detail_urls(
@@ -545,20 +585,37 @@ class ScraperAgent(BaseAgent):
         list_url: str,
         params: Dict[str, str],
         url_pattern: str,
+        prefer_browser: bool = False,
+        list_text_include=None,
+        list_text_exclude=None,
     ) -> List[Property]:
         """一覧ページから候補URLを抽出し、詳細ページを構造化"""
         warm = f"{urlparse_base(list_url)}/"
-        html, err = self._fetch_html(list_url, params=params, warm_url=warm)
+        html, err = self._fetch_html(
+            list_url,
+            params=params,
+            warm_url=warm,
+            prefer_browser=prefer_browser,
+        )
         if not html:
             key = {
+                "kenbiya": "kenbiya",
                 "健美家": "kenbiya",
+                "rals": "rals",
                 "不動産投資連合隊": "rals",
+                "athome": "athome",
+                "アットホーム": "athome",
             }.get(source_name, source_name)
+            # 属性名の揺れに対応
+            if not hasattr(self, "last_source_errors") or self.last_source_errors is None:
+                self.last_source_errors = {}
             self.last_source_errors[key] = err or "一覧取得失敗"
             self.logger.warning("[%s] 一覧取得失敗: %s", source_name, err)
             return []
 
         soup = BeautifulSoup(html, "html.parser")
+        include = tuple(list_text_include or ())
+        exclude = tuple(list_text_exclude or ())
         urls = []
         for a in soup.select("a[href]"):
             href = (a.get("href") or "").strip()
@@ -574,12 +631,40 @@ class ScraperAgent(BaseAgent):
                 continue
             if "login" in href or "member" in href:
                 continue
+            # 一覧カード文言で投資物件を優先フィルタ（athome混在対策）
+            card_text = ""
+            parent = a.find_parent(["article", "li", "div", "tr"])
+            if parent is not None:
+                card_text = parent.get_text(" ", strip=True)[:240]
+            else:
+                card_text = a.get_text(" ", strip=True)[:240]
+            if exclude and any(k in card_text for k in exclude):
+                continue
+            if include and not any(k in card_text for k in include):
+                continue
             urls.append(href.split("#")[0])
 
         # 重複除去 + 上限（一覧1pあたりの過剰アクセスを抑える）
         uniq_urls = list(dict.fromkeys(urls))[:25]
+        # 一覧フィルタで0件なら、フィルタ無しのURLへフォールバック（最大12件）
+        if not uniq_urls and include:
+            raw = []
+            for a in soup.select("a[href]"):
+                href = (a.get("href") or "").strip()
+                if not href:
+                    continue
+                if href.startswith("//"):
+                    href = "https:" + href
+                elif href.startswith("/"):
+                    href = urljoin(list_url, href)
+                elif not href.startswith("http"):
+                    href = urljoin(list_url, href)
+                if re.search(url_pattern, href) and "login" not in href:
+                    raw.append(href.split("#")[0])
+            uniq_urls = list(dict.fromkeys(raw))[:12]
+
         properties: List[Property] = []
-        use_browser_detail = False
+        use_browser_detail = bool(prefer_browser)
         for detail_url in uniq_urls:
             try:
                 prop = self.url_scraper.run(
@@ -588,7 +673,6 @@ class ScraperAgent(BaseAgent):
                     use_browser=use_browser_detail,
                 )
                 if not prop and not use_browser_detail and playwright_available():
-                    # 詳細が弾かれたら以降はブラウザ取得を試す
                     prop = self.url_scraper.run(
                         url=detail_url, use_ocr=False, use_browser=True
                     )
@@ -596,13 +680,13 @@ class ScraperAgent(BaseAgent):
                         use_browser_detail = True
                 if not prop:
                     continue
-                # 既存フィルタに寄せる
                 title = (prop.name or "").strip()
-                if any(kw in title for kw in self.EXCLUDED_KEYWORDS):
+                excluded = getattr(self, "EXCLUDED_KEYWORDS", []) or []
+                if any(kw in title for kw in excluded):
                     continue
-                if not any(t in title for t in self.ALLOWED_PROPERTY_TYPES):
-                    # タイトルに種別が無い場合は利回り付き物件のみ採用
-                    if not prop.gross_yield:
+                allowed = self.ALLOWED_PROPERTY_TYPES
+                if not any(t in title for t in allowed):
+                    if not getattr(prop, "gross_yield", None):
                         continue
                 prop.source = source_name
                 properties.append(prop)
