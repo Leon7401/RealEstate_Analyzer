@@ -1,0 +1,84 @@
+{
+  "iteration": 48,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "BollingerBands",
+        "params": {
+          "window": 18,
+          "window_dev": 2.6
+        }
+      },
+      {
+        "name": "ATR",
+        "params": {
+          "window": 18
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "band_breakout",
+        "params": {
+          "upper_band": "bb_upper_18"
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "band_breakdown",
+        "params": {
+          "lower_band": "bb_lower_18"
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.035,
+      "take_profit_pct": 0.073,
+      "max_position_pct": 0.14,
+      "max_drawdown_pct": 0.12
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_cebb4a3d",
+    "version": 1,
+    "parent_id": null,
+    "created_at": "2026-03-09T15:58:29.270027"
+  },
+  "result": {
+    "strategy_id": "strat_cebb4a3d",
+    "total_return": "-14.84%",
+    "sharpe_ratio": "-0.499",
+    "max_drawdown": "-17.62%",
+    "win_rate": "14.29%",
+    "profit_factor": "0.158",
+    "total_trades": 7,
+    "calmar_ratio": "-0.842"
+  },
+  "critique": {
+    "grade": "F",
+    "weaknesses": [
+      "Negative risk-adjusted return",
+      "High drawdown (> 15%)",
+      "Very low win rate (< 30%)",
+      "Unprofitable (profit factor < 1.0)",
+      "Too few trades for statistical significance",
+      "Negative total return"
+    ],
+    "suggestions": [
+      "Change strategy template entirely",
+      "Consider tighter stop-loss",
+      "Adjust entry thresholds to be more selective",
+      "Increase take-profit or tighten stop-loss",
+      "Relax entry conditions to generate more signals"
+    ],
+    "scores": {
+      "sharpe": "-0.4992",
+      "max_drawdown": "-0.1762",
+      "win_rate": "0.1429",
+      "profit_factor": "0.1576",
+      "total_trades": 7,
+      "total_return": "-0.1484"
+    }
+  }
+}

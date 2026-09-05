@@ -255,6 +255,12 @@ function initMap(center, zoom) {
     }
     document.getElementById('btn-load-data').addEventListener('click', loadAreaData);
     document.getElementById('btn-analyze').addEventListener('click', analyzeProperty);
+    const manualSaveBtn = document.getElementById('btn-save-manual-update');
+    if (manualSaveBtn) manualSaveBtn.addEventListener('click', saveManualPropertyUpdate);
+    const verifyBtn = document.getElementById('btn-verify-listings');
+    if (verifyBtn) verifyBtn.addEventListener('click', verifyListingSources);
+    const inclDelisted = document.getElementById('prop-include-delisted');
+    if (inclDelisted) inclDelisted.addEventListener('change', loadSampleProperties);
     document.getElementById('btn-batch-analyze').addEventListener('click', batchAnalyze);
     const autoAnalyzeBtn = document.getElementById('btn-auto-analyze-map');
     if (autoAnalyzeBtn) autoAnalyzeBtn.addEventListener('click', autoAnalyzeAndReflect);
@@ -460,8 +466,10 @@ async function loadSampleProperties() {
 
     // ランク系はクライアント側で自動分析後に並べる
     const apiSortBy = (sortBy === 'rank_desc' || sortBy === 'rank_asc') ? 'updated_at' : sortBy;
+    const includeDelisted = document.getElementById('prop-include-delisted')?.checked === true;
     let url = `/api/sample-properties?sort_by=${apiSortBy}&include_land=true&prefecture_code=${encodeURIComponent(pref)}`;
     if (stationFilter) url += `&station_filter=${encodeURIComponent(stationFilter)}`;
+    if (includeDelisted) url += `&include_delisted=true`;
 
     try {
         const resp = await fetch(url);
@@ -680,16 +688,22 @@ function renderPropertyList(props) {
             : (buildingPresence === 'building'
                 ? '<span style="background:#6a1b9a;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">建物あり</span>'
                 : '<span style="background:#546e7a;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">建物不明</span>');
+        const isDelisted = String(p.listing_status || 'active') === 'delisted';
+        const delistedBadge = isDelisted
+            ? '<span style="background:#b71c1c;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">掲載終了</span>'
+            : '';
         const station = p.nearest_station ? `${p.nearest_station}${p.station_distance_min ? ' ' + p.station_distance_min + '分' : ''}` : '';
         const selected = realIdx === _selectedPropIdx ? 'background:#1a3a5f;' : '';
+        const dimmed = isDelisted ? 'opacity:0.55;' : '';
         const rankTag = p._rank_order ? `<span style="background:#263238;color:#fff;padding:0 5px;border-radius:10px;font-size:0.58rem;">#${p._rank_order}</span>` : '';
 
-        html += `<div onclick="selectProperty(${realIdx})" style="padding:5px 8px;border-bottom:1px solid #1a2744;cursor:pointer;font-size:0.72rem;${selected}display:flex;align-items:center;gap:6px;"
+        html += `<div onclick="selectProperty(${realIdx})" style="padding:5px 8px;border-bottom:1px solid #1a2744;cursor:pointer;font-size:0.72rem;${selected}${dimmed}display:flex;align-items:center;gap:6px;"
                       onmouseover="this.style.background='#1a3a5f'" onmouseout="this.style.background='${realIdx === _selectedPropIdx ? '#1a3a5f' : ''}'">
             <div style="flex:1;min-width:0;">
                 <div style="display:flex;align-items:center;gap:2px;">
                     ${rankTag}
                     ${typeBadge}
+                    ${delistedBadge}
                     ${presenceBadge}
                     ${grade ? `<span style="color:${gc};font-weight:bold;font-size:0.7rem;">${grade}</span>` : ''}
                     ${scenario ? `<span style="background:#455a64;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">${scenario}</span>` : ''}
@@ -761,6 +775,9 @@ function plotSampleProperties(propsToPlot) {
         });
 
         const estimated = p._coords_estimated ? '<span style="color:#ffa726;font-size:0.6rem;">(推定位置)</span>' : '';
+        const delistedBadge = String(p.listing_status || 'active') === 'delisted'
+            ? '<span style="background:#b71c1c;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;margin-left:4px;">掲載終了</span>'
+            : '';
         const typeBadge = isLand ? '<span style="background:#1565c0;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;margin-left:4px;">土地</span>' : '';
         const scenarioBadge = p._analysis_scenario === 'rebuild'
             ? '<span style="background:#455a64;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.62rem;margin-left:4px;">建替案採用</span>'
@@ -772,7 +789,7 @@ function plotSampleProperties(propsToPlot) {
                 <strong>${p.name || p.address || '物件'}</strong>
                 ${rankNo ? `<span style="background:#263238;color:#fff;padding:1px 6px;border-radius:10px;font-size:0.65rem;margin-left:4px;">#${rankNo}</span>` : ''}
                 ${source ? `<span style="background:#1e3a5f;color:#4fc3f7;padding:1px 5px;border-radius:3px;font-size:0.65rem;margin-left:4px;">${source}</span>` : ''}
-                ${typeBadge} ${scenarioBadge} ${estimated}
+                ${typeBadge} ${delistedBadge} ${scenarioBadge} ${estimated}
                 <br>
                 <span style="color:#888;">${p.address || ''}</span><br>
                 <table style="margin:4px 0;font-size:0.75rem;">
@@ -785,6 +802,7 @@ function plotSampleProperties(propsToPlot) {
                 ${sourceLink}
                 <br>
                 <button onclick="selectProperty(${realIdx})" style="margin-top:4px;padding:3px 10px;background:#4fc3f7;color:#000;border:none;border-radius:3px;cursor:pointer;font-size:0.72rem;">選択して分析</button>
+                <button onclick="openManualEditFromMap(${realIdx})" style="margin-top:4px;margin-left:4px;padding:3px 10px;background:#90caf9;color:#000;border:none;border-radius:3px;cursor:pointer;font-size:0.72rem;">手動修正</button>
             </div>
         `);
         if (rankNo && rankNo <= 50) {
@@ -825,10 +843,13 @@ function fillPropertyForm(idx) {
     setVal('prop-price', p.asking_price ? Math.round(p.asking_price / 10000) : '');
     setVal('prop-land-area', p.land_area || '');
     setVal('prop-building-area', p.building_area || '');
+    setVal('prop-nearest-station', p.nearest_station || '');
     setVal('prop-age', p.building_age || '');
     setVal('prop-station', p.station_distance_min || '');
     setVal('prop-rent', p.current_rent_annual ? Math.round(p.current_rent_annual / 10000) : '');
     setVal('prop-units', p.units || '');
+    setVal('prop-latitude', p.latitude || '');
+    setVal('prop-longitude', p.longitude || '');
     if (p.structure) {
         const sel = document.getElementById('prop-structure');
         if (sel) sel.value = p.structure;
@@ -836,6 +857,155 @@ function fillPropertyForm(idx) {
     // preset selectも同期
     const presetSel = document.getElementById('preset-select');
     if (presetSel) presetSel.value = idx;
+}
+
+function openManualEditFromMap(idx) {
+    selectProperty(idx);
+    switchTab('tab-property');
+}
+
+function _numOrNull(v) {
+    const t = (v == null ? '' : String(v)).trim();
+    if (!t) return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
+}
+
+function _findPropertyIndexById(id) {
+    if (id == null) return -1;
+    return sampleProperties.findIndex(p => String(p.id) === String(id));
+}
+
+function _findPropertyIndexByLandId(id) {
+    if (id == null) return -1;
+    return sampleProperties.findIndex(p => String(p._land_listing_id) === String(id));
+}
+
+async function saveManualPropertyUpdate() {
+    const resultEl = document.getElementById('manual-update-result');
+    if (_selectedPropIdx < 0 || !sampleProperties[_selectedPropIdx]) {
+        if (resultEl) resultEl.innerHTML = '<span style="color:#ef5350;">先に地図または一覧から物件を選択してください。</span>';
+        return;
+    }
+    const p = sampleProperties[_selectedPropIdx];
+
+    const isLand = (p._type === 'land' || p._land_listing_id != null);
+    const payload = {
+        address: document.getElementById('prop-address')?.value?.trim() || '',
+        latitude: _numOrNull(document.getElementById('prop-latitude')?.value),
+        longitude: _numOrNull(document.getElementById('prop-longitude')?.value),
+    };
+    let endpoint = '';
+    if (isLand) {
+        const lid = p._land_listing_id ?? p.id;
+        if (lid == null) {
+            if (resultEl) resultEl.innerHTML = '<span style="color:#ef5350;">土地IDが不明なため保存できません。</span>';
+            return;
+        }
+        endpoint = `/api/land-listings/${encodeURIComponent(lid)}`;
+        payload.station = document.getElementById('prop-nearest-station')?.value?.trim() || null;
+        payload.walk_minutes = _numOrNull(document.getElementById('prop-station')?.value);
+        const priceMan = _numOrNull(document.getElementById('prop-price')?.value);
+        payload.land_price = priceMan != null ? Math.round(priceMan * 10000) : null;
+        payload.land_area_sqm = _numOrNull(document.getElementById('prop-land-area')?.value);
+    } else {
+        if (!p.id) {
+            if (resultEl) resultEl.innerHTML = '<span style="color:#ef5350;">物件IDが不明なため保存できません。</span>';
+            return;
+        }
+        endpoint = `/api/properties/${encodeURIComponent(p.id)}`;
+        payload.name = document.getElementById('prop-name')?.value?.trim() || '無題物件';
+        payload.asking_price = (() => {
+            const priceMan = _numOrNull(document.getElementById('prop-price')?.value);
+            return priceMan != null ? Math.round(priceMan * 10000) : null;
+        })();
+        payload.land_area = _numOrNull(document.getElementById('prop-land-area')?.value);
+        payload.building_area = _numOrNull(document.getElementById('prop-building-area')?.value);
+        payload.structure = document.getElementById('prop-structure')?.value || null;
+        payload.building_age = _numOrNull(document.getElementById('prop-age')?.value);
+        payload.nearest_station = document.getElementById('prop-nearest-station')?.value?.trim() || null;
+        payload.station_distance_min = _numOrNull(document.getElementById('prop-station')?.value);
+        payload.current_rent_annual = (() => {
+            const rentMan = _numOrNull(document.getElementById('prop-rent')?.value);
+            return rentMan != null ? Math.round(rentMan * 10000) : null;
+        })();
+        payload.units = _numOrNull(document.getElementById('prop-units')?.value);
+    }
+
+    if (resultEl) resultEl.innerHTML = '<span style="color:#4fc3f7;">手動更新を保存中...</span>';
+    try {
+        const resp = await fetch(endpoint, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+
+        const updated = data.property || data.listing || null;
+        if (updated) {
+            if (isLand) {
+                const idx = _findPropertyIndexByLandId(updated.id);
+                if (idx >= 0) {
+                    sampleProperties[idx].address = updated.address;
+                    sampleProperties[idx].latitude = updated.latitude;
+                    sampleProperties[idx].longitude = updated.longitude;
+                    sampleProperties[idx].nearest_station = updated.station;
+                    sampleProperties[idx].station_distance_min = updated.walk_minutes;
+                    sampleProperties[idx].land_area = updated.land_area_sqm;
+                    if (updated.land_price != null) sampleProperties[idx].asking_price = updated.land_price;
+                }
+            } else {
+                const idx = _findPropertyIndexById(updated.id);
+                if (idx >= 0) sampleProperties[idx] = { ...sampleProperties[idx], ...updated };
+            }
+        }
+
+        const typeFilter = document.getElementById('prop-filter-type')?.value || '';
+        const sortBy = document.getElementById('prop-sort')?.value || 'updated_at';
+        const refreshed = getFilteredProperties(sampleProperties, typeFilter);
+        const sorted = sortPropertiesForView(refreshed, sortBy);
+        applyRankOrderToProperties(sorted);
+        renderPropertyList(sorted);
+        plotSampleProperties(sorted);
+        if (resultEl) resultEl.innerHTML = '<span style="color:#66bb6a;">手動更新を保存しました（DB反映済み）</span>';
+    } catch (e) {
+        if (resultEl) resultEl.innerHTML = `<span style="color:#ef5350;">保存失敗: ${e.message}</span>`;
+    }
+}
+
+async function verifyListingSources() {
+    const btn = document.getElementById('btn-verify-listings');
+    const resultEl = document.getElementById('verify-listings-result');
+    if (btn) btn.disabled = true;
+    if (resultEl) resultEl.innerHTML = '<span style="color:#4fc3f7;">掲載URLを確認中... (時間がかかる場合があります)</span>';
+    try {
+        const resp = await fetch('/api/listings/verify-source', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+        const r = data.result || {};
+        const prop = r.properties || {};
+        const land = r.land_listings || {};
+        const totalChecked = (prop.checked || 0) + (land.checked || 0);
+        const totalFailed = (prop.failed || 0) + (land.failed || 0);
+        if (resultEl) {
+            resultEl.innerHTML = `<span style="color:#66bb6a;">確認 ${totalChecked}件 / 消失候補 ${totalFailed}件 `
+                + `(物件 ${prop.checked || 0}件・土地 ${land.checked || 0}件)</span>`;
+        }
+        await loadSampleProperties();
+    } catch (e) {
+        if (resultEl) resultEl.innerHTML = `<span style="color:#ef5350;">掲載チェック失敗: ${e.message}</span>`;
+    } finally {
+        if (btn) btn.disabled = false;
+    }
 }
 
 function fillPreset() {

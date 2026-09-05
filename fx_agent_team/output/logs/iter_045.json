@@ -1,0 +1,93 @@
+{
+  "iteration": 45,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "SMA",
+        "params": {
+          "window": 35
+        }
+      },
+      {
+        "name": "SMA",
+        "params": {
+          "window": 193
+        }
+      },
+      {
+        "name": "RSI",
+        "params": {
+          "window": 18
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "cross_above",
+        "params": {
+          "fast": "SMA_35",
+          "slow": "SMA_193"
+        }
+      },
+      {
+        "type": "threshold_below",
+        "params": {
+          "indicator": "RSI_18",
+          "value": 70
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "cross_below",
+        "params": {
+          "fast": "SMA_35",
+          "slow": "SMA_193"
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.04,
+      "take_profit_pct": 0.073,
+      "max_position_pct": 0.09,
+      "max_drawdown_pct": 0.18
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_53e51b8e",
+    "version": 3,
+    "parent_id": "strat_9dac1477",
+    "created_at": "2026-03-09T15:58:29.191342"
+  },
+  "result": {
+    "strategy_id": "strat_53e51b8e",
+    "total_return": "4.88%",
+    "sharpe_ratio": "0.179",
+    "max_drawdown": "-12.05%",
+    "win_rate": "37.50%",
+    "profit_factor": "1.533",
+    "total_trades": 8,
+    "calmar_ratio": "0.405"
+  },
+  "critique": {
+    "grade": "D",
+    "weaknesses": [
+      "Low risk-adjusted return (Sharpe < 0.5)",
+      "Low win rate (< 40%)",
+      "Too few trades for statistical significance"
+    ],
+    "suggestions": [
+      "Adjust indicator parameters for better signal quality",
+      "Add confirmation indicator to entry rules",
+      "Relax entry conditions to generate more signals"
+    ],
+    "scores": {
+      "sharpe": "0.1792",
+      "max_drawdown": "-0.1205",
+      "win_rate": "0.3750",
+      "profit_factor": "1.5329",
+      "total_trades": 8,
+      "total_return": "0.0488"
+    }
+  }
+}

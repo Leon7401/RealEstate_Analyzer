@@ -402,8 +402,22 @@ class Database:
             self._migrate_add_column(conn, "rental_comps", "station_id", "TEXT")
             self._migrate_add_column(conn, "rental_comps", "building_name", "TEXT")
             self._migrate_add_column(conn, "properties", "station_id", "TEXT")
+            self._migrate_add_column(conn, "properties", "listing_status", "TEXT DEFAULT 'active'")
+            self._migrate_add_column(conn, "properties", "last_seen_at", "TEXT")
+            self._migrate_add_column(conn, "properties", "last_verified_at", "TEXT")
+            self._migrate_add_column(conn, "properties", "delisted_confirmed_at", "TEXT")
+            self._migrate_add_column(conn, "properties", "verify_fail_count", "INTEGER DEFAULT 0")
+            self._migrate_add_column(conn, "properties", "last_verified_http_status", "INTEGER")
+            self._migrate_add_column(conn, "properties", "verify_note", "TEXT")
             self._migrate_add_column(conn, "land_listings", "duplicate_of_id", "INTEGER")
             self._migrate_add_column(conn, "land_listings", "normalized_address", "TEXT")
+            self._migrate_add_column(conn, "land_listings", "listing_status", "TEXT DEFAULT 'active'")
+            self._migrate_add_column(conn, "land_listings", "last_seen_at", "TEXT")
+            self._migrate_add_column(conn, "land_listings", "last_verified_at", "TEXT")
+            self._migrate_add_column(conn, "land_listings", "delisted_confirmed_at", "TEXT")
+            self._migrate_add_column(conn, "land_listings", "verify_fail_count", "INTEGER DEFAULT 0")
+            self._migrate_add_column(conn, "land_listings", "last_verified_http_status", "INTEGER")
+            self._migrate_add_column(conn, "land_listings", "verify_note", "TEXT")
             self._migrate_add_column(conn, "scrape_configs", "run_interval_hours", "INTEGER DEFAULT 24")
             # 駅メトリクス拡張: 乗降客数・人口・空室率
             self._migrate_add_column(conn, "station_metrics", "passengers_daily", "INTEGER")
@@ -481,6 +495,13 @@ class Database:
             """)
             try:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_apm_coords ON api_population_mesh(center_lat, center_lng)")
+            except Exception:
+                pass
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_prop_listing_status ON properties(listing_status)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_prop_verified_at ON properties(last_verified_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_ll_listing_status2 ON land_listings(listing_status)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_ll_verified_at ON land_listings(last_verified_at)")
             except Exception:
                 pass
 
@@ -926,13 +947,17 @@ class Database:
                      building_area, structure, built_year, building_age,
                      units, current_rent_annual, gross_yield,
                      nearest_station, station_distance_min, station_id,
-                     source, source_url, data_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     source, source_url, data_json, listing_status, last_seen_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET
                     asking_price=excluded.asking_price,
                     current_rent_annual=excluded.current_rent_annual,
                     gross_yield=excluded.gross_yield,
                     station_id=excluded.station_id,
+                    listing_status='active',
+                    delisted_confirmed_at=NULL,
+                    verify_fail_count=0,
+                    last_seen_at=datetime('now','localtime'),
                     data_json=excluded.data_json,
                     updated_at=datetime('now','localtime')
             """, (
@@ -948,6 +973,8 @@ class Database:
                 prop.get("station_id"),
                 prop.get("source"), prop.get("source_url"),
                 json.dumps(prop, ensure_ascii=False),
+                "active",
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ))
         return True
 
@@ -1393,10 +1420,13 @@ class Database:
 
     def get_properties(
         self, city_code: str = "", station_id: str = "", limit: int = 200,
+        active_only: bool = True,
     ) -> List[Dict]:
         with self._conn() as conn:
             sql = "SELECT * FROM properties WHERE 1=1"
             params = []
+            if active_only:
+                sql += " AND COALESCE(listing_status, 'active') = 'active'"
             if station_id:
                 sql += " AND station_id=?"
                 params.append(station_id)
@@ -1406,6 +1436,101 @@ class Database:
             sql += " ORDER BY updated_at DESC LIMIT ?"
             params.append(limit)
             return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+    def get_source_verification_targets(
+        self,
+        table: str,
+        limit: int = 300,
+        stale_hours: int = 24,
+    ) -> List[Dict]:
+        """掲載有無チェック対象（URLあり・掲載中・一定時間未確認）を取得"""
+        if table not in {"properties", "land_listings"}:
+            return []
+        id_col = "id"
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {id_col} AS id, source_url, listing_status, verify_fail_count, last_verified_at
+                FROM {table}
+                WHERE source_url IS NOT NULL
+                  AND TRIM(source_url) <> ''
+                  AND COALESCE(listing_status, 'active') = 'active'
+                  AND (
+                        last_verified_at IS NULL
+                        OR last_verified_at <= datetime('now','localtime', ?)
+                  )
+                ORDER BY COALESCE(last_verified_at, '1970-01-01 00:00:00') ASC, updated_at DESC
+                LIMIT ?
+                """,
+                (f"-{max(1, int(stale_hours))} hours", max(1, int(limit))),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def record_source_verification_result(
+        self,
+        table: str,
+        row_id: Any,
+        is_alive: bool,
+        http_status: Optional[int] = None,
+        note: str = "",
+        confirm_failures: int = 2,
+    ):
+        """掲載有無チェック結果を反映（連続失敗でdelisted化）"""
+        if table not in {"properties", "land_listings"}:
+            return
+        with self._conn() as conn:
+            existing = conn.execute(
+                f"SELECT verify_fail_count FROM {table} WHERE id=? LIMIT 1",
+                (row_id,),
+            ).fetchone()
+            if not existing:
+                return
+            fail_count = int((dict(existing).get("verify_fail_count") or 0))
+
+            if is_alive:
+                conn.execute(
+                    f"""
+                    UPDATE {table}
+                    SET listing_status='active',
+                        verify_fail_count=0,
+                        delisted_confirmed_at=NULL,
+                        last_seen_at=datetime('now','localtime'),
+                        last_verified_at=datetime('now','localtime'),
+                        last_verified_http_status=?,
+                        verify_note=?,
+                        updated_at=datetime('now','localtime')
+                    WHERE id=?
+                    """,
+                    (http_status, note[:300] if note else None, row_id),
+                )
+                return
+
+            fail_count += 1
+            should_delist = fail_count >= max(1, int(confirm_failures))
+            conn.execute(
+                f"""
+                UPDATE {table}
+                SET listing_status=?,
+                    verify_fail_count=?,
+                    delisted_confirmed_at=CASE
+                        WHEN ? THEN COALESCE(delisted_confirmed_at, datetime('now','localtime'))
+                        ELSE delisted_confirmed_at
+                    END,
+                    last_verified_at=datetime('now','localtime'),
+                    last_verified_http_status=?,
+                    verify_note=?,
+                    updated_at=datetime('now','localtime')
+                WHERE id=?
+                """,
+                (
+                    "delisted" if should_delist else "active",
+                    fail_count,
+                    1 if should_delist else 0,
+                    http_status,
+                    note[:300] if note else None,
+                    row_id,
+                ),
+            )
 
     # ===== 判定結果 =====
 
@@ -1777,6 +1902,32 @@ class Database:
                     or (str(r.get("city_code") or "")[:2] if r.get("city_code") else "")
                 )
 
+                # 0) 住所ジオコードを最優先（住所が取れている場合）
+                addr_near = None
+                if r.get("address"):
+                    addr = str(r.get("address"))
+                    if addr in geo_cache:
+                        gc = geo_cache[addr]
+                    else:
+                        try:
+                            gc = geocoder.geocode(addr)
+                        except Exception:
+                            gc = None
+                        geo_cache[addr] = gc
+                    if gc:
+                        lat = float(gc[0])
+                        lon = float(gc[1])
+                        addr_near = find_nearest_station(
+                            lat,
+                            lon,
+                            max_distance_km=8.0,
+                            pref_code=None if force_nearest else (pref_code or None),
+                        )
+                        if (not addr_near) or float(addr_near.get("distance_km") or 999.0) > 20.0:
+                            near_any = find_nearest_station(lat, lon, max_distance_km=8.0, pref_code=None)
+                            if near_any:
+                                addr_near = near_any
+
                 # 1) 駅名単体で解決
                 sid = resolve_station_id(
                     nearest_station_text=r.get("nearest_station"),
@@ -1786,25 +1937,33 @@ class Database:
                 )
 
                 # 2) 物件名・住所も含めて再解決（「◯◯駅」が名前に入るケース）
-                if not sid:
-                    station_hint = f"{r.get('name') or ''} {r.get('address') or ''}"
-                    sid = resolve_station_id(
-                        nearest_station_text=station_hint,
-                        lat=r.get("latitude"),
-                        lon=r.get("longitude"),
-                        pref_code=pref_code or None,
+                station_hint = f"{r.get('name') or ''} {r.get('address') or ''}"
+                sid_hint = resolve_station_id(
+                    nearest_station_text=station_hint,
+                    lat=r.get("latitude"),
+                    lon=r.get("longitude"),
+                    pref_code=pref_code or None,
+                )
+                if sid_hint:
+                    explicit_station_in_hint = bool(
+                        re.search(r"[^\s/／()（）,、]{2,}駅\s*(?:徒歩|バス|歩|約)?", station_hint)
                     )
+                    if explicit_station_in_hint or not sid:
+                        sid = sid_hint
 
                 try:
                     cur_lat = float(r.get("latitude")) if r.get("latitude") is not None else None
                     cur_lon = float(r.get("longitude")) if r.get("longitude") is not None else None
                 except (TypeError, ValueError):
                     cur_lat = cur_lon = None
-                lat = cur_lat
-                lon = cur_lon
+                if not (r.get("address") and addr_near):
+                    lat = cur_lat
+                    lon = cur_lon
 
                 # 3) 必要時のみ住所ジオコード -> 実在最寄駅で補正
                 need_geocode = False
+                if addr_near:
+                    sid = addr_near.get("station_id") or sid
                 if not sid:
                     need_geocode = True
                 elif sid and sid in STATION_MAP and cur_lat is not None and cur_lon is not None:
@@ -1875,6 +2034,8 @@ class Database:
                                     updated += cur.rowcount if cur else 0
 
                 near_final = None
+                if addr_near:
+                    near_final = addr_near
                 if lat is not None and lon is not None:
                     near_final = find_nearest_station(
                         lat,
@@ -1968,6 +2129,32 @@ class Database:
                 except (TypeError, ValueError):
                     lat = lon = None
 
+                # 0) 住所ジオコードを最優先（住所が取れている場合）
+                addr_near = None
+                if r.get("address"):
+                    addr = str(r.get("address"))
+                    if addr in geo_cache:
+                        gc = geo_cache[addr]
+                    else:
+                        try:
+                            gc = geocoder.geocode(addr)
+                        except Exception:
+                            gc = None
+                        geo_cache[addr] = gc
+                    if gc:
+                        lat = float(gc[0])
+                        lon = float(gc[1])
+                        addr_near = find_nearest_station(
+                            lat,
+                            lon,
+                            max_distance_km=8.0,
+                            pref_code=None if force_nearest else (pref_code or None),
+                        )
+                        if (not addr_near) or float(addr_near.get("distance_km") or 999.0) > 20.0:
+                            near_any = find_nearest_station(lat, lon, max_distance_km=8.0, pref_code=None)
+                            if near_any:
+                                addr_near = near_any
+
                 sid = resolve_station_id(
                     nearest_station_text=r.get("station"),
                     lat=lat,
@@ -2012,8 +2199,10 @@ class Database:
                             lon=lon,
                             pref_code=pref_code or None,
                         )
+                if addr_near:
+                    sid = addr_near.get("station_id") or sid
 
-                near = None
+                near = addr_near
                 if lat is not None and lon is not None:
                     near = find_nearest_station(
                         lat,
@@ -2090,8 +2279,9 @@ class Database:
                              building_coverage_ratio, floor_area_ratio,
                              zoning, quasi_fireproof, two_way_road, north_road,
                              source, source_url, maisoku_pdf_path,
-                             analysis_status, memo, latitude, longitude)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                             analysis_status, memo, latitude, longitude,
+                             listing_status, last_seen_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         ON CONFLICT(address, land_price, source) DO UPDATE SET
                             railway_line=excluded.railway_line,
                             station=excluded.station,
@@ -2102,6 +2292,10 @@ class Database:
                             zoning=excluded.zoning,
                             latitude=excluded.latitude,
                             longitude=excluded.longitude,
+                            listing_status='active',
+                            delisted_confirmed_at=NULL,
+                            verify_fail_count=0,
+                            last_seen_at=datetime('now','localtime'),
                             updated_at=datetime('now','localtime')
                     """, (
                         addr,
@@ -2118,6 +2312,8 @@ class Database:
                         r.get("analysis_status", "pending"),
                         r.get("memo"),
                         r.get("latitude"), r.get("longitude"),
+                        "active",
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     ))
                     if not existed:
                         inserted += 1
@@ -2129,6 +2325,7 @@ class Database:
         self, station: str = "", min_price: int = None,
         max_price: int = None, min_area: float = None,
         status: str = "", limit: int = 500, offset: int = 0,
+        active_only: bool = True,
     ) -> List[Dict]:
         with self._conn() as conn:
             sql = """SELECT ll.*,
@@ -2139,6 +2336,8 @@ class Database:
                     LEFT JOIN land_asset_scores las ON las.land_listing_id = ll.id
                     WHERE (ll.duplicate_of_id IS NULL)"""
             params = []
+            if active_only:
+                sql += " AND COALESCE(ll.listing_status, 'active') = 'active'"
             if station:
                 sql += " AND ll.station LIKE ?"
                 params.append(f"%{station}%")
@@ -2160,7 +2359,10 @@ class Database:
 
     def count_land_listings(self) -> int:
         with self._conn() as conn:
-            row = conn.execute("SELECT COUNT(*) as cnt FROM land_listings WHERE duplicate_of_id IS NULL").fetchone()
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM land_listings "
+                "WHERE duplicate_of_id IS NULL AND COALESCE(listing_status, 'active')='active'"
+            ).fetchone()
             return dict(row)["cnt"]
 
     def get_land_listing_by_id(self, listing_id: int) -> Optional[Dict]:

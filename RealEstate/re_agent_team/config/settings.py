@@ -25,6 +25,10 @@ PROPERTY_REFRESH_INTERVAL_HOURS = 6  # 既存建物物件の定期スクレイ�
 PROPERTY_REFRESH_MAX_PAGES = 5       # 既存建物スクレイピング深度（県あたり）
 PROPERTY_ANALYZE_LIMIT = 60          # 定期分析で判定する件数（最新順）
 PROPERTY_ANALYZE_INCLUDE_REBUILD = True  # 既存建物の建替え比較を実施
+LISTING_VERIFY_INTERVAL_HOURS = 12   # 掲載有無チェック実行間隔
+LISTING_VERIFY_BATCH = 300           # 1回あたりのURL検証件数（物件/土地 各テーブル）
+LISTING_VERIFY_STALE_HOURS = 24      # 再検証までの最小間隔
+LISTING_VERIFY_CONFIRM_FAILURES = 2  # 連続失敗何回で抹消確定にするか
 
 # ===== 駅紐づけ設定 =====
 STATION_MAX_DISTANCE_KM = 2.0      # 最寄り駅として紐づける最大距離(km)

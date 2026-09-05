@@ -1,0 +1,45 @@
+{
+  "indicators": [
+    {
+      "name": "BollingerBands",
+      "params": {
+        "window": 18,
+        "window_dev": 2.3
+      }
+    },
+    {
+      "name": "ATR",
+      "params": {
+        "window": 10
+      }
+    }
+  ],
+  "entry_rules": [
+    {
+      "type": "band_breakout",
+      "params": {
+        "upper_band": "bb_upper_18"
+      }
+    }
+  ],
+  "exit_rules": [
+    {
+      "type": "band_breakdown",
+      "params": {
+        "lower_band": "bb_lower_18"
+      }
+    }
+  ],
+  "risk": {
+    "stop_loss_pct": 0.032,
+    "take_profit_pct": 0.076,
+    "max_position_pct": 0.12,
+    "max_drawdown_pct": 0.12
+  },
+  "pair": "EURUSD=X",
+  "timeframe": "1d",
+  "id": "strat_551d6f95",
+  "version": 1,
+  "parent_id": null,
+  "created_at": "2026-03-09T15:57:48.146533"
+}

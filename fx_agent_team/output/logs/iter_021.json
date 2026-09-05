@@ -1,0 +1,91 @@
+{
+  "iteration": 21,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "SMA",
+        "params": {
+          "window": 58
+        }
+      },
+      {
+        "name": "SMA",
+        "params": {
+          "window": 124
+        }
+      },
+      {
+        "name": "RSI",
+        "params": {
+          "window": 14
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "cross_above",
+        "params": {
+          "fast": "SMA_58",
+          "slow": "SMA_124"
+        }
+      },
+      {
+        "type": "threshold_below",
+        "params": {
+          "indicator": "RSI_14",
+          "value": 70
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "cross_below",
+        "params": {
+          "fast": "SMA_58",
+          "slow": "SMA_124"
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.037,
+      "take_profit_pct": 0.14324867565918817,
+      "max_position_pct": 0.14,
+      "max_drawdown_pct": 0.12
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_6eb11dd1",
+    "version": 2,
+    "parent_id": "strat_1a60cdd9",
+    "created_at": "2026-03-09T15:58:28.439046"
+  },
+  "result": {
+    "strategy_id": "strat_6eb11dd1",
+    "total_return": "1.52%",
+    "sharpe_ratio": "0.066",
+    "max_drawdown": "-11.58%",
+    "win_rate": "42.86%",
+    "profit_factor": "1.211",
+    "total_trades": 7,
+    "calmar_ratio": "0.131"
+  },
+  "critique": {
+    "grade": "C",
+    "weaknesses": [
+      "Low risk-adjusted return (Sharpe < 0.5)",
+      "Too few trades for statistical significance"
+    ],
+    "suggestions": [
+      "Adjust indicator parameters for better signal quality",
+      "Relax entry conditions to generate more signals"
+    ],
+    "scores": {
+      "sharpe": "0.0664",
+      "max_drawdown": "-0.1158",
+      "win_rate": "0.4286",
+      "profit_factor": "1.2107",
+      "total_trades": 7,
+      "total_return": "0.0152"
+    }
+  }
+}

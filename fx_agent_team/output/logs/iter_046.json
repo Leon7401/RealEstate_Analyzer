@@ -1,0 +1,93 @@
+{
+  "iteration": 46,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "SMA",
+        "params": {
+          "window": 19
+        }
+      },
+      {
+        "name": "SMA",
+        "params": {
+          "window": 199
+        }
+      },
+      {
+        "name": "RSI",
+        "params": {
+          "window": 16
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "cross_above",
+        "params": {
+          "fast": "SMA_19",
+          "slow": "SMA_199"
+        }
+      },
+      {
+        "type": "threshold_below",
+        "params": {
+          "indicator": "RSI_16",
+          "value": 70
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "cross_below",
+        "params": {
+          "fast": "SMA_19",
+          "slow": "SMA_199"
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.04,
+      "take_profit_pct": 0.073,
+      "max_position_pct": 0.09,
+      "max_drawdown_pct": 0.18
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_e9cb378f",
+    "version": 3,
+    "parent_id": "strat_9dac1477",
+    "created_at": "2026-03-09T15:58:29.220049"
+  },
+  "result": {
+    "strategy_id": "strat_e9cb378f",
+    "total_return": "5.97%",
+    "sharpe_ratio": "0.230",
+    "max_drawdown": "-5.84%",
+    "win_rate": "22.22%",
+    "profit_factor": "1.749",
+    "total_trades": 9,
+    "calmar_ratio": "1.022"
+  },
+  "critique": {
+    "grade": "D",
+    "weaknesses": [
+      "Low risk-adjusted return (Sharpe < 0.5)",
+      "Very low win rate (< 30%)",
+      "Too few trades for statistical significance"
+    ],
+    "suggestions": [
+      "Adjust indicator parameters for better signal quality",
+      "Adjust entry thresholds to be more selective",
+      "Relax entry conditions to generate more signals"
+    ],
+    "scores": {
+      "sharpe": "0.2304",
+      "max_drawdown": "-0.0584",
+      "win_rate": "0.2222",
+      "profit_factor": "1.7488",
+      "total_trades": 9,
+      "total_return": "0.0597"
+    }
+  }
+}

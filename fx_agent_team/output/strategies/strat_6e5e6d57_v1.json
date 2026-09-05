@@ -1,0 +1,47 @@
+{
+  "indicators": [
+    {
+      "name": "RSI",
+      "params": {
+        "window": 12
+      }
+    },
+    {
+      "name": "BollingerBands",
+      "params": {
+        "window": 22,
+        "window_dev": 2.4
+      }
+    }
+  ],
+  "entry_rules": [
+    {
+      "type": "threshold_below",
+      "params": {
+        "indicator": "RSI_12",
+        "value": 30
+      }
+    }
+  ],
+  "exit_rules": [
+    {
+      "type": "threshold_above",
+      "params": {
+        "indicator": "RSI_12",
+        "value": 70
+      }
+    }
+  ],
+  "risk": {
+    "stop_loss_pct": 0.017,
+    "take_profit_pct": 0.038,
+    "max_position_pct": 0.14,
+    "max_drawdown_pct": 0.13
+  },
+  "pair": "EURUSD=X",
+  "timeframe": "1d",
+  "id": "strat_6e5e6d57",
+  "version": 1,
+  "parent_id": null,
+  "created_at": "2026-03-09T15:57:48.038296"
+}

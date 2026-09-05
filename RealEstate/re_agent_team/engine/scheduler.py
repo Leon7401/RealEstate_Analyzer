@@ -10,6 +10,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from typing import Optional
+import requests
 from config.settings import (
     BATCH_TARGET_PREFECTURES,
     RENTAL_REFRESH_INTERVAL_HOURS,
@@ -19,6 +20,10 @@ from config.settings import (
     PROPERTY_REFRESH_MAX_PAGES,
     PROPERTY_ANALYZE_LIMIT,
     PROPERTY_ANALYZE_INCLUDE_REBUILD,
+    LISTING_VERIFY_INTERVAL_HOURS,
+    LISTING_VERIFY_BATCH,
+    LISTING_VERIFY_STALE_HOURS,
+    LISTING_VERIFY_CONFIRM_FAILURES,
 )
 
 logger = logging.getLogger("Scheduler")
@@ -62,6 +67,7 @@ class ScrapeScheduler:
         GROWTH_INTERVAL_HOURS = 6  # 6時間ごとにデータ成長パイプライン
         rental_last_run = None
         property_last_run = None
+        listing_verify_last_run = None
 
         while not self._stop_event.is_set():
             try:
@@ -96,10 +102,77 @@ class ScrapeScheduler:
             except Exception as e:
                 logger.error(f"成長パイプラインエラー: {e}")
 
+            # 掲載有無チェック（消失物件をdelisted化）
+            try:
+                now = datetime.now()
+                if listing_verify_last_run is None or (now - listing_verify_last_run) >= timedelta(hours=LISTING_VERIFY_INTERVAL_HOURS):
+                    self._run_listing_source_verification()
+                    listing_verify_last_run = now
+            except Exception as e:
+                logger.error(f"掲載有無チェックエラー: {e}")
+
             self._stop_event.wait(self.CHECK_INTERVAL_SEC)
 
         self._running = False
         logger.info("スケジューラループ終了")
+
+    @staticmethod
+    def _check_source_alive(url: str) -> tuple[bool, Optional[int], str]:
+        if not url:
+            return False, None, "no_url"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            )
+        }
+        try:
+            r = requests.head(url, allow_redirects=True, timeout=12, headers=headers)
+            status = int(r.status_code)
+            if status in (403, 405):
+                r = requests.get(url, allow_redirects=True, timeout=15, headers=headers, stream=True)
+                status = int(r.status_code)
+            alive = 200 <= status < 400
+            return alive, status, ""
+        except Exception as e:
+            return False, None, str(e)
+
+    def _run_listing_source_verification(self):
+        """掲載URLの生存確認を定期実行し、消失物件をdelisted化"""
+        from storage.database import Database
+
+        db = Database()
+        logger.info("=== 定期掲載有無チェック開始 ===")
+        summary = {}
+        for table in ("properties", "land_listings"):
+            rows = db.get_source_verification_targets(
+                table=table,
+                limit=max(1, int(LISTING_VERIFY_BATCH)),
+                stale_hours=max(1, int(LISTING_VERIFY_STALE_HOURS)),
+            )
+            checked = 0
+            alive_cnt = 0
+            fail_cnt = 0
+            for row in rows:
+                checked += 1
+                alive, status, note = self._check_source_alive(str(row.get("source_url") or ""))
+                if alive:
+                    alive_cnt += 1
+                else:
+                    fail_cnt += 1
+                db.record_source_verification_result(
+                    table=table,
+                    row_id=row.get("id"),
+                    is_alive=alive,
+                    http_status=status,
+                    note=note,
+                    confirm_failures=max(1, int(LISTING_VERIFY_CONFIRM_FAILURES)),
+                )
+            summary[table] = {"checked": checked, "alive": alive_cnt, "failed": fail_cnt}
+            logger.info(
+                f"  {table}: checked={checked}, alive={alive_cnt}, failed={fail_cnt}"
+            )
+        logger.info(f"=== 定期掲載有無チェック完了: {summary} ===")
 
     def _run_growth_pipeline(self):
         """メッシュデータ成長パイプラインを実行"""
@@ -212,10 +285,32 @@ class ScrapeScheduler:
                 except Exception:
                     continue
 
-            # 価格がある物件を優先して判定（上限あり）
-            candidates = [p for p in all_props if p.asking_price and p.asking_price > 0]
-            candidates.sort(key=lambda x: x.asking_price or 0, reverse=True)
-            candidates = candidates[: max(1, PROPERTY_ANALYZE_LIMIT)]
+            # スクレイピング直後に重複統合してから判定
+            dedupe_result = db.merge_duplicate_properties(
+                dry_run=False,
+                min_group_size=2,
+                max_groups=5000,
+            )
+            logger.info(
+                f"  重複統合: groups={dedupe_result.get('group_count',0)} "
+                f"merged={dedupe_result.get('merged_records',0)} "
+                f"relinked={dedupe_result.get('relinked_judgments',0)}"
+            )
+
+            # 価格がある物件を優先して判定（統合後のDBから取得）
+            with db._conn() as conn:
+                rows = conn.execute("""
+                    SELECT *
+                    FROM properties
+                    WHERE prefecture_code IN ('13','14','11','12')
+                      AND COALESCE(listing_status, 'active') = 'active'
+                      AND source IN ('楽待', '健美家', '不動産投資連合隊', 'rakumachi', 'kenbiya', 'rals')
+                      AND asking_price IS NOT NULL
+                      AND asking_price > 0
+                    ORDER BY asking_price DESC, updated_at DESC
+                    LIMIT ?
+                """, (max(1, PROPERTY_ANALYZE_LIMIT),)).fetchall()
+            candidates = [Property.from_dict(dict(r)) for r in rows]
 
             judged = 0
             for prop in candidates:
@@ -258,7 +353,7 @@ class ScrapeScheduler:
 
         for config in configs:
             try:
-                interval_hours = config.get("run_interval_hours", 24)
+                interval_hours = int(config.get("run_interval_hours") or 24)
                 last_run = config.get("last_run_at")
 
                 # 前回実行からの経過チェック
@@ -277,8 +372,9 @@ class ScrapeScheduler:
                 if isinstance(pref_codes, str):
                     pref_codes = json.loads(pref_codes)
 
+                total_saved = 0
                 for pref in pref_codes:
-                    bp.run_land_pipeline(
+                    out = bp.run_land_pipeline(
                         source=config.get("source", "suumo"),
                         pref=pref,
                         price_min=config.get("price_min"),
@@ -286,12 +382,19 @@ class ScrapeScheduler:
                         area_min=config.get("area_min"),
                         walk_max=config.get("walk_max"),
                         max_pages=config.get("max_pages", 3),
-                    )
+                    ) or {}
+                    total_saved += int(out.get("listings_saved") or 0)
 
                 # 重複検出
                 dupes = db.detect_duplicates()
                 if dupes > 0:
                     logger.info(f"  重複検出: {dupes}件マーク")
+
+                # 結果が少なければページ数を増やし、多すぎれば抑える（自己改善）
+                try:
+                    db.tune_scrape_config_max_pages(config["id"], total_saved)
+                except Exception as e:
+                    logger.warning(f"  設定チューニング失敗: {e}")
 
                 # 最終実行時刻を更新
                 db.update_scrape_config_last_run(config["id"])

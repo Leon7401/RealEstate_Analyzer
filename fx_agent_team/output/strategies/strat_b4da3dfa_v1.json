@@ -1,0 +1,59 @@
+{
+  "indicators": [
+    {
+      "name": "SMA",
+      "params": {
+        "window": 43
+      }
+    },
+    {
+      "name": "SMA",
+      "params": {
+        "window": 140
+      }
+    },
+    {
+      "name": "RSI",
+      "params": {
+        "window": 10
+      }
+    }
+  ],
+  "entry_rules": [
+    {
+      "type": "cross_above",
+      "params": {
+        "fast": "SMA_43",
+        "slow": "SMA_140"
+      }
+    },
+    {
+      "type": "threshold_below",
+      "params": {
+        "indicator": "RSI_10",
+        "value": 70
+      }
+    }
+  ],
+  "exit_rules": [
+    {
+      "type": "cross_below",
+      "params": {
+        "fast": "SMA_43",
+        "slow": "SMA_140"
+      }
+    }
+  ],
+  "risk": {
+    "stop_loss_pct": 0.04,
+    "take_profit_pct": 0.101,
+    "max_position_pct": 0.09,
+    "max_drawdown_pct": 0.18
+  },
+  "pair": "EURUSD=X",
+  "timeframe": "1d",
+  "id": "strat_b4da3dfa",
+  "version": 1,
+  "parent_id": null,
+  "created_at": "2026-03-09T15:58:28.187835"
+}

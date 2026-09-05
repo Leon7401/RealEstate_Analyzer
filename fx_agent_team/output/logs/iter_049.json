@@ -1,0 +1,82 @@
+{
+  "iteration": 49,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "Stochastic",
+        "params": {
+          "window": 16,
+          "smooth_window": 4
+        }
+      },
+      {
+        "name": "RSI",
+        "params": {
+          "window": 14
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "threshold_below",
+        "params": {
+          "indicator": "stoch_16",
+          "value": 20
+        }
+      },
+      {
+        "type": "threshold_below",
+        "params": {
+          "indicator": "RSI_14",
+          "value": 35
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "threshold_above",
+        "params": {
+          "indicator": "stoch_16",
+          "value": 80
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.032766697184339236,
+      "take_profit_pct": 0.059,
+      "max_position_pct": 0.08,
+      "max_drawdown_pct": 0.16
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_c1e6daf4",
+    "version": 2,
+    "parent_id": "strat_a20517c5",
+    "created_at": "2026-03-09T15:58:29.304799"
+  },
+  "result": {
+    "strategy_id": "strat_c1e6daf4",
+    "total_return": "16.63%",
+    "sharpe_ratio": "0.506",
+    "max_drawdown": "-6.85%",
+    "win_rate": "67.65%",
+    "profit_factor": "1.860",
+    "total_trades": 34,
+    "calmar_ratio": "2.427"
+  },
+  "critique": {
+    "grade": "B",
+    "weaknesses": [],
+    "suggestions": [
+      "Fine-tune entry timing to improve Sharpe ratio"
+    ],
+    "scores": {
+      "sharpe": "0.5061",
+      "max_drawdown": "-0.0685",
+      "win_rate": "0.6765",
+      "profit_factor": "1.8598",
+      "total_trades": 34,
+      "total_return": "0.1663"
+    }
+  }
+}

@@ -7,6 +7,7 @@ import math
 import hashlib
 import logging
 import statistics
+import requests
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Any, Dict, List, Tuple
@@ -63,6 +64,9 @@ from config.settings import (
     INSURANCE_RATE,
     PROPERTY_TAX_RATE,
     CITY_PLANNING_TAX_RATE,
+    LISTING_VERIFY_BATCH,
+    LISTING_VERIFY_STALE_HOURS,
+    LISTING_VERIFY_CONFIRM_FAILURES,
 )
 
 logging.basicConfig(
@@ -262,7 +266,7 @@ def _dedupe_properties_for_display(props: List[dict]) -> List[dict]:
     return unique_rows
 
 
-def _sanitize_station_refs_for_display(props: List[dict]):
+def _sanitize_station_refs_for_display(props: List[dict], persist_updates: bool = True):
     """表示前に最寄駅の整合性を補正（住所/座標と矛盾する駅名を修正）"""
     if not props:
         return
@@ -362,7 +366,7 @@ def _sanitize_station_refs_for_display(props: List[dict]):
             except Exception:
                 pass
 
-    if prop_updates or land_updates:
+    if persist_updates and (prop_updates or land_updates):
         with db._conn() as conn:
             if prop_updates:
                 conn.executemany(
@@ -495,6 +499,26 @@ def _refresh_property_from_source(raw: Dict[str, Any], use_browser: bool = False
     }
 
 
+def _check_source_alive(url: str) -> Tuple[bool, Optional[int], str]:
+    if not url:
+        return False, None, "no_url"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        resp = requests.head(url, allow_redirects=True, timeout=12, headers=headers)
+        status = int(resp.status_code)
+        if status in (403, 405):
+            resp = requests.get(url, allow_redirects=True, timeout=15, headers=headers, stream=True)
+            status = int(resp.status_code)
+        return (200 <= status < 400), status, ""
+    except Exception as e:
+        return False, None, str(e)
+
+
 # ===== ページ =====
 
 @app.get("/", response_class=HTMLResponse)
@@ -584,6 +608,7 @@ async def get_stations(prefecture_code: str):
 @app.get("/api/sample-properties")
 async def get_sample_properties(
     include_land: bool = True,
+    include_delisted: bool = False,
     sort_by: str = "updated_at",
     prefecture_code: str = "metro",
     station_filter: str = "",
@@ -594,7 +619,7 @@ async def get_sample_properties(
     """DB物件 + 土地物件（必要時のみ静的サンプルを補完）"""
     props = []
     # DB properties (scraped etc)
-    db_props = db.get_properties(limit=1000)
+    db_props = db.get_properties(limit=1000, active_only=not include_delisted)
     # DBが空の時だけ静的サンプルを補完（古いサンプル混入を防止）
     if not db_props:
         sample_file = DATA_DIR / "sample_properties.json"
@@ -612,7 +637,7 @@ async def get_sample_properties(
 
     # 土地物件+ベストプラン統合
     if include_land:
-        land_rows = db.get_land_listings(limit=1000)
+        land_rows = db.get_land_listings(limit=1000, active_only=not include_delisted)
         for ll in land_rows:
             plans = db.get_building_plans(ll["id"]) if ll.get("id") else []
             best_plan = max(plans, key=lambda x: x.get("estimated_yield") or 0) if plans else None
@@ -661,6 +686,7 @@ async def get_sample_properties(
                 "source": ll.get("source", "土地"),
                 "source_url": ll.get("source_url"),
                 "grade": lj.get("grade") if lj else None,
+                "listing_status": ll.get("listing_status") or "active",
                 "_type": "land",
                 "_building_presence": "land_only",
                 "_land_listing_id": ll.get("id"),
@@ -712,20 +738,23 @@ async def get_sample_properties(
     if sort_by in sort_keys:
         props.sort(key=sort_keys[sort_by])
 
-    # 座標なし物件に駅マスタから推定座標を付与
-    _estimate_missing_coords(props)
-    # 座標/住所と矛盾する最寄駅を補正
-    _sanitize_station_refs_for_display(props)
+    # 表示APIではDB更新を伴う補正を避け、読み取り専用で軽量に座標/駅を補完
+    _estimate_missing_coords(props, persist_updates=False, geocode_budget=20)
+    _sanitize_station_refs_for_display(props, persist_updates=False)
     # 補正後に重複除外
     props = _dedupe_properties_for_display(props)
     return JSONResponse(content={"properties": props, "total": len(props)})
 
 
-def _estimate_missing_coords(props: list):
+def _estimate_missing_coords(props: list, persist_updates: bool = True, geocode_budget: int = 120):
     """座標なし物件に最寄駅+徒歩から推定座標を付与"""
     import random
     import math
     from data.geocoder import Geocoder
+
+    geocoder = Geocoder()
+    # 表示API内での過剰な外部ジオコードを抑止
+    geocode_budget = max(0, int(geocode_budget or 0))
 
     # 駅マスタをキャッシュ（同名駅の都県跨ぎを区別する）
     if not hasattr(_estimate_missing_coords, "_station_cache"):
@@ -854,10 +883,13 @@ def _estimate_missing_coords(props: list):
                     if addr0 in geocode_cache:
                         gc0 = geocode_cache[addr0]
                     else:
-                        try:
-                            gc0 = Geocoder().geocode(addr0)
-                        except Exception:
-                            gc0 = None
+                        gc0 = None
+                        if geocode_budget > 0:
+                            try:
+                                gc0 = geocoder.geocode(addr0)
+                            except Exception:
+                                gc0 = None
+                            geocode_budget -= 1
                         geocode_cache[addr0] = gc0
                     if gc0:
                         glat0, glng0 = float(gc0[0]), float(gc0[1])
@@ -878,10 +910,13 @@ def _estimate_missing_coords(props: list):
             if key in geocode_cache:
                 gc = geocode_cache[key]
             else:
-                try:
-                    gc = Geocoder().geocode(addr)
-                except Exception:
-                    gc = None
+                gc = None
+                if geocode_budget > 0:
+                    try:
+                        gc = geocoder.geocode(addr)
+                    except Exception:
+                        gc = None
+                    geocode_budget -= 1
                 geocode_cache[key] = gc
             if gc:
                 glat, glng = gc
@@ -929,8 +964,8 @@ def _estimate_missing_coords(props: list):
         if p.get("id"):
             updates.append((p["latitude"], p["longitude"], str(p["id"])))
 
-    # 補正した座標はDBにも反映（次回以降の誤配置を抑止）
-    if updates:
+    # 補正した座標のDB反映は必要時のみ（表示APIではロック回避のため無効化）
+    if persist_updates and updates:
         with db._conn() as conn:
             conn.executemany(
                 "UPDATE properties SET latitude=?, longitude=?, updated_at=datetime('now','localtime') WHERE id=?",
@@ -2469,6 +2504,150 @@ async def dedupe_properties(request: Request):
         )
 
 
+@app.put("/api/properties/{property_id}")
+async def update_property(property_id: str, request: Request):
+    """物件プロット/DB情報の手動更新"""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    with db._conn() as conn:
+        row = conn.execute("SELECT * FROM properties WHERE id=? LIMIT 1", (property_id,)).fetchone()
+        if not row:
+            return JSONResponse(content={"error": "not found"}, status_code=404)
+        merged = dict(row)
+
+        allowed = [
+            "name", "address", "prefecture_code", "city_code",
+            "latitude", "longitude", "asking_price",
+            "land_area", "building_area", "structure",
+            "built_year", "building_age", "units",
+            "current_rent_annual", "gross_yield",
+            "nearest_station", "station_distance_min",
+            "source", "source_url",
+        ]
+        touched = False
+        for f in allowed:
+            if f in data:
+                merged[f] = data.get(f)
+                touched = True
+        if not touched:
+            return JSONResponse(content={"error": "no fields to update"}, status_code=400)
+
+        if "source_url" in data:
+            merged["source_url"] = db._normalize_source_url(merged.get("source_url"))
+
+        try:
+            sid = resolve_station_id(
+                nearest_station_text=merged.get("nearest_station"),
+                lat=merged.get("latitude"),
+                lon=merged.get("longitude"),
+                pref_code=merged.get("prefecture_code"),
+            )
+            merged["station_id"] = sid
+            if sid and sid in STATION_MAP:
+                merged["nearest_station"] = STATION_MAP[sid]["name"]
+            elif not (merged.get("nearest_station") or "").strip():
+                merged["station_id"] = None
+        except Exception:
+            pass
+
+        merged["data_json"] = json.dumps(merged, ensure_ascii=False)
+
+        conn.execute(
+            """
+            UPDATE properties
+            SET name=?, address=?, prefecture_code=?, city_code=?,
+                latitude=?, longitude=?, asking_price=?,
+                land_area=?, building_area=?, structure=?,
+                built_year=?, building_age=?, units=?,
+                current_rent_annual=?, gross_yield=?,
+                nearest_station=?, station_distance_min=?, station_id=?,
+                source=?, source_url=?, data_json=?,
+                updated_at=datetime('now','localtime')
+            WHERE id=?
+            """,
+            (
+                merged.get("name"),
+                merged.get("address"),
+                merged.get("prefecture_code"),
+                merged.get("city_code"),
+                merged.get("latitude"),
+                merged.get("longitude"),
+                merged.get("asking_price"),
+                merged.get("land_area"),
+                merged.get("building_area"),
+                merged.get("structure"),
+                merged.get("built_year"),
+                merged.get("building_age"),
+                merged.get("units"),
+                merged.get("current_rent_annual"),
+                merged.get("gross_yield"),
+                merged.get("nearest_station"),
+                merged.get("station_distance_min"),
+                merged.get("station_id"),
+                merged.get("source"),
+                merged.get("source_url"),
+                merged.get("data_json"),
+                property_id,
+            ),
+        )
+
+        updated = conn.execute("SELECT * FROM properties WHERE id=? LIMIT 1", (property_id,)).fetchone()
+    return JSONResponse(content={"status": "ok", "property": dict(updated)})
+
+
+@app.post("/api/listings/verify-source")
+async def verify_listing_sources(request: Request):
+    """
+    掲載URLの生存確認を実行し、消失確認物件をdelisted化する。
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    limit = int(data.get("limit", LISTING_VERIFY_BATCH) or LISTING_VERIFY_BATCH)
+    stale_hours = int(data.get("stale_hours", LISTING_VERIFY_STALE_HOURS) or LISTING_VERIFY_STALE_HOURS)
+    confirm_failures = int(data.get("confirm_failures", LISTING_VERIFY_CONFIRM_FAILURES) or LISTING_VERIFY_CONFIRM_FAILURES)
+
+    out: Dict[str, Dict[str, int]] = {}
+    for table in ("properties", "land_listings"):
+        rows = db.get_source_verification_targets(
+            table=table,
+            limit=max(1, limit),
+            stale_hours=max(1, stale_hours),
+        )
+        checked = 0
+        alive_cnt = 0
+        failed_cnt = 0
+        for row in rows:
+            checked += 1
+            alive, status, note = _check_source_alive(str(row.get("source_url") or ""))
+            if alive:
+                alive_cnt += 1
+            else:
+                failed_cnt += 1
+            db.record_source_verification_result(
+                table=table,
+                row_id=row.get("id"),
+                is_alive=alive,
+                http_status=status,
+                note=note,
+                confirm_failures=max(1, confirm_failures),
+            )
+        out[table] = {"checked": checked, "alive": alive_cnt, "failed": failed_cnt}
+
+    return JSONResponse(content={
+        "status": "ok",
+        "limit": max(1, limit),
+        "stale_hours": max(1, stale_hours),
+        "confirm_failures": max(1, confirm_failures),
+        "result": out,
+    })
+
+
 @app.post("/api/stations/reconcile")
 async def reconcile_stations(request: Request):
     """既存データの駅名/駅IDを実在駅に補正（物件/賃料/土地 + 重複整理）"""
@@ -2849,11 +3028,13 @@ async def export_properties_csv():
 async def list_land_listings(
     station: str = "", min_price: int = None, max_price: int = None,
     min_area: float = None, status: str = "", limit: int = 500,
+    include_delisted: bool = False,
 ):
     """土地物件一覧"""
     rows = db.get_land_listings(
         station=station, min_price=min_price, max_price=max_price,
         min_area=min_area, status=status, limit=limit,
+        active_only=not include_delisted,
     )
     return JSONResponse(content={"count": len(rows), "listings": rows})
 
@@ -3089,7 +3270,8 @@ async def update_land_listing(listing_id: int, request: Request):
             conn.execute("DELETE FROM land_judgments WHERE land_listing_id=?", (listing_id,))
         db.update_land_listing_status(listing_id, "pending")
 
-    return JSONResponse(content={"status": "ok"})
+    updated = db.get_land_listing_by_id(listing_id)
+    return JSONResponse(content={"status": "ok", "listing": updated})
 
 
 @app.post("/api/land-listings/scrape")

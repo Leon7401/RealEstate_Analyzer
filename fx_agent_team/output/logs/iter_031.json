@@ -1,0 +1,82 @@
+{
+  "iteration": 31,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "BollingerBands",
+        "params": {
+          "window": 24,
+          "window_dev": 2.9
+        }
+      },
+      {
+        "name": "ATR",
+        "params": {
+          "window": 17
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "band_breakout",
+        "params": {
+          "upper_band": "bb_upper_24"
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "band_breakdown",
+        "params": {
+          "lower_band": "bb_lower_24"
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.019,
+      "take_profit_pct": 0.037,
+      "max_position_pct": 0.05,
+      "max_drawdown_pct": 0.16
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_09d3c98c",
+    "version": 1,
+    "parent_id": null,
+    "created_at": "2026-03-09T15:58:28.783619"
+  },
+  "result": {
+    "strategy_id": "strat_09d3c98c",
+    "total_return": "-3.08%",
+    "sharpe_ratio": "-0.131",
+    "max_drawdown": "-7.96%",
+    "win_rate": "28.57%",
+    "profit_factor": "0.744",
+    "total_trades": 7,
+    "calmar_ratio": "-0.387"
+  },
+  "critique": {
+    "grade": "F",
+    "weaknesses": [
+      "Negative risk-adjusted return",
+      "Very low win rate (< 30%)",
+      "Unprofitable (profit factor < 1.0)",
+      "Too few trades for statistical significance",
+      "Negative total return"
+    ],
+    "suggestions": [
+      "Change strategy template entirely",
+      "Adjust entry thresholds to be more selective",
+      "Increase take-profit or tighten stop-loss",
+      "Relax entry conditions to generate more signals"
+    ],
+    "scores": {
+      "sharpe": "-0.1310",
+      "max_drawdown": "-0.0796",
+      "win_rate": "0.2857",
+      "profit_factor": "0.7435",
+      "total_trades": 7,
+      "total_return": "-0.0308"
+    }
+  }
+}

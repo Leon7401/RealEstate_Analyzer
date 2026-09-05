@@ -389,6 +389,14 @@
                             <input type="checkbox" id="auto-include-rebuild" checked>
                             中古は建替えシナリオも比較
                         </label>
+                        <label style="font-size:0.7rem;color:#90a4ae;">
+                            <input type="checkbox" id="prop-include-delisted">
+                            掲載終了も表示
+                        </label>
+                    </div>
+                    <div class="form-row" style="gap:4px;margin-bottom:6px;">
+                        <button id="btn-verify-listings" class="btn-secondary" style="flex:1;height:28px;font-size:0.72rem;">掲載チェック今すぐ実行</button>
+                        <span id="verify-listings-result" style="flex:2;font-size:0.7rem;color:#90a4ae;align-self:center;"></span>
                     </div>
                     <!-- 物件一覧（スクロール） -->
                     <div id="prop-list" style="max-height:250px;overflow-y:auto;margin-bottom:6px;border:1px solid #1e3a5f;border-radius:4px;">
@@ -437,6 +445,10 @@
                     </div>
                     <div class="form-row">
                         <div class="form-group">
+                            <label>最寄駅(手動修正用)</label>
+                            <input type="text" id="prop-nearest-station" placeholder="例: 中山">
+                        </div>
+                        <div class="form-group">
                             <label>築年数</label>
                             <input type="number" id="prop-age" placeholder="15">
                         </div>
@@ -453,6 +465,16 @@
                         <div class="form-group">
                             <label>戸数</label>
                             <input type="number" id="prop-units" placeholder="8">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>緯度(手動プロット補正)</label>
+                            <input type="number" id="prop-latitude" step="0.000001" placeholder="35.514697">
+                        </div>
+                        <div class="form-group">
+                            <label>経度(手動プロット補正)</label>
+                            <input type="number" id="prop-longitude" step="0.000001" placeholder="139.539533">
                         </div>
                     </div>
                     <details class="loan-details">
@@ -473,6 +495,8 @@
                         </div>
                     </details>
                     <button id="btn-analyze" class="btn-primary" style="margin-top:8px;">投資判定実行</button>
+                    <button id="btn-save-manual-update" class="btn-secondary" style="margin-top:8px;">選択中プロットをDBへ手動保存</button>
+                    <div id="manual-update-result" style="margin-top:6px;font-size:0.75rem;"></div>
                 </div>
 
                 <!-- 判定結果 -->
