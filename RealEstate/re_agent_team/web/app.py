@@ -543,13 +543,16 @@ def _check_source_alive(url: str) -> Tuple[bool, Optional[int], str]:
 async def index(request: Request):
     import hashlib, time
     cache_bust = hashlib.md5(str(time.time()).encode()).hexdigest()[:8]
-    return templates.TemplateResponse("index.html", {
-        "request": request,
-        "center": MAP_DEFAULT_CENTER,
-        "zoom": MAP_DEFAULT_ZOOM,
-        "api_configured": bool(REINFOLIB_API_KEY),
-        "cache_bust": cache_bust,
-    })
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "center": MAP_DEFAULT_CENTER,
+            "zoom": MAP_DEFAULT_ZOOM,
+            "api_configured": bool(REINFOLIB_API_KEY),
+            "cache_bust": cache_bust,
+        },
+    )
 
 
 @app.get("/healthz")
@@ -4189,11 +4192,14 @@ async def analysis_metrics(prefecture_code: str = "13"):
 @app.get("/analysis", response_class=HTMLResponse)
 async def analysis_page(request: Request):
     """駅単位歪み分析ページ"""
-    return templates.TemplateResponse("analysis.html", {
-        "request": request,
-        "center": MAP_DEFAULT_CENTER,
-        "zoom": MAP_DEFAULT_ZOOM,
-    })
+    return templates.TemplateResponse(
+        request,
+        "analysis.html",
+        {
+            "center": MAP_DEFAULT_CENTER,
+            "zoom": MAP_DEFAULT_ZOOM,
+        },
+    )
 
 
 # ===== 資産性分析API =====
