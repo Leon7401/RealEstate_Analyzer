@@ -86,6 +86,18 @@ function applyCachedAnalysisToProperty(p) {
 function persistPropertyAnalysisResult(p, row) {
     if (!p || !row) return;
     const selected = row.selected || {};
+    if (typeof window.applySelectedJudgment === 'function') {
+        window.applySelectedJudgment(p, selected);
+    } else {
+        if (selected.grade) {
+            p._analysis_grade = selected.grade;
+            p.grade = selected.grade;
+        }
+        if (selected.score != null) p._analysis_score = selected.score;
+        if (selected.recommendation) p._analysis_recommendation = selected.recommendation;
+        if (selected.scenario) p._analysis_scenario = selected.scenario;
+        p._selected = selected;
+    }
     const payload = {
         grade: selected.grade || p.grade || null,
         gross_yield: selected.gross_yield ?? p.gross_yield ?? null,
@@ -105,15 +117,20 @@ function persistPropertyAnalysisResult(p, row) {
 function applyServerCachedAnalysisToProperty(p, cacheRow) {
     if (!p || !cacheRow) return;
     const selected = cacheRow.selected || {};
-    if (selected.grade) {
-        p._analysis_grade = selected.grade;
-        p.grade = selected.grade;
+    if (typeof window.applySelectedJudgment === 'function') {
+        window.applySelectedJudgment(p, selected);
+    } else {
+        if (selected.grade) {
+            p._analysis_grade = selected.grade;
+            p.grade = selected.grade;
+        }
+        if (selected.score != null) p._analysis_score = selected.score;
+        if (selected.recommendation) p._analysis_recommendation = selected.recommendation;
+        if (selected.scenario) p._analysis_scenario = selected.scenario;
+        p._selected = selected;
     }
     if (selected.gross_yield != null) p.gross_yield = selected.gross_yield;
     if (selected.net_yield != null) p.net_yield = selected.net_yield;
-    if (selected.score != null) p._analysis_score = selected.score;
-    if (selected.recommendation) p._analysis_recommendation = selected.recommendation;
-    if (selected.scenario) p._analysis_scenario = selected.scenario;
     if (selected.confidence != null) p._analysis_confidence = selected.confidence;
     p._scenario_as_is = cacheRow.as_is || p._scenario_as_is || null;
     p._scenario_rebuild = cacheRow.rebuild || p._scenario_rebuild || null;
@@ -156,24 +173,46 @@ function switchScraperPanel(mode) {
 
 // ===== ユーティリティ =====
 
-function gradeColor(grade) {
-    const colors = {S:'#1a9641',A:'#4dac26',B:'#b8e186',C:'#fdb863',D:'#e66101',F:'#d7191c'};
-    return colors[normalizeGrade(grade)] || '#546e7a';
+function gradeColor(grade, opts) {
+    if (typeof window.gradeColor === 'function' && window.gradeColor !== gradeColor) {
+        return window.gradeColor(grade, opts);
+    }
+    const colors = (window.GRADE_PALETTE) || {S:'#1a9641',A:'#4dac26',B:'#b8e186',C:'#fdb863',D:'#e66101',F:'#d7191c'};
+    return colors[normalizeGrade(grade)] || (opts && opts.fallback) || '#546e7a';
 }
 
 function normalizeGrade(grade) {
+    if (typeof window.normalizeGrade === 'function' && window.normalizeGrade !== normalizeGrade) {
+        return window.normalizeGrade(grade);
+    }
     const g = String(grade || '').trim().toUpperCase();
     return ['S', 'A', 'B', 'C', 'D', 'F'].includes(g) ? g : '';
 }
 
 function resolvePropertyGrade(p) {
+    if (typeof window.resolvePropertyGrade === 'function' && window.resolvePropertyGrade !== resolvePropertyGrade) {
+        return window.resolvePropertyGrade(p);
+    }
     if (!p) return '';
+    // 投資グレードのみ（資産性グレードは混ぜない）
     return normalizeGrade(
+        (p._selected && p._selected.grade) ||
         p._analysis_grade ||
         p.grade ||
-        p.asset_grade ||
         p.judge_grade
     );
+}
+
+function resolvePropertyScore(p) {
+    if (typeof window.resolvePropertyScore === 'function') return window.resolvePropertyScore(p);
+    if (!p) return 0;
+    if (p._selected && p._selected.score != null) return Number(p._selected.score) || 0;
+    if (p._analysis_score != null) return Number(p._analysis_score) || 0;
+    return 0;
+}
+
+function assetGradeColor(grade) {
+    return gradeColor(grade, { asset: true });
 }
 
 function getSelectedPrefectureCodes(group, fallback = ['13']) {
@@ -536,10 +575,10 @@ function sortPropertiesForView(props, sortBy) {
         const by = Number(b.net_yield ?? b.gross_yield ?? 0);
         const ap = Number(a.asking_price ?? 0);
         const bp = Number(b.asking_price ?? 0);
-        const as = Number(a._analysis_score ?? 0);
-        const bs = Number(b._analysis_score ?? 0);
-        const ag = gradeScore(a.grade);
-        const bg = gradeScore(b.grade);
+        const as = resolvePropertyScore(a);
+        const bs = resolvePropertyScore(b);
+        const ag = gradeScore(resolvePropertyGrade(a));
+        const bg = gradeScore(resolvePropertyGrade(b));
         const ad = Number(a.station_distance_min ?? 999);
         const bd = Number(b.station_distance_min ?? 999);
         const au = String(a.updated_at || a.fetched_at || '');
@@ -566,18 +605,18 @@ function applyRankOrderToProperties(sortedProps) {
 
 function buildRankingFromProperties(props) {
     const rows = (props || [])
-        .filter(p => p.grade || p._analysis_score != null)
+        .filter(p => resolvePropertyGrade(p) || resolvePropertyScore(p))
         .map(p => ({
             id: p.id || null,
             client_index: sampleProperties.indexOf(p),
             name: p.name || p.address || '物件',
-            grade: p.grade || '?',
-            score: Number(p._analysis_score || 0),
-            recommendation: p._analysis_recommendation || '',
+            grade: resolvePropertyGrade(p) || '?',
+            score: resolvePropertyScore(p),
+            recommendation: p._analysis_recommendation || (p._selected && p._selected.recommendation) || '',
             net_yield: p.net_yield ?? null,
             hold_sell_roi: p._scenario_as_is?.simulation?.hold_sell_roi ?? p._scenario_rebuild?.simulation?.hold_sell_roi ?? null,
             exit_cap_rate: p._scenario_as_is?.valuation?.exit_cap_rate ?? p._scenario_rebuild?.valuation?.exit_cap_rate ?? null,
-            scenario: p._analysis_scenario || null,
+            scenario: p._analysis_scenario || (p._selected && p._selected.scenario) || null,
         }));
     const gradeOrder = { S: 0, A: 1, B: 2, C: 3, D: 4, F: 5, '?': 9 };
     rows.sort((a, b) => {
@@ -678,8 +717,7 @@ function renderPropertyList(props) {
         const buildingPresence = p._building_presence
             || (isLand ? 'land_only' : (p.building_area || p.structure ? 'building' : 'unknown'));
         const scenario = p._analysis_scenario === 'rebuild' ? '建替' : (p._analysis_scenario === 'as_is' ? '現況' : '');
-        const gradeColors = {S:'#4caf50',A:'#66bb6a',B:'#ffd54f',C:'#ffa726',D:'#ef5350',F:'#b71c1c'};
-        const gc = gradeColors[grade] || '#546e7a';
+        const gc = gradeColor(grade);
         const typeBadge = isLand
             ? '<span style="background:#1565c0;color:#fff;padding:0 4px;border-radius:2px;font-size:0.6rem;margin-right:4px;">土地</span>'
             : '<span style="background:#2e7d32;color:#fff;padding:0 4px;border-radius:2px;font-size:0.6rem;margin-right:4px;">収益</span>';
@@ -1451,7 +1489,7 @@ function showJudgmentResult(
     panel.style.display = 'block';
 
     // Grade badge (keep as-is)
-    const gradeColors = {S:'#4caf50',A:'#66bb6a',B:'#ffd54f',C:'#ffa726',D:'#ef5350',F:'#b71c1c'};
+    const gradeColors = window.GRADE_PALETTE || {S:'#1a9641',A:'#4dac26',B:'#b8e186',C:'#fdb863',D:'#e66101',F:'#d7191c'};
     document.getElementById('result-grade').textContent = judgment.grade;
     document.getElementById('result-grade').style.background = gradeColors[judgment.grade] || '#78909c';
     document.getElementById('result-recommendation').textContent = judgment.recommendation;
@@ -2719,7 +2757,7 @@ async function loadLandListings() {
                         : (l.land_price / 10000).toLocaleString() + '万円')
                     : '価格不明';
                 const assetBadge = l.asset_grade && l.asset_grade !== '?'
-                    ? `<span style="background:${gradeColor(l.asset_grade)};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;font-weight:bold;margin-left:4px;">${l.asset_grade}${l.asset_score ? ' ' + l.asset_score.toFixed(0) : ''}</span>`
+                    ? `<span style="background:${gradeColor(l.asset_grade, { asset: true })};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;font-weight:bold;margin-left:4px;">${l.asset_grade}${l.asset_score ? ' ' + l.asset_score.toFixed(0) : ''}</span>`
                     : '';
                 html += `
                     <div class="land-listing-item" onclick="showLandDetail(${l.id})" style="padding:8px;border-bottom:1px solid #263238;cursor:pointer;">
@@ -2755,7 +2793,7 @@ async function loadLandListings() {
                 : '価格不明';
             const yieldLabel = p.estimated_yield ? (p.estimated_yield * 100).toFixed(2) + '%' : '';
             const assetBadge = p.asset_grade && p.asset_grade !== '?'
-                ? `<span style="background:${gradeColor(p.asset_grade)};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;font-weight:bold;">${p.asset_grade}${p.asset_score ? ' ' + p.asset_score.toFixed(0) : ''}</span>`
+                ? `<span style="background:${gradeColor(p.asset_grade, { asset: true })};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;font-weight:bold;">${p.asset_grade}${p.asset_score ? ' ' + p.asset_score.toFixed(0) : ''}</span>`
                 : '';
             html += `
                 <div class="land-listing-item" onclick="showLandDetail(${p.id})" style="padding:8px;border-bottom:1px solid #263238;cursor:pointer;">
@@ -3590,7 +3628,7 @@ async function loadCompareTable() {
                 ? `${r.structure_type}${r.floors || ''}F ${r.max_units || ''}戸`
                 : '-';
             const asGrade = r.asset_grade
-                ? `<span style="background:${gradeColor(r.asset_grade)};color:#fff;padding:0 4px;border-radius:2px;">${r.asset_grade}</span> ${r.asset_score ? r.asset_score.toFixed(0) : ''}`
+                ? `<span style="background:${gradeColor(r.asset_grade, { asset: true })};color:#fff;padding:0 4px;border-radius:2px;">${r.asset_grade}</span> ${r.asset_score ? r.asset_score.toFixed(0) : ''}`
                 : '<span style="color:#546e7a;">-</span>';
             const jGrade = r.judge_grade
                 ? `<span style="background:${gradeColor(r.judge_grade)};color:#fff;padding:0 4px;border-radius:2px;">${r.judge_grade}</span> ${r.judge_score ? r.judge_score.toFixed(0) : ''}`
@@ -3782,7 +3820,7 @@ function showAssetScore(data) {
     if (!panel || !data) return;
     panel.style.display = 'block';
 
-    const gradeColors = {S:'#4caf50',A:'#66bb6a',B:'#ffd54f',C:'#ffa726',D:'#ef5350',F:'#b71c1c'};
+    const gradeColors = window.GRADE_PALETTE || {S:'#1a9641',A:'#4dac26',B:'#b8e186',C:'#fdb863',D:'#e66101',F:'#d7191c'};
     const gradeEl = document.getElementById('asset-grade');
     gradeEl.textContent = data.grade || '?';
     gradeEl.style.background = gradeColors[data.grade] || '#78909c';

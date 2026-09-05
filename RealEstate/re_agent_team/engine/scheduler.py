@@ -297,6 +297,27 @@ class ScrapeScheduler:
                 f"relinked={dedupe_result.get('relinked_judgments',0)}"
             )
 
+            # 座標品質検証（住所ジオコード優先・都県境界チェック）
+            try:
+                from services.geo_quality import GeoQualityService
+                geo = GeoQualityService(db=db)
+                with db._conn() as conn:
+                    geo_rows = [dict(r) for r in conn.execute("""
+                        SELECT * FROM properties
+                        WHERE prefecture_code IN ('13','14','11','12')
+                        ORDER BY updated_at DESC LIMIT 500
+                    """).fetchall()]
+                geo_stats = geo.enrich_properties(
+                    geo_rows, persist_updates=True, geocode_budget=80
+                )
+                logger.info(
+                    f"  座標検証: updated={geo_stats.get('updated',0)} "
+                    f"corrected={geo_stats.get('corrected',0)} "
+                    f"estimated={geo_stats.get('estimated',0)}"
+                )
+            except Exception as e:
+                logger.warning(f"  座標検証スキップ: {e}")
+
             # 価格がある物件を優先して判定（統合後のDBから取得）
             with db._conn() as conn:
                 rows = conn.execute("""

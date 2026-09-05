@@ -5,19 +5,14 @@ from typing import List, Dict, Optional
 from models.land_price import LandPrice, TransactionRecord, AreaLandPriceSummary
 from models.property import Property
 from models.judgment import JudgmentResult
+from contracts import GRADE_PALETTE, grade_color
 
 
 class MapDataBuilder:
     """Leaflet地図に表示するGeoJSONデータを構築"""
 
-    GRADE_COLORS = {
-        "S": "#1a9641",   # 濃い緑
-        "A": "#4dac26",   # 緑
-        "B": "#b8e186",   # 黄緑
-        "C": "#fdb863",   # オレンジ
-        "D": "#e66101",   # 赤オレンジ
-        "F": "#d7191c",   # 赤
-    }
+    # 投資グレード色は contracts.GRADE_PALETTE が単一ソース
+    GRADE_COLORS = GRADE_PALETTE
 
     PRICE_HEATMAP_COLORS = [
         (100000, "#313695"),     # ≤10万/㎡ 青
@@ -105,7 +100,7 @@ class MapDataBuilder:
                 continue
             j = judgment_map.get(prop.id)
             grade = j.grade if j else "?"
-            color = self.GRADE_COLORS.get(grade, "#999999")
+            color = grade_color(grade, fallback="#999999")
 
             properties_dict = {
                 "name": prop.name,

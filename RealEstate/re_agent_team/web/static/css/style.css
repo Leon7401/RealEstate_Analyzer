@@ -489,12 +489,12 @@ label:has(input[type="checkbox"]) {
     box-shadow: 0 2px 6px rgba(0,0,0,0.4);
 }
 
-.grade-marker.grade-S { background: #1a9641; }
-.grade-marker.grade-A { background: #4dac26; }
+.grade-marker.grade-S { background: #1a9641; color: #fff; }
+.grade-marker.grade-A { background: #4dac26; color: #fff; }
 .grade-marker.grade-B { background: #b8e186; color: #333; }
 .grade-marker.grade-C { background: #fdb863; color: #333; }
-.grade-marker.grade-D { background: #e66101; }
-.grade-marker.grade-F { background: #d7191c; }
+.grade-marker.grade-D { background: #e66101; color: #fff; }
+.grade-marker.grade-F { background: #d7191c; color: #fff; }
 
 /* ===== スクレイパー切替 ===== */
 .scraper-switcher select {
