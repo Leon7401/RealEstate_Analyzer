@@ -96,16 +96,37 @@ class IngestPipeline:
         if self.geo_service is not None:
             try:
                 with self.db._conn() as conn:
-                    pref_marks = ",".join(["?"] * len(prefecture_codes))
-                    rows = [dict(r) for r in conn.execute(
-                        f"SELECT * FROM properties WHERE prefecture_code IN ({pref_marks}) "
-                        f"ORDER BY updated_at DESC LIMIT ?",
-                        list(prefecture_codes) + [max(200, int(analyze_limit) * 3)],
-                    ).fetchall()]
+                    # 都道府県指定分 + 座標欠落物件をまとめて補完（連合隊の全国物件含む）
+                    pref_marks = ",".join(["?"] * len(prefecture_codes)) if prefecture_codes else ""
+                    limit = max(300, int(analyze_limit) * 5)
+                    if prefecture_codes:
+                        rows = [dict(r) for r in conn.execute(
+                            f"""
+                            SELECT * FROM properties
+                            WHERE prefecture_code IN ({pref_marks})
+                               OR latitude IS NULL OR longitude IS NULL
+                               OR latitude = 0 OR longitude = 0
+                               OR TRIM(COALESCE(prefecture_code, '')) = ''
+                            ORDER BY updated_at DESC
+                            LIMIT ?
+                            """,
+                            list(prefecture_codes) + [limit],
+                        ).fetchall()]
+                    else:
+                        rows = [dict(r) for r in conn.execute(
+                            """
+                            SELECT * FROM properties
+                            WHERE latitude IS NULL OR longitude IS NULL
+                               OR latitude = 0 OR longitude = 0
+                            ORDER BY updated_at DESC
+                            LIMIT ?
+                            """,
+                            [limit],
+                        ).fetchall()]
                 geo_stats = self.geo_service.enrich_properties(
                     rows,
                     persist_updates=True,
-                    geocode_budget=geocode_budget,
+                    geocode_budget=max(int(geocode_budget or 0), 120),
                 )
             except Exception as e:
                 logger.exception("geo enrich failed: %s", e)

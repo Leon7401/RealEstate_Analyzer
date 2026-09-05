@@ -750,20 +750,13 @@ async def get_sample_properties(
 
     pref_codes = _expand_prefecture_codes(prefecture_code)
     if pref_codes:
+        from services.geo_quality import pref_from_address
+
         def _pref_of(p: dict) -> str:
             pref = str(p.get("prefecture_code") or "").strip()
             if pref:
                 return pref
-            addr = str(p.get("address") or "")
-            if "東京都" in addr:
-                return "13"
-            if "神奈川県" in addr:
-                return "14"
-            if "埼玉県" in addr:
-                return "11"
-            if "千葉県" in addr:
-                return "12"
-            return ""
+            return pref_from_address(str(p.get("address") or ""))
 
         props = [p for p in props if _pref_of(p) in pref_codes]
 
@@ -792,8 +785,8 @@ async def get_sample_properties(
     if sort_by in sort_keys:
         props.sort(key=sort_keys[sort_by])
 
-    # 表示APIではDB更新を伴う補正を避け、読み取り専用で軽量に座標/駅を補完
-    _estimate_missing_coords(props, persist_updates=False, geocode_budget=20)
+    # 座標欠落は地図プロット不能のため、表示時に補完してDBへ永続化
+    _estimate_missing_coords(props, persist_updates=True, geocode_budget=80)
     _sanitize_station_refs_for_display(props, persist_updates=False)
     # 補正後に重複除外
     props = _dedupe_properties_for_display(props)
@@ -1143,70 +1136,124 @@ async def get_land_prices(
     city_code: str = "",
     year: int = None,
 ):
-    """地価データをGeoJSON（市区町村ベース集計）で返す"""
+    """地価データをGeoJSONで返す（land_prices実データ優先、なければ取引集計）"""
     features = []
     pref_codes = _expand_prefecture_codes(prefecture_code)
-    pref_where, pref_params = _pref_where_clause("t.prefecture_code", pref_codes)
-
-    with db._conn() as conn:
-        sql = """
-            SELECT t.city_code, AVG(t.price_per_sqm) as avg_price,
-                   COUNT(*) as cnt
-            FROM transactions t
-            WHERE """ + pref_where + """ AND t.property_type = '宅地(土地)'
-            AND t.price_per_sqm > 0 AND t.price_per_sqm < 10000000
-        """
-        params = list(pref_params)
-        if city_code:
-            sql += " AND t.city_code = ?"
-            params.append(city_code)
-        sql += " GROUP BY t.city_code HAVING cnt >= 2"
-        rows = conn.execute(sql, params).fetchall()
-
-    # 市区町村の代表座標（reinfolib_clientから取得）
-    from data.reinfolib_client import ReinfolibClient
-    city_centers = {}
-    for pref in pref_codes or [prefecture_code]:
-        city_centers.update(ReinfolibClient()._get_city_centers(pref))
+    prices: list = []
     total_count = 0
     total_price = 0
 
-    for row in [dict(r) for r in rows]:
-        cc = row.get("city_code", "")
-        coords = city_centers.get(cc)
-        if not coords:
-            continue
-        avg_price = int(row["avg_price"])
-        cnt = row["cnt"]
-        total_count += cnt
-        total_price += avg_price * cnt
-        city_name = CITY_NAME_MAP.get(cc, cc)
+    # 1) land_prices / api_land_prices のポイント（本線）
+    pref_where, pref_params = _pref_where_clause("prefecture_code", pref_codes)
+    with db._conn() as conn:
+        for table, name_col, type_label in (
+            ("land_prices", "address", "地価ポイント"),
+            ("api_land_prices", "place_name", "公示地価"),
+        ):
+            try:
+                sql = f"""
+                    SELECT latitude, longitude, price_per_sqm,
+                           COALESCE({name_col}, '') AS label,
+                           prefecture_code, city_code
+                    FROM {table}
+                    WHERE {pref_where}
+                      AND latitude IS NOT NULL AND longitude IS NOT NULL
+                      AND price_per_sqm > 0 AND price_per_sqm < 50000000
+                """
+                params = list(pref_params)
+                if city_code:
+                    sql += " AND city_code = ?"
+                    params.append(city_code)
+                sql += " LIMIT 5000"
+                for row in [dict(r) for r in conn.execute(sql, params).fetchall()]:
+                    price = int(float(row["price_per_sqm"]))
+                    prices.append(price)
+                    total_count += 1
+                    total_price += price
+                    color = map_builder._price_to_color(price)
+                    features.append({
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [float(row["longitude"]), float(row["latitude"])],
+                        },
+                        "properties": {
+                            "address": row.get("label") or CITY_NAME_MAP.get(row.get("city_code") or "", ""),
+                            "price_per_sqm": price,
+                            "price_label": f"¥{price:,}/㎡",
+                            "type": type_label,
+                            "use_zone": "",
+                            "station": "",
+                            "change_rate": None,
+                            "color": color,
+                            "count": 1,
+                            "layer": "land_price",
+                        },
+                    })
+            except Exception:
+                logging.exception("land price load failed: %s", table)
 
-        color = map_builder._price_to_color(avg_price)
-        features.append({
-            "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [coords[1], coords[0]]},
-            "properties": {
-                "address": city_name,
-                "price_per_sqm": avg_price,
-                "price_label": f"¥{avg_price:,}/㎡",
-                "type": "土地取引平均",
-                "use_zone": "",
-                "station": city_name,
-                "change_rate": None,
-                "color": color,
-                "count": cnt,
-                "layer": "land_price",
-            },
-        })
+    # 2) フォールバック: 取引の市区町村平均
+    if not features:
+        pref_where_t, pref_params_t = _pref_where_clause("t.prefecture_code", pref_codes)
+        with db._conn() as conn:
+            sql = """
+                SELECT t.city_code, AVG(t.price_per_sqm) as avg_price,
+                       COUNT(*) as cnt
+                FROM transactions t
+                WHERE """ + pref_where_t + """ AND t.property_type = '宅地(土地)'
+                AND t.price_per_sqm > 0 AND t.price_per_sqm < 10000000
+            """
+            params = list(pref_params_t)
+            if city_code:
+                sql += " AND t.city_code = ?"
+                params.append(city_code)
+            sql += " GROUP BY t.city_code HAVING cnt >= 2"
+            rows = conn.execute(sql, params).fetchall()
 
+        from data.reinfolib_client import ReinfolibClient
+        city_centers = {}
+        for pref in pref_codes or [prefecture_code]:
+            city_centers.update(ReinfolibClient()._get_city_centers(pref))
+
+        for row in [dict(r) for r in rows]:
+            cc = row.get("city_code", "")
+            coords = city_centers.get(cc)
+            if not coords:
+                continue
+            avg_price = int(row["avg_price"])
+            cnt = row["cnt"]
+            total_count += cnt
+            total_price += avg_price * cnt
+            prices.extend([avg_price] * cnt)
+            city_name = CITY_NAME_MAP.get(cc, cc)
+            color = map_builder._price_to_color(avg_price)
+            features.append({
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [coords[1], coords[0]]},
+                "properties": {
+                    "address": city_name,
+                    "price_per_sqm": avg_price,
+                    "price_label": f"¥{avg_price:,}/㎡",
+                    "type": "土地取引平均",
+                    "use_zone": "",
+                    "station": city_name,
+                    "change_rate": None,
+                    "color": color,
+                    "count": cnt,
+                    "layer": "land_price",
+                },
+            })
+
+    prices_sorted = sorted(prices)
     avg_all = int(total_price / total_count) if total_count > 0 else 0
+    median_all = prices_sorted[len(prices_sorted) // 2] if prices_sorted else 0
     geojson = {"type": "FeatureCollection", "features": features}
     return JSONResponse(content={
         "geojson": geojson,
         "summary": {
             "avg_price": avg_all,
-            "median_price": avg_all,
+            "median_price": median_all,
             "count": total_count,
             "area_count": len(features),
             "city_name": CITY_NAME_MAP.get(city_code, "一都三県" if len(pref_codes) > 1 else ""),
@@ -5190,15 +5237,25 @@ async def compute_mesh_250m():
         mesh_data = {}  # mesh_id -> {lp: [], rent: [], tx: [], ...}
 
         with db._conn() as conn:
-            # 地価データ
-            for r in conn.execute("SELECT latitude, longitude, price_per_sqm FROM api_land_prices WHERE latitude IS NOT NULL AND price_per_sqm > 0").fetchall():
-                d = dict(r)
-                mid = _latlng_to_mesh250(d["latitude"], d["longitude"])
-                mesh_data.setdefault(mid, {"lp": [], "rent": [], "tx": []})
-                mesh_data[mid]["lp"].append(d["price_per_sqm"])
+            # 地価データ（api + ローカルland_prices）
+            for table in ("api_land_prices", "land_prices"):
+                try:
+                    for r in conn.execute(
+                        f"SELECT latitude, longitude, price_per_sqm FROM {table} "
+                        "WHERE latitude IS NOT NULL AND price_per_sqm > 0"
+                    ).fetchall():
+                        d = dict(r)
+                        mid = _latlng_to_mesh250(d["latitude"], d["longitude"])
+                        mesh_data.setdefault(mid, {"lp": [], "rent": [], "tx": []})
+                        mesh_data[mid]["lp"].append(d["price_per_sqm"])
+                except Exception:
+                    logging.exception("mesh land price source failed: %s", table)
 
             # 賃料データ
-            for r in conn.execute("SELECT latitude, longitude, rent_per_sqm FROM rental_comps WHERE latitude IS NOT NULL AND latitude > 0 AND rent_per_sqm > 0").fetchall():
+            for r in conn.execute(
+                "SELECT latitude, longitude, rent_per_sqm FROM rental_comps "
+                "WHERE latitude IS NOT NULL AND latitude > 0 AND rent_per_sqm > 0"
+            ).fetchall():
                 d = dict(r)
                 mid = _latlng_to_mesh250(d["latitude"], d["longitude"])
                 mesh_data.setdefault(mid, {"lp": [], "rent": [], "tx": []})

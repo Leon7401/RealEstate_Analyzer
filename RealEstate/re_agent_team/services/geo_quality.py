@@ -32,17 +32,31 @@ WARD_CENTER: Dict[str, Tuple[float, float]] = {
 }
 
 
+PREF_NAME_TO_CODE = {
+    "北海道": "01", "青森県": "02", "岩手県": "03", "宮城県": "04", "秋田県": "05",
+    "山形県": "06", "福島県": "07", "茨城県": "08", "栃木県": "09", "群馬県": "10",
+    "埼玉県": "11", "千葉県": "12", "東京都": "13", "神奈川県": "14", "新潟県": "15",
+    "富山県": "16", "石川県": "17", "福井県": "18", "山梨県": "19", "長野県": "20",
+    "岐阜県": "21", "静岡県": "22", "愛知県": "23", "三重県": "24", "滋賀県": "25",
+    "京都府": "26", "大阪府": "27", "兵庫県": "28", "奈良県": "29", "和歌山県": "30",
+    "鳥取県": "31", "島根県": "32", "岡山県": "33", "広島県": "34", "山口県": "35",
+    "徳島県": "36", "香川県": "37", "愛媛県": "38", "高知県": "39", "福岡県": "40",
+    "佐賀県": "41", "長崎県": "42", "熊本県": "43", "大分県": "44", "宮崎県": "45",
+    "鹿児島県": "46", "沖縄県": "47",
+}
+
+
 def pref_from_address(addr: str) -> str:
     if not addr:
         return ""
-    if "東京都" in addr:
+    for name, code in PREF_NAME_TO_CODE.items():
+        if name in addr:
+            return code
+    # 都・府・県なし表記の最低限フォールバック
+    if "東京" in addr:
         return "13"
-    if "神奈川県" in addr:
-        return "14"
-    if "埼玉県" in addr:
-        return "11"
-    if "千葉県" in addr:
-        return "12"
+    if "北海道" in addr:
+        return "01"
     return ""
 
 
@@ -196,13 +210,25 @@ class GeoQualityService:
                 stats["estimated"] += 1
 
             stats["updated"] += 1
+            # 都道府県コード欠落も住所から補完
+            if not str(p.get("prefecture_code") or "").strip() and pref_code:
+                p["prefecture_code"] = pref_code
             if p.get("id"):
-                updates.append((p["latitude"], p["longitude"], str(p["id"])))
+                updates.append(
+                    (
+                        p["latitude"],
+                        p["longitude"],
+                        str(p.get("prefecture_code") or pref_code or ""),
+                        str(p["id"]),
+                    )
+                )
 
         if persist_updates and updates and self.db is not None:
             with self.db._conn() as conn:
                 conn.executemany(
                     "UPDATE properties SET latitude=?, longitude=?, "
+                    "prefecture_code=CASE WHEN TRIM(COALESCE(prefecture_code,''))='' "
+                    "THEN ? ELSE prefecture_code END, "
                     "updated_at=datetime('now','localtime') WHERE id=?",
                     updates,
                 )

@@ -452,6 +452,8 @@ function initMap(center, zoom) {
     setInterval(refreshAutoScrapeStatus, 10000);
     setTimeout(resumeTaskProgressUI, 500);
     setTimeout(adjustRankingPanelPosition, 200);
+    // 初期表示で平米単価・賃料メッシュを載せる
+    setTimeout(() => ensurePrimaryMeshLayers(true), 800);
 }
 
 async function refreshAutoScrapeStatus() {
@@ -534,13 +536,19 @@ async function loadCities() {
         const resp = await fetch(`/api/cities/${encodeURIComponent(pref)}`);
         const data = await resp.json();
         const sel = document.getElementById('city-select');
-        sel.innerHTML = '';
-        data.cities.forEach(c => {
+        const prev = sel?.value || '';
+        sel.innerHTML = '<option value="">全域</option>';
+        (data.cities || []).forEach(c => {
             const opt = document.createElement('option');
             opt.value = c.code;
             opt.textContent = c.name;
             sel.appendChild(opt);
         });
+        if (prev && [...sel.options].some(o => o.value === prev)) {
+            sel.value = prev;
+        } else {
+            sel.value = '';
+        }
         // 駅マーカーも更新
         loadStationMarkers();
         const prefCount = getSelectedPrefectureCodes('map', ['13']).length;
@@ -548,9 +556,17 @@ async function loadCities() {
             map.setView([35.72, 139.75], 9);
         }
         loadSampleProperties();
+        ensurePrimaryMeshLayers();
     } catch (e) {
         console.error('市区町村取得エラー:', e);
     }
+}
+
+function ensurePrimaryMeshLayers(forceRefresh = false) {
+    const landEl = document.getElementById('layer-mesh-landprice');
+    const rentEl = document.getElementById('layer-mesh-rent');
+    if (landEl?.checked) loadMeshLayer('land_price', forceRefresh);
+    if (rentEl?.checked) loadMeshLayer('rent', forceRefresh);
 }
 
 // ===== 統合物件一覧 =====
@@ -925,6 +941,20 @@ function plotSampleProperties(propsToPlot) {
         propertyLayer.addTo(map);
     }
 
+    // プロット済み物件が見えるようにビューを合わせる
+    const plotted = [];
+    propertyLayer.eachLayer(layer => {
+        if (layer.getLatLng) plotted.push(layer.getLatLng());
+    });
+    if (plotted.length > 0) {
+        try {
+            const bounds = L.latLngBounds(plotted);
+            if (bounds.isValid()) {
+                map.fitBounds(bounds.pad(0.15), { maxZoom: 13 });
+            }
+        } catch (e) { /* ignore */ }
+    }
+
     // 物件利回りヒートマップデータも生成
     _propertyHeatData = props
         .filter(p => p.latitude && p.longitude)
@@ -1182,7 +1212,7 @@ async function loadAreaData() {
     btn.textContent = '地価+賃料 読込中...';
 
     try {
-        // 1. 既存地価データ（取引平均プロットは廃止）
+        // 1. 既存地価データ
         const lpResp = await fetch(`/api/land-prices/${encodeURIComponent(pref)}?city_code=${city}`);
         const lpData = await lpResp.json();
         renderLandPrices(lpData.geojson);
@@ -1201,7 +1231,6 @@ async function loadAreaData() {
 
         const apiLpData = await apiLpResp.json();
         if (apiLpData.count > 0) {
-            // 公示地価レイヤーを自動表示
             const olpCheck = document.getElementById('layer-official-land-price');
             if (olpCheck && !olpCheck.checked) olpCheck.checked = true;
             loadOfficialLandPriceLayer();
@@ -1213,11 +1242,26 @@ async function loadAreaData() {
             console.log(`賃料スクレイピング: ${rentalData.count}件`);
             loadRentalStats();
         }
+
+        // 3. メッシュ再計算 → 平米単価/賃料を本線表示
+        btn.textContent = 'メッシュ更新中...';
+        try {
+            await fetch('/api/mesh/compute', { method: 'POST' });
+        } catch (e) {
+            console.warn('mesh compute trigger failed', e);
+        }
+        const landCheck = document.getElementById('layer-mesh-landprice');
+        const rentCheck = document.getElementById('layer-mesh-rent');
+        if (landCheck) landCheck.checked = true;
+        if (rentCheck) rentCheck.checked = true;
+        // 計算完了を少し待ってから再描画
+        setTimeout(() => ensurePrimaryMeshLayers(true), 1500);
+        await loadSampleProperties();
     } catch (err) {
         console.error('データ読込エラー:', err);
     } finally {
         btn.disabled = false;
-        btn.textContent = '地価データ読込';
+        btn.textContent = '地図を更新';
     }
 }
 
@@ -1240,9 +1284,29 @@ async function loadDbLayersFromDatabase() {
 
 function renderLandPrices(geojson) {
     if (landPriceLayer) map.removeLayer(landPriceLayer);
-    // 地価ポイント（円マーカー）は表示しない。
-    // 地価データは統計・他レイヤーのみで利用する。
     landPriceLayer = null;
+    if (!geojson || !geojson.features || !geojson.features.length) return;
+
+    landPriceLayer = L.geoJSON(geojson, {
+        pointToLayer: (f, ll) => L.circleMarker(ll, {
+            radius: 5,
+            fillColor: f.properties?.color || '#26a69a',
+            color: '#fff',
+            weight: 1,
+            fillOpacity: 0.55,
+            pane: 'heatPane',
+        }),
+        onEachFeature: (f, layer) => {
+            const p = f.properties || {};
+            layer.bindPopup(`
+                <div class="popup-title">${p.type || '地価'}</div>
+                <div class="popup-price">${p.price_label || ''}</div>
+                <div class="popup-detail">${p.address || ''}</div>
+            `);
+        },
+    });
+    // メッシュが主表示。ポイントは詳細確認用に薄く重ねる
+    landPriceLayer.addTo(map);
 }
 
 function renderTransactions(geojson) {

@@ -44,8 +44,10 @@
 
             <div class="panel focus-panel">
                 <h3>地図表示</h3>
-                <p class="hint">まずは判定済みの収益物件だけを見る</p>
+                <p class="hint">収益物件と平米単価・賃料を重ねて見る</p>
                 <label class="layer-main"><input type="checkbox" id="layer-properties" checked> 収益物件</label>
+                <label class="layer-main"><input type="checkbox" id="layer-mesh-landprice" checked> 平米単価（地価）</label>
+                <label class="layer-main"><input type="checkbox" id="layer-mesh-rent" checked> 賃料（㎡単価）</label>
                 <label class="layer-main"><input type="checkbox" id="layer-land-listings"> 土地物件</label>
                 <label class="layer-main"><input type="checkbox" id="layer-stations"> 駅</label>
             </div>
@@ -95,11 +97,10 @@
             <details class="panel-details advanced-tools">
                 <summary class="panel-summary">詳細レイヤー・分析ツール</summary>
                 <div class="panel">
-                    <h3>ヒートマップ</h3>
-                    <label><input type="checkbox" id="layer-mesh-landprice"> 地価</label>
-                    <label><input type="checkbox" id="layer-mesh-rent"> 賃料</label>
-                    <select id="mesh-rent-layout" style="font-size:0.68rem;margin-left:18px;width:calc(100% - 18px);" onchange="if(document.getElementById('layer-mesh-rent').checked) loadMeshLayer('rent', true)">
-                        <option value="">全間取り</option>
+                    <h3>ヒートマップ（追加）</h3>
+                    <p class="hint">平米単価・賃料の主スイッチは「地図表示」にあります</p>
+                    <select id="mesh-rent-layout" style="font-size:0.68rem;width:100%;" onchange="if(document.getElementById('layer-mesh-rent').checked) loadMeshLayer('rent', true)">
+                        <option value="">賃料: 全間取り</option>
                         <option value="1K">1K</option>
                         <option value="1DK">1DK</option>
                         <option value="1LDK">1LDK</option>
