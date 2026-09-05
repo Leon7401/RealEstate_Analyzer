@@ -24,3 +24,6 @@ Thumbs.db
 
 # Context docs (private)
 RealEstate/context/
+
+# Virtualenv
+.venv/
