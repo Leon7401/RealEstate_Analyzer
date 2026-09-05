@@ -16,6 +16,7 @@ def register_default_adapters(scraper_agent, url_scraper) -> Dict[str, SourceAda
         "kenbiya": PortalListAdapter("kenbiya", scraper_agent, url_scraper),
         "rals": PortalListAdapter("rals", scraper_agent, url_scraper),
         "athome": PortalListAdapter("athome", scraper_agent, url_scraper),
+        "homes": PortalListAdapter("homes", scraper_agent, url_scraper),
         "url": UrlDetailAdapter(url_scraper),
     }
     return ADAPTERS

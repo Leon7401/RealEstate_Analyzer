@@ -77,7 +77,7 @@ class UrlScraperAgent(BaseAgent):
         "rakumachi": r"rakumachi\.jp",
         "athome": r"athome\.co\.jp|atbb\.athome\.co\.jp",
         "suumo": r"suumo\.jp",
-        "homes": r"homes\.co\.jp",
+        "homes": r"homes\.co\.jp|toushi\.homes\.co\.jp",
         "kenbiya": r"kenbiya\.com",
         "rals": r"rals\.co\.jp|fudosan\.cbiz\.ne\.jp|rals\.net",
         "fudousan_japan": r"fudousan\.or\.jp",
@@ -721,7 +721,10 @@ class UrlScraperAgent(BaseAgent):
         return self._extract_yield_from_text(text)
 
     def _extract_yield_from_text(self, text: str) -> Optional[float]:
-        m = re.search(r"([\d.]+)\s*[%％]", text)
+        # HOME'S等で "5 .95 ％" のように小数点が分離されるケースを正規化
+        norm = re.sub(r"(\d)\s+\.", r"\1.", text or "")
+        norm = re.sub(r"\.\s+(\d)", r".\1", norm)
+        m = re.search(r"([\d.]+)\s*[%％]", norm)
         if m:
             val = float(m.group(1))
             if 0.5 < val < 50:

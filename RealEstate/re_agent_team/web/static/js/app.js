@@ -2207,7 +2207,8 @@ async function scrapeProperties() {
     if (document.getElementById('scrape-kenbiya')?.checked) sources.push('kenbiya');
     if (document.getElementById('scrape-rals')?.checked) sources.push('rals');
     if (document.getElementById('scrape-athome')?.checked) sources.push('athome');
-    if (sources.length === 0) sources.push('rakumachi', 'kenbiya', 'rals', 'athome');
+    if (document.getElementById('scrape-homes')?.checked) sources.push('homes');
+    if (sources.length === 0) sources.push('rakumachi', 'kenbiya', 'rals', 'athome', 'homes');
     const splitPrice = document.getElementById('scrape-split-price')?.checked ? '&split_by_price=true' : '';
 
     try {

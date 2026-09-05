@@ -46,6 +46,12 @@ class ScraperAgent(BaseAgent):
         "売駐車場", "中古一戸建て", "売倉庫", "戸建て", "区分", "借地",
     )
 
+    # LIFULL HOME'S 不動産投資（一棟アパート等）
+    HOMES_TOUSHI_BASE = "https://toushi.homes.co.jp"
+    HOMES_TOUSHI_SEARCH = "https://toushi.homes.co.jp/bukkensearch/"
+    # tbg: 2=一棟アパート, 1=一棟マンション など
+    HOMES_BUILDING_TYPES = ("2", "1")
+
     # 対象物件種別（タイトル先頭で判定）
     ALLOWED_PROPERTY_TYPES = [
         "1棟アパート", "1棟マンション", "一棟アパート", "一棟マンション",
@@ -55,6 +61,12 @@ class ScraperAgent(BaseAgent):
     # 除外キーワード（借地権・区分・PR広告等）
     EXCLUDED_KEYWORDS = ["借地", "定借", "定期借地", "地上権", "区分"]
     EXCLUDED_PREFIXES = ["PR"]  # PR広告物件
+    PREF_NAME_MAP = {
+        "13": ("東京都", "東京"),
+        "14": ("神奈川県", "神奈川"),
+        "11": ("埼玉県", "埼玉"),
+        "12": ("千葉県", "千葉"),
+    }
 
     SUUMO_BASE = "https://suumo.jp"
     # SUUMO賃貸のエリア別URL
@@ -190,18 +202,26 @@ class ScraperAgent(BaseAgent):
         err: Optional[str] = None
 
         if not prefer_browser:
-            self._throttle()
-            try:
-                resp = self.session.get(url, params=params, timeout=timeout, headers=headers or {})
-                status = resp.status_code
-                resp.encoding = resp.apparent_encoding or "utf-8"
-                html = resp.text
-                if resp.status_code == 200 and not looks_blocked(html, status):
-                    return html, None
-                err = describe_block(html or "", status)
-            except requests.RequestException as e:
-                err = f"HTTP error: {e}"
-                html = None
+            for attempt in range(3):
+                self._throttle()
+                try:
+                    resp = self.session.get(url, params=params, timeout=timeout, headers=headers or {})
+                    status = resp.status_code
+                    resp.encoding = resp.apparent_encoding or "utf-8"
+                    html = resp.text
+                    if resp.status_code == 200 and not looks_blocked(html, status):
+                        return html, None
+                    if resp.status_code == 429 and attempt < 2:
+                        wait = 8 * (attempt + 1)
+                        self.logger.info("HTTP 429: %s秒待機して再試行 (%s)", wait, full_url[:80])
+                        time.sleep(wait)
+                        continue
+                    err = describe_block(html or "", status)
+                    break
+                except requests.RequestException as e:
+                    err = f"HTTP error: {e}"
+                    html = None
+                    break
 
         if playwright_available():
             self.logger.info("ブラウザ取得にフォールバック: %s", full_url[:120])
@@ -250,12 +270,14 @@ class ScraperAgent(BaseAgent):
             "kenbiya": self._scrape_kenbiya_page,
             "rals": self._scrape_rals_page,
             "athome": self._scrape_athome_page,
+            "homes": self._scrape_homes_page,
         }
         warm_urls = {
             "rakumachi": self.RAKUMACHI_BASE + "/",
             "kenbiya": "https://www.kenbiya.com/",
             "rals": "https://www.rals.co.jp/",
             "athome": self.ATHOME_BASE + "/",
+            "homes": self.HOMES_TOUSHI_BASE + "/",
         }
 
         for src in srcs:
@@ -558,6 +580,36 @@ class ScraperAgent(BaseAgent):
         )
 
 
+
+    def _scrape_homes_page(self, pref_code: str, page: int = 1) -> List[Property]:
+        """LIFULL HOME'S不動産投資の一棟一覧から詳細を構造化"""
+        self._throttle()
+        props: List[Property] = []
+        seen = set()
+        for tbg in self.HOMES_BUILDING_TYPES:
+            list_url = (
+                f"{self.HOMES_TOUSHI_SEARCH}?addr11={pref_code}"
+                f"&tbg[]={tbg}&page={page}"
+            )
+            batch = self._crawl_detail_urls(
+                source_name="homes",
+                list_url=list_url,
+                params={},
+                url_pattern=r"bukkendetail/index/\d+",
+                prefer_browser=True,
+            )[:12]
+            for prop in batch:
+                key = getattr(prop, "source_url", None) or prop.name
+                if key in seen:
+                    continue
+                seen.add(key)
+                if not getattr(prop, "prefecture_code", None):
+                    prop.prefecture_code = pref_code
+                props.append(prop)
+            if len(props) >= 20:
+                break
+        return props[:20]
+
     def _scrape_athome_page(self, pref_code: str, page: int = 1) -> List[Property]:
         """アットホーム事業用（一棟売等）一覧から詳細URLを収集して構造化"""
         self._throttle()
@@ -605,6 +657,8 @@ class ScraperAgent(BaseAgent):
                 "不動産投資連合隊": "rals",
                 "athome": "athome",
                 "アットホーム": "athome",
+                "homes": "homes",
+                "HOME'S": "homes",
             }.get(source_name, source_name)
             # 属性名の揺れに対応
             if not hasattr(self, "last_source_errors") or self.last_source_errors is None:

@@ -18,6 +18,9 @@ _SOURCE_ALIASES: Dict[str, str] = {
     "連合隊": "rals",
     "athome": "athome",
     "アットホーム": "athome",
+    "homes": "homes",
+    "HOME'S": "homes",
+    "ホームズ": "homes",
     "toushi-athome": "athome",
     "suumo": "suumo",
     "SUUMO": "suumo",
@@ -30,6 +33,7 @@ _SOURCE_QUERY_ALIASES: Dict[str, List[str]] = {
     "kenbiya": ["kenbiya", "健美家"],
     "rals": ["rals", "不動産投資連合隊", "不動産投資★連合隊", "連合隊"],
     "athome": ["athome", "アットホーム"],
+    "homes": ["homes", "HOME'S", "ホームズ"],
     "suumo": ["suumo", "SUUMO", "スーモ"],
 }
 
