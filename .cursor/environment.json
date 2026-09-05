@@ -1,0 +1,16 @@
+{
+  "name": "realestate_analyzer",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "re-web",
+      "command": "cd RealEstate/re_agent_team && source /workspace/.venv/bin/activate && RE_SCHEDULER_AUTOSTART=0 RE_AUTO_PROPERTY_SCRAPE=0 python server.py --host 0.0.0.0 --port 8080"
+    }
+  ],
+  "ports": [
+    {
+      "name": "re-web",
+      "port": 8080
+    }
+  ]
+}
