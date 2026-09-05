@@ -207,24 +207,14 @@ class UrlScraperAgent(BaseAgent):
     def _fetch_with_playwright(self, url: str) -> Tuple[Optional[str], List[bytes]]:
         """Playwrightでブラウザ描画後のHTMLを取得"""
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.set_extra_http_headers({
-                    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
-                })
-                page.goto(url, wait_until="networkidle", timeout=30000)
-                # ページ描画を少し待つ
-                page.wait_for_timeout(2000)
-                html = page.content()
+            from .browser_fetch import get_browser_fetcher, looks_blocked
 
-                # スクリーンショットも取得（OCR用）
-                images_data = []
-                screenshot = page.screenshot(full_page=False)
-                images_data.append(screenshot)
-
-                browser.close()
-                return html, images_data
+            fetcher = get_browser_fetcher()
+            html, status, err = fetcher.fetch(url, wait_ms=2000)
+            if not html or looks_blocked(html, status):
+                self.logger.error(f"Playwright取得拒否: {err or status}")
+                return None, []
+            return html, []
         except Exception as e:
             self.logger.error(f"Playwright取得エラー: {e}")
             return None, []

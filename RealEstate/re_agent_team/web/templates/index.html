@@ -205,7 +205,7 @@
 
                     <!-- 収益物件 -->
                     <div id="scraper-property" class="scraper-sub-panel active">
-                        <p class="hint">楽待 / 健美家 / 不動産投資連合隊 から収益物件を一括取得</p>
+                        <p class="hint">楽待 / 健美家 / 不動産投資連合隊 から収益物件を一括取得。拒否時はブラウザ取得に自動切替。楽待はCloudflareでクラウドIPが弾かれることがあるため、まずは連合隊を推奨。</p>
                         <div class="form-row">
                             <div class="form-group" style="flex:1">
                                 <label>都道府県（複数選択）</label>
@@ -222,8 +222,8 @@
                             </div>
                         </div>
                         <div class="form-row">
-                            <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-rakumachi" checked> 楽待</label>
-                            <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-kenbiya" checked> 健美家</label>
+                            <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-rakumachi"> 楽待</label>
+                            <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-kenbiya"> 健美家</label>
                             <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-rals" checked> 不動産投資連合隊</label>
                             <label style="font-size:0.75rem;"><input type="checkbox" id="scrape-split-price"> 価格帯分割</label>
                         </div>

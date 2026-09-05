@@ -8,6 +8,12 @@ import requests
 from bs4 import BeautifulSoup
 
 from .base_agent import BaseAgent
+from .browser_fetch import (
+    describe_block,
+    get_browser_fetcher,
+    looks_blocked,
+    playwright_available,
+)
 from .url_scraper_agent import UrlScraperAgent
 from models.property import Property
 from data.station_master import resolve_station_id, STATION_MAP
@@ -108,7 +114,7 @@ class ScraperAgent(BaseAgent):
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/126.0.0.0 Safari/537.36"
+            "Chrome/131.0.0.0 Safari/537.36"
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
@@ -120,7 +126,7 @@ class ScraperAgent(BaseAgent):
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "none",
         "Sec-Fetch-User": "?1",
-        "sec-ch-ua": '"Chromium";v="126", "Not.A/Brand";v="24", "Google Chrome";v="126"',
+        "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
     }
@@ -129,10 +135,11 @@ class ScraperAgent(BaseAgent):
         super().__init__("ScraperAgent")
         self.session = requests.Session()
         self.session.headers.update(self.HEADERS)
-        self._rate_limit = 3.0
+        self._rate_limit = 4.0
         self._last_request = 0.0
         self.url_scraper = UrlScraperAgent()
         self.last_source_errors: Dict[str, str] = {}
+        self._browser = get_browser_fetcher()
 
     def _warm_session(self, url: str):
         """一覧取得前にトップへアクセスして Cookie を温める（403対策）"""
@@ -140,6 +147,56 @@ class ScraperAgent(BaseAgent):
             self.session.get(url, timeout=12)
         except requests.RequestException:
             pass
+
+    def _fetch_html(
+        self,
+        url: str,
+        *,
+        params: Optional[Dict[str, str]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        warm_url: Optional[str] = None,
+        prefer_browser: bool = False,
+        timeout: int = 20,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        HTML取得。requests →（拒否時）Playwright の順。
+        Returns: (html, error_message)
+        """
+        full_url = url
+        if params:
+            from urllib.parse import urlencode
+
+            qs = urlencode(params)
+            full_url = f"{url}?{qs}" if "?" not in url else f"{url}&{qs}"
+
+        html: Optional[str] = None
+        status: Optional[int] = None
+        err: Optional[str] = None
+
+        if not prefer_browser:
+            self._throttle()
+            try:
+                resp = self.session.get(url, params=params, timeout=timeout, headers=headers or {})
+                status = resp.status_code
+                resp.encoding = resp.apparent_encoding or "utf-8"
+                html = resp.text
+                if resp.status_code == 200 and not looks_blocked(html, status):
+                    return html, None
+                err = describe_block(html or "", status)
+            except requests.RequestException as e:
+                err = f"HTTP error: {e}"
+                html = None
+
+        if playwright_available():
+            self.logger.info("ブラウザ取得にフォールバック: %s", full_url[:120])
+            b_html, b_status, b_err = self._browser.fetch(
+                full_url, warm_url=warm_url, wait_ms=2200
+            )
+            if b_html and not looks_blocked(b_html, b_status):
+                return b_html, None
+            err = b_err or describe_block(b_html or "", b_status) or err
+
+        return None, err or "取得失敗"
 
     # ================================================================
     # 収益物件スクレイピング (楽待)
@@ -228,9 +285,7 @@ class ScraperAgent(BaseAgent):
     def _scrape_rakumachi_page(
         self, pref_code: str, page: int = 1,
     ) -> List[Property]:
-        """楽待の収益物件一覧をスクレイピング"""
-        self._throttle()
-
+        """楽待の収益物件一覧をスクレイピング（403時はブラウザフォールバック）"""
         pref_name = self.RAKUMACHI_PREF_MAP.get(pref_code, "tokyo")
         url = f"{self.RAKUMACHI_SEARCH}{pref_name}/"
         params = {
@@ -238,25 +293,25 @@ class ScraperAgent(BaseAgent):
             "sort": "property_created_at",
             "sort_type": "desc",
         }
-
-        try:
-            headers = {
-                "Referer": f"{self.RAKUMACHI_BASE}/",
-                "Sec-Fetch-Site": "same-origin",
-            }
-            resp = self.session.get(url, params=params, timeout=20, headers=headers)
-            if resp.status_code == 403:
-                self.last_source_errors["rakumachi"] = "HTTP 403 (サイト側ブロック)"
-                self.logger.error("楽待 HTTP 403 Forbidden")
-                return []
-            resp.raise_for_status()
-            resp.encoding = "utf-8"
-        except requests.RequestException as e:
-            self.last_source_errors["rakumachi"] = f"HTTP error: {e}"
-            self.logger.error(f"楽待 HTTP error: {e}")
+        headers = {
+            "Referer": f"{self.RAKUMACHI_BASE}/",
+            "Sec-Fetch-Site": "same-origin",
+        }
+        html, err = self._fetch_html(
+            url,
+            params=params,
+            headers=headers,
+            warm_url=f"{self.RAKUMACHI_BASE}/",
+        )
+        if not html:
+            self.last_source_errors["rakumachi"] = err or "取得失敗"
+            self.logger.error("楽待取得失敗: %s", err)
             return []
 
-        return self._parse_rakumachi(resp.text, pref_code)
+        props = self._parse_rakumachi(html, pref_code)
+        if not props and looks_blocked(html):
+            self.last_source_errors["rakumachi"] = describe_block(html)
+        return props
 
     def _parse_rakumachi(self, html: str, pref_code: str) -> List[Property]:
         """楽待HTMLを構造的にパース"""
@@ -492,15 +547,18 @@ class ScraperAgent(BaseAgent):
         url_pattern: str,
     ) -> List[Property]:
         """一覧ページから候補URLを抽出し、詳細ページを構造化"""
-        try:
-            resp = self.session.get(list_url, params=params, timeout=20)
-            resp.raise_for_status()
-            resp.encoding = resp.apparent_encoding or "utf-8"
-        except requests.RequestException as e:
-            self.logger.warning(f"[{source_name}] 一覧取得失敗: {e}")
+        warm = f"{urlparse_base(list_url)}/"
+        html, err = self._fetch_html(list_url, params=params, warm_url=warm)
+        if not html:
+            key = {
+                "健美家": "kenbiya",
+                "不動産投資連合隊": "rals",
+            }.get(source_name, source_name)
+            self.last_source_errors[key] = err or "一覧取得失敗"
+            self.logger.warning("[%s] 一覧取得失敗: %s", source_name, err)
             return []
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = BeautifulSoup(html, "html.parser")
         urls = []
         for a in soup.select("a[href]"):
             href = (a.get("href") or "").strip()
@@ -521,9 +579,21 @@ class ScraperAgent(BaseAgent):
         # 重複除去 + 上限（一覧1pあたりの過剰アクセスを抑える）
         uniq_urls = list(dict.fromkeys(urls))[:25]
         properties: List[Property] = []
+        use_browser_detail = False
         for detail_url in uniq_urls:
             try:
-                prop = self.url_scraper.run(url=detail_url, use_ocr=False, use_browser=False)
+                prop = self.url_scraper.run(
+                    url=detail_url,
+                    use_ocr=False,
+                    use_browser=use_browser_detail,
+                )
+                if not prop and not use_browser_detail and playwright_available():
+                    # 詳細が弾かれたら以降はブラウザ取得を試す
+                    prop = self.url_scraper.run(
+                        url=detail_url, use_ocr=False, use_browser=True
+                    )
+                    if prop:
+                        use_browser_detail = True
                 if not prop:
                     continue
                 # 既存フィルタに寄せる
@@ -928,3 +998,10 @@ class ScraperAgent(BaseAgent):
             if name in address:
                 return code
         return f"unknown_{pref_code}"
+
+
+def urlparse_base(url: str) -> str:
+    from urllib.parse import urlparse as _urlparse
+
+    p = _urlparse(url)
+    return f"{p.scheme}://{p.netloc}"
