@@ -4350,6 +4350,165 @@ async def analysis_page(request: Request):
     )
 
 
+@app.get("/properties", response_class=HTMLResponse)
+async def properties_page(request: Request):
+    """収益物件の表形式分析一覧ページ"""
+    import hashlib, time
+    cache_bust = hashlib.md5(str(time.time()).encode()).hexdigest()[:8]
+    return templates.TemplateResponse(
+        request,
+        "properties.html",
+        {
+            "api_configured": bool(REINFOLIB_API_KEY),
+            "cache_bust": cache_bust,
+        },
+    )
+
+
+@app.get("/api/properties/analysis-table")
+async def properties_analysis_table(
+    prefecture_code: str = "13,14,11,12",
+    q: str = "",
+    grade: str = "",
+    min_yield: float = None,
+    max_price: int = None,
+    sort_by: str = "judge_score",
+    limit: int = 500,
+    offset: int = 0,
+):
+    """収益物件の分析一覧（判定結果JOIN）"""
+    import json as _json
+
+    prefs = _expand_prefecture_codes(prefecture_code)
+    safe_limit = max(1, min(int(limit or 500), 1000))
+    safe_offset = max(0, int(offset or 0))
+    grade = (grade or "").strip().upper()
+    q = (q or "").strip()
+
+    sort_map = {
+        "judge_score": "judge_score",
+        "gross_yield": "gross_yield",
+        "asking_price": "asking_price",
+        "station_distance_min": "station_distance_min",
+        "updated_at": "updated_at",
+        "judge_grade": "judge_grade_rank",
+        "name": "name",
+    }
+    order_key = sort_map.get(sort_by, "judge_score")
+
+    where = ["1=1"]
+    params: list = []
+
+    if prefs:
+        # prefecture_code が空の物件は住所キーワードでも拾う
+        # SQL順序: IN (?) が先、住所 LIKE が後 → params も同じ順
+        marks = ",".join("?" for _ in prefs)
+        addr_terms = []
+        addr_params = []
+        pref_names = {
+            "13": "東京都", "14": "神奈川県", "11": "埼玉県", "12": "千葉県",
+            "01": "北海道", "23": "愛知県", "27": "大阪府", "40": "福岡県",
+        }
+        for code in prefs:
+            name = pref_names.get(code)
+            if name:
+                addr_terms.append("p.address LIKE ?")
+                addr_params.append(f"%{name}%")
+        params.extend(prefs)
+        if addr_terms:
+            where.append(f"(p.prefecture_code IN ({marks}) OR {' OR '.join(addr_terms)})")
+            params.extend(addr_params)
+        else:
+            where.append(f"p.prefecture_code IN ({marks})")
+
+    if q:
+        where.append("(p.name LIKE ? OR p.address LIKE ? OR p.nearest_station LIKE ?)")
+        params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
+
+    if grade == "UNJUDGED":
+        where.append("j.grade IS NULL")
+    elif grade in {"S", "A", "B", "C", "D", "F"}:
+        where.append("j.grade = ?")
+        params.append(grade)
+
+    if min_yield is not None:
+        where.append("COALESCE(p.gross_yield, 0) >= ?")
+        params.append(float(min_yield))
+    if max_price is not None:
+        where.append("COALESCE(p.asking_price, 0) <= ?")
+        params.append(int(max_price))
+
+    # ゴミタイトル（連合隊の共通キャッチコピー）を除外
+    where.append("COALESCE(p.name, '') NOT LIKE '全国の不動産収益物件%'")
+    where.append("COALESCE(p.address, '') != ''")
+
+    order_sql = {
+        "judge_score": "judge_score DESC NULLS LAST, gross_yield DESC NULLS LAST",
+        "gross_yield": "gross_yield DESC NULLS LAST",
+        "asking_price": "asking_price ASC NULLS LAST",
+        "station_distance_min": "station_distance_min ASC NULLS LAST",
+        "updated_at": "updated_at DESC NULLS LAST",
+        "judge_grade_rank": "judge_grade_rank DESC, judge_score DESC NULLS LAST",
+        "name": "name ASC",
+    }.get(order_key, "judge_score DESC NULLS LAST")
+
+    sql = f"""
+        SELECT
+            p.id, p.name, p.address, p.prefecture_code, p.city_code,
+            p.latitude, p.longitude,
+            p.asking_price, p.land_area, p.building_area, p.structure,
+            p.built_year, p.building_age, p.units,
+            p.current_rent_annual, p.gross_yield,
+            p.nearest_station, p.station_distance_min, p.station_id,
+            p.source, p.source_url, p.listing_status,
+            p.updated_at, p.created_at,
+            j.grade AS judge_grade,
+            j.overall_score AS judge_score,
+            j.recommendation,
+            j.key_metrics_json,
+            j.judged_at,
+            CASE j.grade
+                WHEN 'S' THEN 6 WHEN 'A' THEN 5 WHEN 'B' THEN 4
+                WHEN 'C' THEN 3 WHEN 'D' THEN 2 WHEN 'F' THEN 1
+                ELSE 0
+            END AS judge_grade_rank
+        FROM properties p
+        LEFT JOIN judgments j ON j.property_id = p.id
+            AND j.id = (
+                SELECT j2.id FROM judgments j2
+                WHERE j2.property_id = p.id
+                ORDER BY j2.id DESC LIMIT 1
+            )
+        WHERE {' AND '.join(where)}
+        ORDER BY {order_sql}
+        LIMIT ? OFFSET ?
+    """
+    params.extend([safe_limit, safe_offset])
+
+    rows = []
+    with db._conn() as conn:
+        for r in conn.execute(sql, params).fetchall():
+            d = dict(r)
+            metrics = {}
+            raw = d.pop("key_metrics_json", None)
+            if raw:
+                try:
+                    metrics = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+                except Exception:
+                    metrics = {}
+            d.pop("judge_grade_rank", None)
+            d["key_metrics"] = metrics
+            rows.append(d)
+
+    return JSONResponse(content={
+        "rows": rows,
+        "count": len(rows),
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "sort_by": sort_by,
+    })
+
+
 # ===== 資産性分析API =====
 
 @app.get("/api/asset-score")

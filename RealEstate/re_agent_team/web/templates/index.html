@@ -13,6 +13,11 @@
             <div>
                 <h1>不動産投資判定</h1>
                 <p class="product-tagline">収益物件を自動取得し、地図で投資判断する</p>
+                <nav class="app-nav">
+                    <a href="/" class="app-nav-link is-active">地図</a>
+                    <a href="/properties" class="app-nav-link">収益物件一覧</a>
+                    <a href="/analysis" class="app-nav-link">歪み分析</a>
+                </nav>
             </div>
             <div id="api-status" class="status-badge {{ 'status-ok' if api_configured else 'status-warn' }}">
                 {{ 'API接続済' if api_configured else 'オフライン' }}

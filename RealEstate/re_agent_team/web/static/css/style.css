@@ -82,6 +82,34 @@ body {
     max-width: 230px;
 }
 
+.app-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.app-nav-link {
+    color: #90caf9;
+    text-decoration: none;
+    font-size: 0.72rem;
+    padding: 3px 8px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+}
+
+.app-nav-link:hover {
+    border-color: #3d5a80;
+    color: #e3f2fd;
+}
+
+.app-nav-link.is-active {
+    background: #4fc3f7;
+    color: #0d1b2a;
+    border-color: #4fc3f7;
+    font-weight: 600;
+}
+
 .focus-panel {
     border: 1px solid #243652;
     background: linear-gradient(180deg, #182640 0%, #141f36 100%);

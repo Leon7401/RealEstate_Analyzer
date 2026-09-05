@@ -294,6 +294,31 @@ function initMap(center, zoom) {
     }
     document.getElementById('btn-load-data')?.addEventListener('click', loadAreaData);
     document.getElementById('btn-analyze')?.addEventListener('click', analyzeProperty);
+
+    // 物件フィルタ・ソートは変更時に即反映
+    let _propFilterTimer = null;
+    const reloadPropsDebounced = () => {
+        clearTimeout(_propFilterTimer);
+        _propFilterTimer = setTimeout(() => loadSampleProperties(), 250);
+    };
+    document.getElementById('prop-filter-station')?.addEventListener('input', reloadPropsDebounced);
+    document.getElementById('prop-filter-type')?.addEventListener('change', () => loadSampleProperties());
+    document.getElementById('prop-sort')?.addEventListener('change', () => loadSampleProperties());
+    document.getElementById('compare-station')?.addEventListener('change', () => loadCompareTable());
+    document.getElementById('compare-sort')?.addEventListener('change', () => loadCompareTable());
+    document.getElementById('compare-grade')?.addEventListener('change', () => loadCompareTable());
+
+    // 歪みランキングの絞込・表示切替
+    document.getElementById('distortion-filter')?.addEventListener('input', () => {
+        if (typeof window._lastDistortionRanking !== 'undefined') {
+            renderDistortionRanking(window._lastDistortionRanking);
+        }
+    });
+    document.getElementById('distortion-view')?.addEventListener('change', () => {
+        if (typeof window._lastDistortionRanking !== 'undefined') {
+            renderDistortionRanking(window._lastDistortionRanking);
+        }
+    });
     const manualSaveBtn = document.getElementById('btn-save-manual-update');
     if (manualSaveBtn) manualSaveBtn.addEventListener('click', saveManualPropertyUpdate);
     const verifyBtn = document.getElementById('btn-verify-listings');
@@ -1222,11 +1247,8 @@ async function loadAreaData() {
         btn.textContent = 'API地価+賃料取得中...';
         const [apiLpResp, rentalResp] = await Promise.all([
             fetch(`/api/reinfolib/land-prices?${_mapBoundsParams()}&zoom=13&force_fetch=true`),
-            fetch('/api/scrape/rental', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({prefecture_code: pref, max_pages: 5}),
-            }),
+            // 実装は GET /api/scrape-rentals（POST /api/scrape/rental は存在しない）
+            fetch(`/api/scrape-rentals?prefecture_code=${encodeURIComponent(pref)}&max_pages=5`),
         ]);
 
         const apiLpData = await apiLpResp.json();
@@ -1375,7 +1397,16 @@ async function analyzeProperty() {
         station_distance_min: parseInt(document.getElementById('prop-station').value) || null,
         current_rent_annual: (parseInt(document.getElementById('prop-rent').value) || 0) * 10000,
         units: parseInt(document.getElementById('prop-units').value) || null,
+        nearest_station: document.getElementById('prop-nearest-station')?.value || null,
+        latitude: parseFloat(document.getElementById('prop-latitude')?.value) || null,
+        longitude: parseFloat(document.getElementById('prop-longitude')?.value) || null,
+        loan_rate: parseFloat(document.getElementById('loan-rate')?.value) || null,
+        loan_term_years: parseInt(document.getElementById('loan-term')?.value) || null,
+        loan_ltv: parseFloat(document.getElementById('loan-ltv')?.value) || null,
     };
+    if (!propData.latitude) delete propData.latitude;
+    if (!propData.longitude) delete propData.longitude;
+    if (!propData.nearest_station) delete propData.nearest_station;
 
     // 選択中の物件から座標を取得
     const presetIdx = document.getElementById('preset-select').value;
@@ -1478,7 +1509,13 @@ async function analyzeProperty() {
             showRanking(buildRankingFromProperties(sorted));
             renderSavedAnalysisDetail(p);
         }
-        switchTab('tab-property');
+        // 判定結果パネルは地図タブ側にあるため、地図タブに留める
+        switchTab('tab-map');
+        const resultPanel = document.getElementById('result-panel');
+        if (resultPanel) {
+            resultPanel.style.display = 'block';
+            resultPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
     } catch (err) {
         console.error('分析エラー:', err);
         alert('分析に失敗しました');
@@ -2401,6 +2438,38 @@ async function scrapeRentals() {
 
 // ===== 歪み分析（旧/analysis画面の機能を統合） =====
 
+function renderDistortionRanking(ranking) {
+    const el = document.getElementById('distortion-ranking');
+    if (!el) return;
+    const filter = (document.getElementById('distortion-filter')?.value || '').trim().toLowerCase();
+    const view = document.getElementById('distortion-view')?.value || 'distortion_score';
+    let rows = Array.isArray(ranking) ? [...ranking] : [];
+    if (filter) {
+        rows = rows.filter(r => String(r.station_name || '').toLowerCase().includes(filter));
+    }
+    rows.sort((a, b) => Number(b[view] || 0) - Number(a[view] || 0));
+    if (rows.length === 0) {
+        el.innerHTML = '<p style="color:#78909c">該当なし。先にバッチデータ収集を実行してください。</p>';
+        return;
+    }
+    el.innerHTML = rows.slice(0, 50).map((r, i) => {
+        const score = (r.distortion_score || 0).toFixed(2);
+        const yld = ((r.implied_yield || 0) * 100).toFixed(1);
+        const land = r.avg_land_price_sqm ? `¥${Math.round(r.avg_land_price_sqm).toLocaleString()}` : '-';
+        const rent = r.avg_rent_per_sqm ? `¥${Math.round(r.avg_rent_per_sqm).toLocaleString()}` : '-';
+        let metric = score;
+        if (view === 'implied_yield') metric = `${yld}%`;
+        else if (view === 'avg_land_price_sqm') metric = land;
+        else if (view === 'avg_rent_per_sqm') metric = rent;
+        return `<div style="display:flex;gap:6px;padding:3px 0;border-bottom:1px solid #1e3a5f;cursor:pointer;" ` +
+            `onclick="focusStation('${r.station_id||''}','${r.station_name||''}')">` +
+            `<span style="color:#78909c;width:20px;">${i+1}</span>` +
+            `<span style="flex:1;">${r.station_name||'?'}</span>` +
+            `<span style="color:#4fc3f7;width:70px;text-align:right;">${metric}</span>` +
+            `</div>`;
+    }).join('');
+}
+
 async function runDistortionAnalysis() {
     const btn = document.getElementById('btn-run-distortion');
     btn.disabled = true;
@@ -2414,22 +2483,8 @@ async function runDistortionAnalysis() {
         panel.style.display = 'block';
 
         const ranking = data.ranking || [];
-        const el = document.getElementById('distortion-ranking');
-        if (ranking.length === 0) {
-            el.innerHTML = '<p style="color:#78909c">データなし。先にバッチデータ収集を実行してください。</p>';
-        } else {
-            el.innerHTML = ranking.slice(0, 30).map((r, i) => {
-                const score = (r.distortion_score || 0).toFixed(2);
-                const yld = ((r.implied_yield || 0) * 100).toFixed(1);
-                return `<div style="display:flex;gap:6px;padding:3px 0;border-bottom:1px solid #1e3a5f;cursor:pointer;" ` +
-                    `onclick="focusStation('${r.station_id||''}','${r.station_name||''}')">` +
-                    `<span style="color:#78909c;width:20px;">${i+1}</span>` +
-                    `<span style="flex:1;">${r.station_name||'?'}</span>` +
-                    `<span style="color:#4fc3f7;width:50px;">${score}</span>` +
-                    `<span style="color:#66bb6a;width:45px;">${yld}%</span>` +
-                    `</div>`;
-            }).join('');
-        }
+        window._lastDistortionRanking = ranking;
+        renderDistortionRanking(ranking);
     } catch (e) {
         console.error('歪み分析エラー:', e);
     } finally {
