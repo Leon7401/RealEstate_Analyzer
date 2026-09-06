@@ -296,3 +296,18 @@
         margin-top: 12px;
     }
 }
+
+
+.link-pill {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.link-alive { background: #e8f5e9; color: #2e7d32; }
+.link-unchecked { background: #eceff1; color: #546e7a; }
+.link-suspect { background: #fff8e1; color: #f57f17; }
+.link-dead { background: #ffebee; color: #c62828; }
+.link-no_url { background: #f3e5f5; color: #6a1b9a; }

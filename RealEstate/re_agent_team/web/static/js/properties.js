@@ -44,6 +44,21 @@ function gradeClass(g) {
     return 'grade-none';
 }
 
+function linkStatusBadge(row) {
+    const code = row.link_status || 'unchecked';
+    const label = row.link_status_label || ({
+        alive: '掲載中', unchecked: '未確認', suspect: '要確認',
+        dead: 'リンク切れ', no_url: 'URLなし',
+    }[code] || code);
+    const title = [
+        row.verify_note ? `メモ: ${row.verify_note}` : '',
+        row.last_verified_at ? `確認: ${fmtDate(row.last_verified_at)}` : '',
+        row.last_verified_http_status != null ? `HTTP ${row.last_verified_http_status}` : '',
+        row.verify_fail_count ? `連続失敗 ${row.verify_fail_count}` : '',
+    ].filter(Boolean).join(' / ');
+    return `<span class="link-pill link-${code}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
+}
+
 function sortRows(rows, sortBy) {
     const key = sortBy || currentSort;
     const arr = [...rows];
@@ -76,7 +91,7 @@ function renderTable(rows) {
     }
 
     if (!sorted.length) {
-        tbody.innerHTML = '<tr><td colspan="15" class="empty">条件に合う収益物件がありません</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="16" class="empty">条件に合う収益物件がありません</td></tr>';
         return;
     }
 
@@ -104,6 +119,7 @@ function renderTable(rows) {
             <td>${escapeHtml(r.structure || '-')}</td>
             <td class="num">${r.building_age != null ? `築${r.building_age}` : (r.built_year || '-')}</td>
             <td>${escapeHtml(r.source || '-')}</td>
+            <td>${linkStatusBadge(r)}</td>
             <td class="muted">${fmtDate(r.updated_at || r.judged_at)}</td>
             <td class="row-actions">
                 <button type="button" data-detail="${r.id}">詳細</button>
@@ -165,6 +181,10 @@ function openDetail(id) {
             <dt>土地/建物</dt><dd>${row.land_area != null ? row.land_area + '㎡' : '-'} / ${row.building_area != null ? row.building_area + '㎡' : '-'}</dd>
             <dt>構造</dt><dd>${escapeHtml(row.structure || '-')} ${row.building_age != null ? `築${row.building_age}年` : ''}</dd>
             <dt>出典</dt><dd>${escapeHtml(row.source || '-')}</dd>
+            <dt>元ページ</dt><dd>${linkStatusBadge(row)}
+                ${row.last_verified_at ? `<span class="muted">（${fmtDate(row.last_verified_at)}）</span>` : ''}
+                ${row.verify_note ? `<div class="muted">${escapeHtml(row.verify_note)}</div>` : ''}
+            </dd>
         </dl>
         ${metricHtml}
         <div style="margin-top:12px;display:flex;gap:8px;">
@@ -177,7 +197,7 @@ function openDetail(id) {
 
 async function loadRows() {
     const tbody = document.getElementById('props-tbody');
-    if (tbody) tbody.innerHTML = '<tr><td colspan="15" class="empty">読込中...</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="16" class="empty">読込中...</td></tr>';
 
     const prefs = selectedPrefs();
     const station = document.getElementById('filter-station')?.value || '';
@@ -192,6 +212,9 @@ async function loadRows() {
     if (grade) params.set('grade', grade === 'unjudged' ? 'UNJUDGED' : grade.toUpperCase());
     if (sortBy) params.set('sort_by', sortBy);
     if (minYieldRaw) params.set('min_yield', String(Number(minYieldRaw) / 100));
+    const linkStatus = document.getElementById('filter-link-status')?.value || '';
+    if (linkStatus) params.set('link_status', linkStatus);
+    params.set('include_delisted', 'true');
     params.set('limit', '500');
 
     try {
@@ -201,7 +224,7 @@ async function loadRows() {
         renderTable(rowsCache);
     } catch (e) {
         console.error(e);
-        if (tbody) tbody.innerHTML = `<tr><td colspan="15" class="empty">読込エラー: ${escapeHtml(e.message)}</td></tr>`;
+        if (tbody) tbody.innerHTML = `<tr><td colspan="16" class="empty">読込エラー: ${escapeHtml(e.message)}</td></tr>`;
     }
 }
 
@@ -240,6 +263,8 @@ async function analyzeVisible() {
 
 function bindEvents() {
     document.getElementById('btn-reload')?.addEventListener('click', loadRows);
+    document.getElementById('filter-link-status')?.addEventListener('change', loadRows);
+    document.getElementById('btn-verify-links')?.addEventListener('click', verifySourceLinks);
     document.getElementById('btn-analyze-visible')?.addEventListener('click', analyzeVisible);
     document.getElementById('detail-close')?.addEventListener('click', () => {
         document.getElementById('props-detail').hidden = true;
@@ -275,6 +300,31 @@ function bindEvents() {
             renderTable(rowsCache);
         });
     });
+}
+
+async function verifySourceLinks() {
+    const btn = document.getElementById('btn-verify-links');
+    const status = document.getElementById('props-verify-status');
+    if (btn) { btn.disabled = true; btn.textContent = '走査中...'; }
+    if (status) status.textContent = '元ページを確認しています...';
+    try {
+        const resp = await fetch('/api/listings/verify-source', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ limit: 80, stale_hours: 24 }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+        const prop = (data.result || {}).properties || {};
+        if (status) {
+            status.textContent = `確認 ${prop.checked || 0}件 / 問題 ${prop.failed || 0}件`;
+        }
+        await loadRows();
+    } catch (e) {
+        if (status) status.textContent = `走査失敗: ${e.message}`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '元ページ走査'; }
+    }
 }
 
 document.addEventListener('DOMContentLoaded', () => {

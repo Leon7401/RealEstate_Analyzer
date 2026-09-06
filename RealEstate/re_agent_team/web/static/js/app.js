@@ -833,10 +833,24 @@ function renderPropertyList(props) {
             : (buildingPresence === 'building'
                 ? '<span style="background:#6a1b9a;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">建物あり</span>'
                 : '<span style="background:#546e7a;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">建物不明</span>');
-        const isDelisted = String(p.listing_status || 'active') === 'delisted';
-        const delistedBadge = isDelisted
-            ? '<span style="background:#b71c1c;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">掲載終了</span>'
-            : '';
+        const linkCode = (() => {
+            const url = String(p.source_url || '').trim();
+            if (!url) return 'no_url';
+            if (String(p.listing_status || 'active') === 'delisted') return 'dead';
+            if (Number(p.verify_fail_count || 0) > 0) return 'suspect';
+            if (!p.last_verified_at) return 'unchecked';
+            return 'alive';
+        })();
+        const isDelisted = linkCode === 'dead';
+        const linkBadgeMap = {
+            alive: ['#2e7d32', '掲載中'],
+            unchecked: ['#546e7a', '未確認'],
+            suspect: ['#f57f17', '要確認'],
+            dead: ['#b71c1c', 'リンク切れ'],
+            no_url: ['#6a1b9a', 'URLなし'],
+        };
+        const [linkColor, linkLabel] = linkBadgeMap[linkCode] || linkBadgeMap.unchecked;
+        const delistedBadge = `<span style="background:${linkColor};color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;" title="${(p.verify_note || '').replace(/"/g,'&quot;')}">${linkLabel}</span>`;
         const station = p.nearest_station ? `${p.nearest_station}${p.station_distance_min ? ' ' + p.station_distance_min + '分' : ''}` : '';
         const selected = realIdx === _selectedPropIdx ? 'background:#1a3a5f;' : '';
         const dimmed = isDelisted ? 'opacity:0.55;' : '';
@@ -920,9 +934,23 @@ function plotSampleProperties(propsToPlot) {
         });
 
         const estimated = p._coords_estimated ? '<span style="color:#ffa726;font-size:0.6rem;">(推定位置)</span>' : '';
-        const delistedBadge = String(p.listing_status || 'active') === 'delisted'
-            ? '<span style="background:#b71c1c;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;margin-left:4px;">掲載終了</span>'
-            : '';
+        const delistedBadge = (() => {
+            const url = String(p.source_url || '').trim();
+            let code = 'unchecked';
+            if (!url) code = 'no_url';
+            else if (String(p.listing_status || 'active') === 'delisted') code = 'dead';
+            else if (Number(p.verify_fail_count || 0) > 0) code = 'suspect';
+            else if (p.last_verified_at) code = 'alive';
+            const map = {
+                alive: ['#2e7d32', '掲載中'],
+                unchecked: ['#546e7a', '未確認'],
+                suspect: ['#f57f17', '要確認'],
+                dead: ['#b71c1c', 'リンク切れ'],
+                no_url: ['#6a1b9a', 'URLなし'],
+            };
+            const [bg, label] = map[code] || map.unchecked;
+            return `<span style="background:${bg};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;margin-left:4px;" title="${(p.verify_note || '').replace(/"/g,'&quot;')}">${label}</span>`;
+        })();
         const typeBadge = isLand ? '<span style="background:#1565c0;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;margin-left:4px;">土地</span>' : '';
         const scenarioBadge = p._analysis_scenario === 'rebuild'
             ? '<span style="background:#455a64;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.62rem;margin-left:4px;">建替案採用</span>'

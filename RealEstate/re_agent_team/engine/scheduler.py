@@ -20,6 +20,10 @@ from config.settings import (
     RENTAL_REFRESH_GEOCODE_BATCH,
     PROPERTY_REFRESH_INTERVAL_HOURS,
     PROPERTY_REFRESH_MAX_PAGES,
+    LISTING_VERIFY_INTERVAL_HOURS,
+    LISTING_VERIFY_BATCH,
+    LISTING_VERIFY_STALE_HOURS,
+    LISTING_VERIFY_CONFIRM_FAILURES,
 )
 
 logger = logging.getLogger("Scheduler")
@@ -69,6 +73,13 @@ class ScrapeScheduler:
             },
             "rental": {"last_run_at": None, "last_error": None},
             "growth": {"last_run_at": None, "last_error": None},
+            "listing_verify": {
+                "enabled": True,
+                "last_run_at": None,
+                "last_result": None,
+                "last_error": None,
+                "next_run_at": None,
+            },
         }
 
     def set_pipeline(self, pipeline) -> None:
@@ -145,7 +156,17 @@ class ScrapeScheduler:
         property_last_run: Optional[datetime] = None
         rental_last_run: Optional[datetime] = None
         growth_last_run: Optional[datetime] = None
+        verify_last_run: Optional[datetime] = None
         first = True
+
+        verify_enabled = _env_bool("RE_AUTO_LISTING_VERIFY", True)
+        verify_interval_h = float(
+            os.getenv(
+                "RE_AUTO_LISTING_VERIFY_INTERVAL_HOURS",
+                str(LISTING_VERIFY_INTERVAL_HOURS or 24),
+            )
+        )
+        self.status["listing_verify"]["enabled"] = verify_enabled
 
         while not self._stop_event.is_set():
             now = datetime.now()
@@ -177,7 +198,25 @@ class ScrapeScheduler:
                 logger.error("土地スケジューラエラー: %s", e)
                 self.status["land"]["last_error"] = str(e)
 
-            # 3) 賃料・成長は起動直後を避け、後続サイクルで実行
+            # 3) 元ページ掲載チェック（毎日）
+            try:
+                due_verify = verify_enabled and (
+                    first
+                    or verify_last_run is None
+                    or (now - verify_last_run) >= timedelta(hours=verify_interval_h)
+                )
+                if due_verify:
+                    self._run_listing_verify()
+                    verify_last_run = datetime.now()
+                if verify_enabled and verify_last_run is not None:
+                    self.status["listing_verify"]["next_run_at"] = (
+                        verify_last_run + timedelta(hours=verify_interval_h)
+                    ).isoformat(timespec="seconds")
+            except Exception as e:
+                logger.exception("掲載URL検証エラー: %s", e)
+                self.status["listing_verify"]["last_error"] = str(e)
+
+            # 4) 賃料・成長は起動直後を避け、後続サイクルで実行
             if not first:
                 try:
                     if rental_last_run is None or (
@@ -213,6 +252,7 @@ class ScrapeScheduler:
         self._running = False
         self.status["running"] = False
         logger.info("スケジューラループ終了")
+
 
     def _get_pipeline(self):
         if self._pipeline is not None:
@@ -358,6 +398,40 @@ class ScrapeScheduler:
                     e,
                 )
                 self.status["land"]["last_error"] = str(e)
+
+    def _run_listing_verify(self) -> None:
+        """掲載元ページの生存確認を走査し、リンク切れを記録する"""
+        from storage.database import Database
+        from services.listing_verifier import run_verification_batch
+
+        limit = int(os.getenv("RE_AUTO_LISTING_VERIFY_BATCH", str(LISTING_VERIFY_BATCH or 300)))
+        stale_hours = int(
+            os.getenv("RE_AUTO_LISTING_VERIFY_STALE_HOURS", str(LISTING_VERIFY_STALE_HOURS or 24))
+        )
+        confirm_failures = int(
+            os.getenv(
+                "RE_AUTO_LISTING_VERIFY_CONFIRM_FAILURES",
+                str(LISTING_VERIFY_CONFIRM_FAILURES or 2),
+            )
+        )
+        logger.info(
+            "=== 掲載URL検証開始 limit=%s stale_hours=%s ===",
+            limit,
+            stale_hours,
+        )
+        out = run_verification_batch(
+            Database(),
+            limit=limit,
+            stale_hours=stale_hours,
+            confirm_failures=confirm_failures,
+        )
+        with self._lock:
+            self.status["listing_verify"]["last_run_at"] = datetime.now().isoformat(
+                timespec="seconds"
+            )
+            self.status["listing_verify"]["last_result"] = out
+            self.status["listing_verify"]["last_error"] = None
+        logger.info("=== 掲載URL検証完了: %s ===", out)
 
     def _run_growth_pipeline(self) -> None:
         logger.info("=== 定期データ成長パイプライン開始 ===")

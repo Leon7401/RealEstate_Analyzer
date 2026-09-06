@@ -52,12 +52,22 @@
                     <option value="updated_at">更新日順</option>
                 </select>
                 <input type="number" id="filter-min-yield" placeholder="最低利回り%" step="0.1" min="0" style="width:110px;">
+                <select id="filter-link-status">
+                    <option value="">元ページすべて</option>
+                    <option value="alive">掲載中</option>
+                    <option value="unchecked">未確認</option>
+                    <option value="suspect">要確認</option>
+                    <option value="dead">リンク切れ</option>
+                    <option value="no_url">URLなし</option>
+                </select>
                 <button id="btn-reload" class="btn-primary">更新</button>
+                <button id="btn-verify-links" class="btn-secondary">元ページ走査</button>
                 <button id="btn-analyze-visible" class="btn-secondary">表示中を一括判定</button>
                 <a id="btn-export-csv" class="btn-secondary" href="/api/properties/export/csv">CSV</a>
             </div>
             <div class="props-meta">
                 <span id="props-count">読込中...</span>
+                <span id="props-verify-status"></span>
                 <span id="props-analyze-status"></span>
             </div>
         </section>
@@ -79,12 +89,13 @@
                         <th data-sort="structure">構造</th>
                         <th data-sort="building_age">築年</th>
                         <th data-sort="source">出典</th>
+                        <th data-sort="link_status">元ページ</th>
                         <th data-sort="updated_at">更新</th>
                         <th></th>
                     </tr>
                 </thead>
                 <tbody id="props-tbody">
-                    <tr><td colspan="15" class="empty">読込中...</td></tr>
+                    <tr><td colspan="16" class="empty">読込中...</td></tr>
                 </tbody>
             </table>
         </section>

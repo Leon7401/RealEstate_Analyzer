@@ -37,3 +37,9 @@ services:
         value: "3"
       - key: RE_AUTO_PROPERTY_INTERVAL_HOURS
         value: "6"
+      - key: RE_AUTO_LISTING_VERIFY
+        value: "1"
+      - key: RE_AUTO_LISTING_VERIFY_INTERVAL_HOURS
+        value: "24"
+      - key: RE_AUTO_LISTING_VERIFY_BATCH
+        value: "300"

@@ -518,23 +518,9 @@ def _refresh_property_from_source(raw: Dict[str, Any], use_browser: bool = False
 
 
 def _check_source_alive(url: str) -> Tuple[bool, Optional[int], str]:
-    if not url:
-        return False, None, "no_url"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-        )
-    }
-    try:
-        resp = requests.head(url, allow_redirects=True, timeout=12, headers=headers)
-        status = int(resp.status_code)
-        if status in (403, 405):
-            resp = requests.get(url, allow_redirects=True, timeout=15, headers=headers, stream=True)
-            status = int(resp.status_code)
-        return (200 <= status < 400), status, ""
-    except Exception as e:
-        return False, None, str(e)
+    from services.listing_verifier import check_source_alive
+    return check_source_alive(url)
+
 
 
 # ===== ページ =====
@@ -2473,44 +2459,22 @@ async def verify_listing_sources(request: Request):
     except Exception:
         data = {}
 
+    from services.listing_verifier import run_verification_batch
+
     limit = int(data.get("limit", LISTING_VERIFY_BATCH) or LISTING_VERIFY_BATCH)
     stale_hours = int(data.get("stale_hours", LISTING_VERIFY_STALE_HOURS) or LISTING_VERIFY_STALE_HOURS)
-    confirm_failures = int(data.get("confirm_failures", LISTING_VERIFY_CONFIRM_FAILURES) or LISTING_VERIFY_CONFIRM_FAILURES)
+    confirm_failures = int(
+        data.get("confirm_failures", LISTING_VERIFY_CONFIRM_FAILURES)
+        or LISTING_VERIFY_CONFIRM_FAILURES
+    )
+    out = run_verification_batch(
+        db,
+        limit=limit,
+        stale_hours=stale_hours,
+        confirm_failures=confirm_failures,
+    )
+    return JSONResponse(content={"status": "ok", **out})
 
-    out: Dict[str, Dict[str, int]] = {}
-    for table in ("properties", "land_listings"):
-        rows = db.get_source_verification_targets(
-            table=table,
-            limit=max(1, limit),
-            stale_hours=max(1, stale_hours),
-        )
-        checked = 0
-        alive_cnt = 0
-        failed_cnt = 0
-        for row in rows:
-            checked += 1
-            alive, status, note = _check_source_alive(str(row.get("source_url") or ""))
-            if alive:
-                alive_cnt += 1
-            else:
-                failed_cnt += 1
-            db.record_source_verification_result(
-                table=table,
-                row_id=row.get("id"),
-                is_alive=alive,
-                http_status=status,
-                note=note,
-                confirm_failures=max(1, confirm_failures),
-            )
-        out[table] = {"checked": checked, "alive": alive_cnt, "failed": failed_cnt}
-
-    return JSONResponse(content={
-        "status": "ok",
-        "limit": max(1, limit),
-        "stale_hours": max(1, stale_hours),
-        "confirm_failures": max(1, confirm_failures),
-        "result": out,
-    })
 
 
 @app.post("/api/stations/reconcile")
@@ -4373,6 +4337,8 @@ async def properties_analysis_table(
     min_yield: float = None,
     max_price: int = None,
     sort_by: str = "judge_score",
+    link_status: str = "",
+    include_delisted: bool = True,
     limit: int = 500,
     offset: int = 0,
 ):
@@ -4461,6 +4427,9 @@ async def properties_analysis_table(
             p.current_rent_annual, p.gross_yield,
             p.nearest_station, p.station_distance_min, p.station_id,
             p.source, p.source_url, p.listing_status,
+            p.last_verified_at, p.verify_fail_count,
+            p.last_verified_http_status, p.verify_note,
+            p.delisted_confirmed_at,
             p.updated_at, p.created_at,
             j.grade AS judge_grade,
             j.overall_score AS judge_score,
@@ -4498,7 +4467,23 @@ async def properties_analysis_table(
                     metrics = {}
             d.pop("judge_grade_rank", None)
             d["key_metrics"] = metrics
+            from services.listing_verifier import compute_link_status, link_status_label
+            code = compute_link_status(
+                source_url=d.get("source_url"),
+                listing_status=d.get("listing_status"),
+                last_verified_at=d.get("last_verified_at"),
+                verify_fail_count=d.get("verify_fail_count"),
+            )
+            d["link_status"] = code
+            d["link_status_label"] = link_status_label(code)
             rows.append(d)
+
+    # link_status フィルタ（SQL後）
+    link_filter = (link_status or "").strip().lower()
+    if link_filter:
+        rows = [r for r in rows if r.get("link_status") == link_filter]
+    if not include_delisted:
+        rows = [r for r in rows if r.get("listing_status") != "delisted"]
 
     return JSONResponse(content={
         "rows": rows,
