@@ -8,8 +8,15 @@ import requests
 from bs4 import BeautifulSoup
 
 from .base_agent import BaseAgent
+from .browser_fetch import (
+    describe_block,
+    get_browser_fetcher,
+    looks_blocked,
+    playwright_available,
+)
 from .url_scraper_agent import UrlScraperAgent
 from models.property import Property
+from data.station_master import resolve_station_id, STATION_MAP
 
 
 class ScraperAgent(BaseAgent):
@@ -26,12 +33,40 @@ class ScraperAgent(BaseAgent):
     RAKUMACHI_SEARCH = "https://www.rakumachi.jp/syuuekibukken/area/"
     KENBIYA_SEARCH = "https://www.kenbiya.com/pp0/s/{pref_slug}/"
     RALS_SEARCH = "https://www.rals.co.jp/invest/index.php"
+    ATHOME_BASE = "https://www.athome.co.jp"
+    ATHOME_BUY_OTHER = "https://www.athome.co.jp/buy_other/{pref_slug}/list/"
+    ATHOME_PREF_MAP = {
+        "13": "tokyo", "14": "kanagawa", "11": "saitama", "12": "chiba",
+    }
+    ATHOME_LIST_KEYWORDS = (
+        "一棟売アパート", "一棟売マンション", "売ビル", "一棟アパート",
+        "一棟マンション", "一棟売", "投資",
+    )
+    ATHOME_LIST_EXCLUDE = (
+        "売駐車場", "中古一戸建て", "売倉庫", "戸建て", "区分", "借地",
+    )
+
+    # LIFULL HOME'S 不動産投資（一棟アパート等）
+    HOMES_TOUSHI_BASE = "https://toushi.homes.co.jp"
+    HOMES_TOUSHI_SEARCH = "https://toushi.homes.co.jp/bukkensearch/"
+    # tbg: 2=一棟アパート, 1=一棟マンション など
+    HOMES_BUILDING_TYPES = ("2", "1")
 
     # 対象物件種別（タイトル先頭で判定）
-    ALLOWED_PROPERTY_TYPES = ["1棟アパート", "1棟マンション", "一棟アパート", "一棟マンション", "1棟商業ビル", "土地"]
+    ALLOWED_PROPERTY_TYPES = [
+        "1棟アパート", "1棟マンション", "一棟アパート", "一棟マンション",
+        "1棟商業ビル", "土地",
+        "一棟売アパート", "一棟売マンション", "売ビル", "一棟売",
+    ]
     # 除外キーワード（借地権・区分・PR広告等）
     EXCLUDED_KEYWORDS = ["借地", "定借", "定期借地", "地上権", "区分"]
     EXCLUDED_PREFIXES = ["PR"]  # PR広告物件
+    PREF_NAME_MAP = {
+        "13": ("東京都", "東京"),
+        "14": ("神奈川県", "神奈川"),
+        "11": ("埼玉県", "埼玉"),
+        "12": ("千葉県", "千葉"),
+    }
 
     SUUMO_BASE = "https://suumo.jp"
     # SUUMO賃貸のエリア別URL
@@ -107,18 +142,97 @@ class ScraperAgent(BaseAgent):
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
+            "Chrome/131.0.0.0 Safari/537.36"
         ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
     }
 
     def __init__(self):
         super().__init__("ScraperAgent")
         self.session = requests.Session()
         self.session.headers.update(self.HEADERS)
-        self._rate_limit = 3.0
+        self._rate_limit = 4.0
         self._last_request = 0.0
         self.url_scraper = UrlScraperAgent()
+        self.last_source_errors: Dict[str, str] = {}
+        self._browser = get_browser_fetcher()
+
+    def _warm_session(self, url: str):
+        """一覧取得前にトップへアクセスして Cookie を温める（403対策）"""
+        try:
+            self.session.get(url, timeout=12)
+        except requests.RequestException:
+            pass
+
+    def _fetch_html(
+        self,
+        url: str,
+        *,
+        params: Optional[Dict[str, str]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        warm_url: Optional[str] = None,
+        prefer_browser: bool = False,
+        timeout: int = 20,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        HTML取得。requests →（拒否時）Playwright の順。
+        Returns: (html, error_message)
+        """
+        full_url = url
+        if params:
+            from urllib.parse import urlencode
+
+            qs = urlencode(params)
+            full_url = f"{url}?{qs}" if "?" not in url else f"{url}&{qs}"
+
+        html: Optional[str] = None
+        status: Optional[int] = None
+        err: Optional[str] = None
+
+        if not prefer_browser:
+            for attempt in range(3):
+                self._throttle()
+                try:
+                    resp = self.session.get(url, params=params, timeout=timeout, headers=headers or {})
+                    status = resp.status_code
+                    resp.encoding = resp.apparent_encoding or "utf-8"
+                    html = resp.text
+                    if resp.status_code == 200 and not looks_blocked(html, status):
+                        return html, None
+                    if resp.status_code == 429 and attempt < 2:
+                        wait = 8 * (attempt + 1)
+                        self.logger.info("HTTP 429: %s秒待機して再試行 (%s)", wait, full_url[:80])
+                        time.sleep(wait)
+                        continue
+                    err = describe_block(html or "", status)
+                    break
+                except requests.RequestException as e:
+                    err = f"HTTP error: {e}"
+                    html = None
+                    break
+
+        if playwright_available():
+            self.logger.info("ブラウザ取得にフォールバック: %s", full_url[:120])
+            b_html, b_status, b_err = self._browser.fetch(
+                full_url, warm_url=warm_url, wait_ms=2200
+            )
+            if b_html and not looks_blocked(b_html, b_status):
+                return b_html, None
+            err = b_err or describe_block(b_html or "", b_status) or err
+
+        return None, err or "取得失敗"
 
     # ================================================================
     # 収益物件スクレイピング (楽待)
@@ -150,10 +264,20 @@ class ScraperAgent(BaseAgent):
 
         all_properties = []
         seen_urls = set()
+        self.last_source_errors = {}
         source_handlers = {
             "rakumachi": self._scrape_rakumachi_page,
             "kenbiya": self._scrape_kenbiya_page,
             "rals": self._scrape_rals_page,
+            "athome": self._scrape_athome_page,
+            "homes": self._scrape_homes_page,
+        }
+        warm_urls = {
+            "rakumachi": self.RAKUMACHI_BASE + "/",
+            "kenbiya": "https://www.kenbiya.com/",
+            "rals": "https://www.rals.co.jp/",
+            "athome": self.ATHOME_BASE + "/",
+            "homes": self.HOMES_TOUSHI_BASE + "/",
         }
 
         for src in srcs:
@@ -161,23 +285,33 @@ class ScraperAgent(BaseAgent):
             if not handler:
                 self.logger.info(f"  [{src}] 未対応ソースのためスキップ")
                 continue
+            if warm_urls.get(src):
+                self._warm_session(warm_urls[src])
+            got_any = False
             for page in range(1, max_pages + 1):
                 self.logger.info(f"  [{src}] ページ {page}/{max_pages}...")
                 try:
                     props = handler(prefecture_code, page)
                     if not props:
-                        if page == 1:
+                        if page == 1 and src not in self.last_source_errors:
+                            self.last_source_errors[src] = "取得0件（ブロックまたはHTML構造変更の可能性）"
                             self.logger.info(f"  [{src}] 取得0件")
                         break
+                    got_any = True
                     for p in props:
-                        url = p.source_url or ""
+                        url = getattr(p, "source_url", None) or ""
                         if url and url not in seen_urls:
                             seen_urls.add(url)
                             all_properties.append(p)
+                        elif not url:
+                            all_properties.append(p)
                     self.logger.info(f"  [{src}] ページ {page}: {len(props)}件")
                 except Exception as e:
+                    self.last_source_errors[src] = str(e)
                     self.logger.warning(f"  [{src}] ページ {page} エラー: {e}")
                     break
+            if got_any and src in self.last_source_errors:
+                self.last_source_errors.pop(src, None)
 
         self.logger.info(f"収益物件スクレイピング完了: {len(all_properties)}件")
         return all_properties
@@ -191,9 +325,7 @@ class ScraperAgent(BaseAgent):
     def _scrape_rakumachi_page(
         self, pref_code: str, page: int = 1,
     ) -> List[Property]:
-        """楽待の収益物件一覧をスクレイピング"""
-        self._throttle()
-
+        """楽待の収益物件一覧をスクレイピング（403時はブラウザフォールバック）"""
         pref_name = self.RAKUMACHI_PREF_MAP.get(pref_code, "tokyo")
         url = f"{self.RAKUMACHI_SEARCH}{pref_name}/"
         params = {
@@ -201,16 +333,25 @@ class ScraperAgent(BaseAgent):
             "sort": "property_created_at",
             "sort_type": "desc",
         }
-
-        try:
-            resp = self.session.get(url, params=params, timeout=15)
-            resp.raise_for_status()
-            resp.encoding = "utf-8"
-        except requests.RequestException as e:
-            self.logger.error(f"楽待 HTTP error: {e}")
+        headers = {
+            "Referer": f"{self.RAKUMACHI_BASE}/",
+            "Sec-Fetch-Site": "same-origin",
+        }
+        html, err = self._fetch_html(
+            url,
+            params=params,
+            headers=headers,
+            warm_url=f"{self.RAKUMACHI_BASE}/",
+        )
+        if not html:
+            self.last_source_errors["rakumachi"] = err or "取得失敗"
+            self.logger.error("楽待取得失敗: %s", err)
             return []
 
-        return self._parse_rakumachi(resp.text, pref_code)
+        props = self._parse_rakumachi(html, pref_code)
+        if not props and looks_blocked(html):
+            self.last_source_errors["rakumachi"] = describe_block(html)
+        return props
 
     def _parse_rakumachi(self, html: str, pref_code: str) -> List[Property]:
         """楽待HTMLを構造的にパース"""
@@ -308,7 +449,7 @@ class ScraperAgent(BaseAgent):
 
         # 交通
         transport = fields.get("交通", "")
-        station, distance = self._extract_station_from_transport(transport)
+        station, distance, station_id = self._extract_station_from_transport(transport, pref_code=pref_code)
 
         # 構造
         structure = self._extract_structure(
@@ -322,8 +463,16 @@ class ScraperAgent(BaseAgent):
         # 面積
         land_text = fields.get("土地面積", "")
         land_area = self._extract_area_val(land_text)
-        bldg_text = fields.get("建物面積", "") or fields.get("専有面積", "")
+        bldg_text = (
+            fields.get("建物面積", "")
+            or fields.get("建物延床面積", "")
+            or fields.get("延床面積", "")
+            or fields.get("専有面積", "")
+        )
         building_area = self._extract_area_val(bldg_text)
+        floors = self._extract_floor_count(
+            fields.get("階数", "") + " " + fields.get("建物階数", "") + " " + fields.get("建物", "")
+        )
 
         # フォールバック: フルテキストから不足情報を補完
         full_text = card.get_text(" ", strip=True)
@@ -352,13 +501,17 @@ class ScraperAgent(BaseAgent):
             else:
                 structure = self._extract_structure(full_text)
         if not station:
-            station, distance = self._extract_station_from_transport(full_text)
+            station, distance, station_id = self._extract_station_from_transport(full_text, pref_code=pref_code)
         if not land_area:
             m = re.search(r"土地\s*([\d,.]+)\s*(?:m²|㎡|m2)", full_text)
             if m:
                 land_area = float(m.group(1).replace(",", ""))
         if not building_area:
-            m = re.search(r"建物\s*([\d,.]+)\s*(?:m²|㎡|m2)", full_text)
+            m = re.search(r"(?:建物|延床|建物延床|専有)\s*(?:面積)?\s*[:：]?\s*([\d,.]+)\s*(?:m²|㎡|m2|平米)", full_text)
+            if m:
+                building_area = float(m.group(1).replace(",", ""))
+        if not building_area:
+            m = re.search(r"([\d,.]+)\s*(?:m²|㎡|m2|平米)\s*(?:建物|延床|専有)", full_text)
             if m:
                 building_area = float(m.group(1).replace(",", ""))
         if not building_age:
@@ -367,6 +520,8 @@ class ScraperAgent(BaseAgent):
                 building_age = int(m.group(1))
                 from datetime import datetime
                 built_year = datetime.now().year - building_age
+        if not floors:
+            floors = self._extract_floor_count(full_text)
 
         if not price and not gross_yield:
             return None
@@ -382,15 +537,17 @@ class ScraperAgent(BaseAgent):
             land_area=land_area,
             building_area=building_area,
             structure=structure,
+            floors=floors,
             built_year=built_year,
             building_age=building_age,
             gross_yield=gross_yield,
             nearest_station=station,
             station_distance_min=distance,
+            station_id=station_id,
             current_rent_annual=(
                 int(price * gross_yield) if price and gross_yield else None
             ),
-            source="楽待",
+            source="rakumachi",
             source_url=source_url,
         )
 
@@ -401,7 +558,7 @@ class ScraperAgent(BaseAgent):
         url = self.KENBIYA_SEARCH.format(pref_slug=pref_slug)
         params = {"page": str(page)}
         return self._crawl_detail_urls(
-            source_name="健美家",
+            source_name="kenbiya",
             list_url=url,
             params=params,
             url_pattern=r"kenbiya\.com/.+/(?:detail|view|bukken|estate)",
@@ -416,10 +573,62 @@ class ScraperAgent(BaseAgent):
             "area": pref_map.get(pref_code, "tokyo"),
         }
         return self._crawl_detail_urls(
-            source_name="不動産投資連合隊",
+            source_name="rals",
             list_url=self.RALS_SEARCH,
             params=params,
-            url_pattern=r"(rals\.co\.jp|fudosan\.cbiz\.ne\.jp).*(?:detail|index|invest)",
+            url_pattern=r"fudosan\.cbiz\.ne\.jp/detailPage/",
+        )
+
+
+
+    def _scrape_homes_page(self, pref_code: str, page: int = 1) -> List[Property]:
+        """LIFULL HOME'S不動産投資の一棟一覧から詳細を構造化"""
+        self._throttle()
+        props: List[Property] = []
+        seen = set()
+        for tbg in self.HOMES_BUILDING_TYPES:
+            list_url = (
+                f"{self.HOMES_TOUSHI_SEARCH}?addr11={pref_code}"
+                f"&tbg[]={tbg}&page={page}"
+            )
+            batch = self._crawl_detail_urls(
+                source_name="homes",
+                list_url=list_url,
+                params={},
+                url_pattern=r"bukkendetail/index/\d+",
+                prefer_browser=True,
+            )[:12]
+            for prop in batch:
+                key = getattr(prop, "source_url", None) or prop.name
+                if key in seen:
+                    continue
+                seen.add(key)
+                if not getattr(prop, "prefecture_code", None):
+                    prop.prefecture_code = pref_code
+                props.append(prop)
+            if len(props) >= 20:
+                break
+        return props[:20]
+
+    def _scrape_athome_page(self, pref_code: str, page: int = 1) -> List[Property]:
+        """アットホーム事業用（一棟売等）一覧から詳細URLを収集して構造化"""
+        self._throttle()
+        pref_slug = self.ATHOME_PREF_MAP.get(pref_code, "tokyo")
+        if page <= 1:
+            list_url = self.ATHOME_BUY_OTHER.format(pref_slug=pref_slug)
+        else:
+            list_url = (
+                self.ATHOME_BUY_OTHER.format(pref_slug=pref_slug).rstrip("/")
+                + f"/page{page}/"
+            )
+        return self._crawl_detail_urls(
+            source_name="athome",
+            list_url=list_url,
+            params={},
+            url_pattern=r"athome\.co\.jp/buy_other/\d+",
+            prefer_browser=True,
+            list_text_include=self.ATHOME_LIST_KEYWORDS,
+            list_text_exclude=self.ATHOME_LIST_EXCLUDE,
         )
 
     def _crawl_detail_urls(
@@ -428,17 +637,39 @@ class ScraperAgent(BaseAgent):
         list_url: str,
         params: Dict[str, str],
         url_pattern: str,
+        prefer_browser: bool = False,
+        list_text_include=None,
+        list_text_exclude=None,
     ) -> List[Property]:
         """一覧ページから候補URLを抽出し、詳細ページを構造化"""
-        try:
-            resp = self.session.get(list_url, params=params, timeout=20)
-            resp.raise_for_status()
-            resp.encoding = resp.apparent_encoding or "utf-8"
-        except requests.RequestException as e:
-            self.logger.warning(f"[{source_name}] 一覧取得失敗: {e}")
+        warm = f"{urlparse_base(list_url)}/"
+        html, err = self._fetch_html(
+            list_url,
+            params=params,
+            warm_url=warm,
+            prefer_browser=prefer_browser,
+        )
+        if not html:
+            key = {
+                "kenbiya": "kenbiya",
+                "健美家": "kenbiya",
+                "rals": "rals",
+                "不動産投資連合隊": "rals",
+                "athome": "athome",
+                "アットホーム": "athome",
+                "homes": "homes",
+                "HOME'S": "homes",
+            }.get(source_name, source_name)
+            # 属性名の揺れに対応
+            if not hasattr(self, "last_source_errors") or self.last_source_errors is None:
+                self.last_source_errors = {}
+            self.last_source_errors[key] = err or "一覧取得失敗"
+            self.logger.warning("[%s] 一覧取得失敗: %s", source_name, err)
             return []
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = BeautifulSoup(html, "html.parser")
+        include = tuple(list_text_include or ())
+        exclude = tuple(list_text_exclude or ())
         urls = []
         for a in soup.select("a[href]"):
             href = (a.get("href") or "").strip()
@@ -454,23 +685,62 @@ class ScraperAgent(BaseAgent):
                 continue
             if "login" in href or "member" in href:
                 continue
+            # 一覧カード文言で投資物件を優先フィルタ（athome混在対策）
+            card_text = ""
+            parent = a.find_parent(["article", "li", "div", "tr"])
+            if parent is not None:
+                card_text = parent.get_text(" ", strip=True)[:240]
+            else:
+                card_text = a.get_text(" ", strip=True)[:240]
+            if exclude and any(k in card_text for k in exclude):
+                continue
+            if include and not any(k in card_text for k in include):
+                continue
             urls.append(href.split("#")[0])
 
         # 重複除去 + 上限（一覧1pあたりの過剰アクセスを抑える）
         uniq_urls = list(dict.fromkeys(urls))[:25]
+        # 一覧フィルタで0件なら、フィルタ無しのURLへフォールバック（最大12件）
+        if not uniq_urls and include:
+            raw = []
+            for a in soup.select("a[href]"):
+                href = (a.get("href") or "").strip()
+                if not href:
+                    continue
+                if href.startswith("//"):
+                    href = "https:" + href
+                elif href.startswith("/"):
+                    href = urljoin(list_url, href)
+                elif not href.startswith("http"):
+                    href = urljoin(list_url, href)
+                if re.search(url_pattern, href) and "login" not in href:
+                    raw.append(href.split("#")[0])
+            uniq_urls = list(dict.fromkeys(raw))[:12]
+
         properties: List[Property] = []
+        use_browser_detail = bool(prefer_browser)
         for detail_url in uniq_urls:
             try:
-                prop = self.url_scraper.run(url=detail_url, use_ocr=False, use_browser=False)
+                prop = self.url_scraper.run(
+                    url=detail_url,
+                    use_ocr=False,
+                    use_browser=use_browser_detail,
+                )
+                if not prop and not use_browser_detail and playwright_available():
+                    prop = self.url_scraper.run(
+                        url=detail_url, use_ocr=False, use_browser=True
+                    )
+                    if prop:
+                        use_browser_detail = True
                 if not prop:
                     continue
-                # 既存フィルタに寄せる
                 title = (prop.name or "").strip()
-                if any(kw in title for kw in self.EXCLUDED_KEYWORDS):
+                excluded = getattr(self, "EXCLUDED_KEYWORDS", []) or []
+                if any(kw in title for kw in excluded):
                     continue
-                if not any(t in title for t in self.ALLOWED_PROPERTY_TYPES):
-                    # タイトルに種別が無い場合は利回り付き物件のみ採用
-                    if not prop.gross_yield:
+                allowed = self.ALLOWED_PROPERTY_TYPES
+                if not any(t in title for t in allowed):
+                    if not getattr(prop, "gross_yield", None):
                         continue
                 prop.source = source_name
                 properties.append(prop)
@@ -554,7 +824,11 @@ class ScraperAgent(BaseAgent):
         for card in cards:
             try:
                 # 建物情報
-                title_el = card.select_one(".cassetteitem_content-title")
+                title_el = (
+                    card.select_one(".cassetteitem_content-title")
+                    or card.select_one(".cassetteitem_content-label")
+                    or card.select_one(".cassetteitem_title")
+                )
                 building_name = title_el.get_text(strip=True) if title_el else ""
 
                 addr_el = card.select_one(".cassetteitem_detail-col1")
@@ -576,12 +850,18 @@ class ScraperAgent(BaseAgent):
                 if m:
                     from datetime import datetime
                     built_year = datetime.now().year - int(m.group(1))
+                floors_total = None
+                m_total = re.search(r"(\d+)階建", col3_text)
+                if m_total:
+                    floors_total = int(m_total.group(1))
+                if floors_total is None:
+                    floors_total = self._extract_floor_count(col3_text)
 
                 # 構造
                 structure = self._extract_structure(col3_text + " " + building_name)
 
                 # 駅・徒歩
-                station, distance = self._extract_station_from_transport(station_text)
+                station, distance, station_id = self._extract_station_from_transport(station_text, pref_code=pref_code)
 
                 city_code = self._guess_city_code(address, pref_code)
 
@@ -594,17 +874,26 @@ class ScraperAgent(BaseAgent):
 
                     texts = [td.get_text(strip=True) for td in tds]
 
+                    unit_text = " ".join(texts)
+
                     # 賃料 (例: "15万円12000円" → 150000 + 12000 = rent, 管理費は別)
-                    rent_text = texts[3] if len(texts) > 3 else ""
+                    rent_text = texts[3] if len(texts) > 3 else unit_text
                     rent = self._extract_rent(rent_text)
                     if not rent or rent < 10000:
                         continue
 
                     # 面積 (例: "1SK34.7m2")
-                    area_text = texts[5] if len(texts) > 5 else ""
+                    area_text = texts[5] if len(texts) > 5 else unit_text
                     area = self._extract_area_val(area_text)
                     if not area or area < 5:
                         continue
+                    floor = None
+                    floor_text = " ".join(texts[:3]) or unit_text
+                    m_floor = re.search(r"(\d+)階", floor_text)
+                    if m_floor:
+                        floor = int(m_floor.group(1))
+                    if floor is None:
+                        floor = self._extract_unit_floor(unit_text)
 
                     # 間取り（1R/ワンルーム/1K/1LDK 等を正規化）
                     layout = self._extract_layout(area_text or " ".join(texts))
@@ -616,6 +905,7 @@ class ScraperAgent(BaseAgent):
                         continue
 
                     rentals.append({
+                        "building_name": building_name,
                         "address": address,
                         "rent_monthly": rent,
                         "area_sqm": area,
@@ -623,8 +913,11 @@ class ScraperAgent(BaseAgent):
                         "layout": layout,
                         "structure": structure,
                         "built_year": built_year,
+                        "floor": floor,
+                        "floors_total": floors_total,
                         "nearest_station": station,
                         "station_distance_min": distance,
+                        "station_id": station_id,
                         "city_code": city_code,
                         "source": "SUUMO賃貸",
                     })
@@ -694,6 +987,29 @@ class ScraperAgent(BaseAgent):
                 return val
         return None
 
+    def _extract_floor_count(self, text: str) -> Optional[int]:
+        if not text:
+            return None
+        m = re.search(r"(\d+)\s*階建", text)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"地上\s*(\d+)\s*階", text)
+        if m:
+            return int(m.group(1))
+        return None
+
+    def _extract_unit_floor(self, text: str) -> Optional[int]:
+        if not text:
+            return None
+        # "3階/10階建", "4階", "B1階"
+        m = re.search(r"(\d+)\s*階\s*/\s*\d+\s*階建", text)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"(\d+)\s*階", text)
+        if m:
+            return int(m.group(1))
+        return None
+
     def _extract_structure(self, text: str) -> Optional[str]:
         if not text:
             return None
@@ -720,19 +1036,52 @@ class ScraperAgent(BaseAgent):
             return (year, max(0, datetime.now().year - year))
         return (None, None)
 
-    def _extract_station_from_transport(self, text: str) -> tuple:
-        """交通テキストから駅名と徒歩分数を抽出"""
+    def _extract_station_from_transport(self, text: str, pref_code: str = None) -> tuple:
+        """交通テキストから実在駅名/駅IDと徒歩分数を抽出"""
         if not text:
-            return (None, None)
-        # "東武亀戸線 小村井駅 徒歩2分"
-        m = re.search(r"(\S+駅)\s*(?:.*?)(?:歩|徒歩)\s*(\d+)\s*分", text)
-        if m:
-            return (m.group(1), int(m.group(2)))
-        # "「渋谷」駅 歩5分"
-        m = re.search(r"「(.+?)」.*?(?:歩|徒歩)\s*(\d+)\s*分", text)
-        if m:
-            return (m.group(1), int(m.group(2)))
-        return (None, None)
+            return (None, None, None)
+
+        raw = str(text).replace("\n", " ").replace("　", " ")
+        raw = re.sub(r"\s+", " ", raw).strip()
+
+        # 候補抽出（「駅」表記、引用符表記、最寄り駅ラベル）
+        candidates = []
+        for pat in [
+            r"([^\s/／()（）,、]+?)駅",
+            r"「([^」]+)」",
+            r"最寄(?:り)?駅[:：]?\s*([^\s/／()（）,、]+)",
+        ]:
+            for m in re.finditer(pat, raw):
+                name = (m.group(1) or "").strip()
+                if not name:
+                    continue
+                if name in {"徒歩", "バス", "停", "分"}:
+                    continue
+                candidates.append(name)
+
+        # 近傍距離（徒歩）を先に拾う
+        dist = None
+        md = re.search(r"(?:歩|徒歩)\s*(\d+)\s*分", raw)
+        if md:
+            dist = int(md.group(1))
+        else:
+            md = re.search(r"バス\s*\d+\s*分", raw)
+            if md:
+                # バスのみは精度が低いので徒歩距離は未設定
+                dist = None
+
+        # 候補を実在駅に正規化
+        for cand in candidates:
+            sid = resolve_station_id(nearest_station_text=cand, pref_code=pref_code)
+            if sid and sid in STATION_MAP:
+                return (STATION_MAP[sid]["name"], dist, sid)
+
+        # 交通文全体をフォールバックで解決
+        sid = resolve_station_id(nearest_station_text=raw, pref_code=pref_code)
+        if sid and sid in STATION_MAP:
+            return (STATION_MAP[sid]["name"], dist, sid)
+
+        return (None, dist, None)
 
     def _extract_layout(self, text: str) -> Optional[str]:
         """SUUMO表記ゆれを含む間取り抽出"""
@@ -787,3 +1136,10 @@ class ScraperAgent(BaseAgent):
             if name in address:
                 return code
         return f"unknown_{pref_code}"
+
+
+def urlparse_base(url: str) -> str:
+    from urllib.parse import urlparse as _urlparse
+
+    p = _urlparse(url)
+    return f"{p.scheme}://{p.netloc}"

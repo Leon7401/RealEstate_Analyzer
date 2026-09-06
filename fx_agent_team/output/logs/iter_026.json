@@ -1,0 +1,82 @@
+{
+  "iteration": 26,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "RSI",
+        "params": {
+          "window": 13
+        }
+      },
+      {
+        "name": "EMA",
+        "params": {
+          "window": 137
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "threshold_below",
+        "params": {
+          "indicator": "RSI_13",
+          "value": 33.0
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "threshold_above",
+        "params": {
+          "indicator": "RSI_13",
+          "value": 70
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.03298427626348907,
+      "take_profit_pct": 0.052,
+      "max_position_pct": 0.05,
+      "max_drawdown_pct": 0.15
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_32935046",
+    "version": 2,
+    "parent_id": "strat_434fa374",
+    "created_at": "2026-03-09T15:58:28.617645"
+  },
+  "result": {
+    "strategy_id": "strat_32935046",
+    "total_return": "3.26%",
+    "sharpe_ratio": "0.101",
+    "max_drawdown": "-17.71%",
+    "win_rate": "56.25%",
+    "profit_factor": "1.173",
+    "total_trades": 16,
+    "calmar_ratio": "0.184"
+  },
+  "critique": {
+    "grade": "D",
+    "weaknesses": [
+      "Low risk-adjusted return (Sharpe < 0.5)",
+      "High drawdown (> 15%)",
+      "Marginal edge (profit factor < 1.2)",
+      "Limited trade sample (< 30)"
+    ],
+    "suggestions": [
+      "Adjust indicator parameters for better signal quality",
+      "Consider tighter stop-loss",
+      "Widen take-profit target",
+      "Consider loosening entry thresholds slightly"
+    ],
+    "scores": {
+      "sharpe": "0.1010",
+      "max_drawdown": "-0.1771",
+      "win_rate": "0.5625",
+      "profit_factor": "1.1728",
+      "total_trades": 16,
+      "total_return": "0.0326"
+    }
+  }
+}

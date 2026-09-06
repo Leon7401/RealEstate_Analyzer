@@ -1401,7 +1401,13 @@ class MeshGrowthPipeline:
                 )
                 if results:
                     saved = self.db.upsert_rental_comps(results)
-                    logger.info(f"    → {len(results)}件取得, {saved}件保存")
+                    dedupe = self.db.merge_duplicate_rental_comps(
+                        dry_run=False, min_group_size=2, max_groups=3000
+                    )
+                    logger.info(
+                        f"    → {len(results)}件取得, {saved}件保存, "
+                        f"重複統合{dedupe.get('merged_records', 0)}件"
+                    )
                 else:
                     logger.info(f"    → 0件")
             except Exception as e:

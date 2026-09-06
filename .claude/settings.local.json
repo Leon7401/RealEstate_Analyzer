@@ -64,7 +64,18 @@
       "Bash(1 __NEW_LINE_63a1107da6f47e4f__ echo \"=== 3. 利回り ===\" curl -s \"http://127.0.0.1:8080/api/layers/yield-distortion?$B\")",
       "Bash(1 __NEW_LINE_63a1107da6f47e4f__ echo \"=== 4. 取引 ===\" curl -s \"http://127.0.0.1:8080/api/layers/transactions?$B\")",
       "Bash(B=\"south=35.3&west=139.3&north=36.1&east=140.3\" __NEW_LINE_1db71d65f272d275__ echo \"=== 1. 地価 ===\" curl -s \"http://127.0.0.1:8080/api/layers/land-price?$B\")",
-      "Bash(B=\"south=35.5&west=139.5&north=35.8&east=139.9\" __NEW_LINE_8d8a354d1fa30a70__ echo \"=== 賃料\\(detail\\) ===\" curl -s \"http://127.0.0.1:8080/api/layers/rent?$B&mode=detail\")"
+      "Bash(B=\"south=35.5&west=139.5&north=35.8&east=139.9\" __NEW_LINE_8d8a354d1fa30a70__ echo \"=== 賃料\\(detail\\) ===\" curl -s \"http://127.0.0.1:8080/api/layers/rent?$B&mode=detail\")",
+      "Bash(B=\"south=35.6&west=139.6&north=35.75&east=139.85\" __NEW_LINE_bd19a7946045dcab__ echo \"=== 取引\\(メッシュ粒度\\) ===\" curl -s \"http://127.0.0.1:8080/api/layers/mesh-transactions?$B\")",
+      "Bash(claude --version)",
+      "Bash(grep -E \"\\\\.\\(py|js|html|sql\\)$\")",
+      "Bash(node --check web/static/js/app.js)",
+      "Bash(node -e \"require\\('fs'\\).readFileSync\\('web/static/js/app.js','utf8'\\); new Function\\(require\\('fs'\\).readFileSync\\('web/static/js/app.js','utf8'\\)\\);\")",
+      "Bash(wmic process:*)",
+      "Bash(python3:*)",
+      "Bash(grep -n \"^]$\" data/station_master.py)",
+      "Read(//home/user/**)",
+      "Bash(bash -c 'cat /tmp/check_stations.py')",
+      "Bash(iconv -f utf-8 -t utf-8)"
     ]
   }
 }

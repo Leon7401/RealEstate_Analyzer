@@ -1,0 +1,90 @@
+{
+  "iteration": 28,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "MACD",
+        "params": {
+          "window_slow": 22,
+          "window_fast": 12,
+          "window_sign": 8
+        }
+      },
+      {
+        "name": "SMA",
+        "params": {
+          "window": 108
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "threshold_above",
+        "params": {
+          "indicator": "macd_diff_22",
+          "value": 0
+        }
+      },
+      {
+        "type": "threshold_above",
+        "params": {
+          "indicator": "close",
+          "value": 0
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "threshold_below",
+        "params": {
+          "indicator": "macd_diff_22",
+          "value": 0
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.005,
+      "take_profit_pct": 0.04,
+      "max_position_pct": 0.06,
+      "max_drawdown_pct": 0.14
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_46d5f66b",
+    "version": 2,
+    "parent_id": "strat_a743fe4e",
+    "created_at": "2026-03-09T15:58:28.695368"
+  },
+  "result": {
+    "strategy_id": "strat_46d5f66b",
+    "total_return": "-7.37%",
+    "sharpe_ratio": "-0.166",
+    "max_drawdown": "-14.47%",
+    "win_rate": "27.05%",
+    "profit_factor": "0.856",
+    "total_trades": 122,
+    "calmar_ratio": "-0.510"
+  },
+  "critique": {
+    "grade": "F",
+    "weaknesses": [
+      "Negative risk-adjusted return",
+      "Very low win rate (< 30%)",
+      "Unprofitable (profit factor < 1.0)",
+      "Negative total return"
+    ],
+    "suggestions": [
+      "Change strategy template entirely",
+      "Adjust entry thresholds to be more selective",
+      "Increase take-profit or tighten stop-loss"
+    ],
+    "scores": {
+      "sharpe": "-0.1664",
+      "max_drawdown": "-0.1447",
+      "win_rate": "0.2705",
+      "profit_factor": "0.8560",
+      "total_trades": 122,
+      "total_return": "-0.0737"
+    }
+  }
+}

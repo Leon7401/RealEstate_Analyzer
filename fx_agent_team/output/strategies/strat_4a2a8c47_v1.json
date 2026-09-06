@@ -1,0 +1,55 @@
+{
+  "indicators": [
+    {
+      "name": "MACD",
+      "params": {
+        "window_slow": 25,
+        "window_fast": 12,
+        "window_sign": 5
+      }
+    },
+    {
+      "name": "EMA",
+      "params": {
+        "window": 157
+      }
+    }
+  ],
+  "entry_rules": [
+    {
+      "type": "threshold_above",
+      "params": {
+        "indicator": "macd_diff_25",
+        "value": 0
+      }
+    },
+    {
+      "type": "threshold_above",
+      "params": {
+        "indicator": "close",
+        "value": 0
+      }
+    }
+  ],
+  "exit_rules": [
+    {
+      "type": "threshold_below",
+      "params": {
+        "indicator": "macd_diff_25",
+        "value": 0
+      }
+    }
+  ],
+  "risk": {
+    "stop_loss_pct": 0.015,
+    "take_profit_pct": 0.043,
+    "max_position_pct": 0.13,
+    "max_drawdown_pct": 0.18
+  },
+  "pair": "EURUSD=X",
+  "timeframe": "1d",
+  "id": "strat_4a2a8c47",
+  "version": 1,
+  "parent_id": null,
+  "created_at": "2026-03-09T15:57:48.074259"
+}

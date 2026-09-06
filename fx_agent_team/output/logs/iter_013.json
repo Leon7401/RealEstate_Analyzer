@@ -1,0 +1,84 @@
+{
+  "iteration": 13,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "RSI",
+        "params": {
+          "window": 23
+        }
+      },
+      {
+        "name": "BollingerBands",
+        "params": {
+          "window": 18,
+          "window_dev": 3.0
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "threshold_below",
+        "params": {
+          "indicator": "RSI_23",
+          "value": 30
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "threshold_above",
+        "params": {
+          "indicator": "RSI_23",
+          "value": 70
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.016,
+      "take_profit_pct": 0.031,
+      "max_position_pct": 0.11,
+      "max_drawdown_pct": 0.1
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_76af1471",
+    "version": 1,
+    "parent_id": null,
+    "created_at": "2026-03-09T15:58:28.217289"
+  },
+  "result": {
+    "strategy_id": "strat_76af1471",
+    "total_return": "-8.09%",
+    "sharpe_ratio": "-0.317",
+    "max_drawdown": "-11.16%",
+    "win_rate": "16.67%",
+    "profit_factor": "0.281",
+    "total_trades": 6,
+    "calmar_ratio": "-0.724"
+  },
+  "critique": {
+    "grade": "F",
+    "weaknesses": [
+      "Negative risk-adjusted return",
+      "Very low win rate (< 30%)",
+      "Unprofitable (profit factor < 1.0)",
+      "Too few trades for statistical significance",
+      "Negative total return"
+    ],
+    "suggestions": [
+      "Change strategy template entirely",
+      "Adjust entry thresholds to be more selective",
+      "Increase take-profit or tighten stop-loss",
+      "Relax entry conditions to generate more signals"
+    ],
+    "scores": {
+      "sharpe": "-0.3168",
+      "max_drawdown": "-0.1116",
+      "win_rate": "0.1667",
+      "profit_factor": "0.2815",
+      "total_trades": 6,
+      "total_return": "-0.0809"
+    }
+  }
+}

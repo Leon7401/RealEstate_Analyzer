@@ -1,0 +1,343 @@
+15:58:27 [main] Fetching EURUSD=X data from 2018-01-01 to 2025-12-31...
+15:58:27 [main] Loaded 2082 bars
+15:58:27 [OrchestratorAgent] ============================================================
+15:58:27 [OrchestratorAgent] FX AgentTeam - Population-Based Strategy Optimization
+15:58:27 [OrchestratorAgent] Pair: EURUSD=X | Max iters: 60 | Target Sharpe: 1.5
+15:58:27 [OrchestratorAgent] Pool: 5 | Initial pop: 15 | Mutations: 3
+15:58:27 [OrchestratorAgent] ============================================================
+15:58:27 [OrchestratorAgent] 
+--- Phase 1: Generating 15 initial strategies ---
+15:58:27 [StrategyAgent] Generating strategy from template: MACD_Trend
+15:58:27 [BacktestAgent] Backtesting strategy strat_9a0721b5 (v1)
+15:58:27 [BacktestAgent]   Result: return=-12.72%, sharpe=-0.326, drawdown=-18.14%, trades=86
+15:58:27 [CriticAgent] Critiquing strategy strat_9a0721b5
+15:58:27 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:27 [StrategyAgent] Generating strategy from template: MA_Crossover
+15:58:27 [BacktestAgent] Backtesting strategy strat_52af5db5 (v1)
+15:58:27 [BacktestAgent]   Result: return=4.27%, sharpe=0.160, drawdown=-12.08%, trades=8
+15:58:27 [CriticAgent] Critiquing strategy strat_52af5db5
+15:58:27 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:27 [StrategyAgent] Generating strategy from template: RSI_MeanReversion
+15:58:27 [BacktestAgent] Backtesting strategy strat_434fa374 (v1)
+15:58:27 [BacktestAgent]   Result: return=-5.37%, sharpe=-0.106, drawdown=-17.66%, trades=15
+15:58:27 [CriticAgent] Critiquing strategy strat_434fa374
+15:58:27 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:27 [StrategyAgent] Generating strategy from template: RSI_MeanReversion
+15:58:27 [BacktestAgent] Backtesting strategy strat_92b7c05f (v1)
+15:58:27 [BacktestAgent]   Result: return=-3.10%, sharpe=-0.137, drawdown=-7.79%, trades=4
+15:58:27 [CriticAgent] Critiquing strategy strat_92b7c05f
+15:58:27 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:27 [StrategyAgent] Generating strategy from template: MACD_Trend
+15:58:27 [BacktestAgent] Backtesting strategy strat_c0519f0d (v1)
+15:58:27 [BacktestAgent]   Result: return=-12.29%, sharpe=-0.291, drawdown=-18.38%, trades=91
+15:58:27 [CriticAgent] Critiquing strategy strat_c0519f0d
+15:58:27 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:27 [StrategyAgent] Generating strategy from template: MACD_Trend
+15:58:27 [BacktestAgent] Backtesting strategy strat_a743fe4e (v1)
+15:58:27 [BacktestAgent]   Result: return=-5.16%, sharpe=-0.112, drawdown=-13.19%, trades=93
+15:58:27 [CriticAgent] Critiquing strategy strat_a743fe4e
+15:58:27 [CriticAgent]   Grade: F | Weaknesses: 4 | Suggestions: 3
+15:58:27 [StrategyAgent] Generating strategy from template: MACD_Trend
+15:58:27 [BacktestAgent] Backtesting strategy strat_537ddb00 (v1)
+15:58:28 [BacktestAgent]   Result: return=-13.62%, sharpe=-0.335, drawdown=-17.96%, trades=96
+15:58:28 [CriticAgent] Critiquing strategy strat_537ddb00
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [StrategyAgent] Generating strategy from template: MA_Crossover
+15:58:28 [BacktestAgent] Backtesting strategy strat_d280c820 (v1)
+15:58:28 [BacktestAgent]   Result: return=1.24%, sharpe=0.070, drawdown=-6.75%, trades=9
+15:58:28 [CriticAgent] Critiquing strategy strat_d280c820
+15:58:28 [CriticAgent]   Grade: D | Weaknesses: 4 | Suggestions: 4
+15:58:28 [StrategyAgent] Generating strategy from template: MACD_Trend
+15:58:28 [BacktestAgent] Backtesting strategy strat_8837b261 (v1)
+15:58:28 [BacktestAgent]   Result: return=-12.64%, sharpe=-0.296, drawdown=-19.05%, trades=89
+15:58:28 [CriticAgent] Critiquing strategy strat_8837b261
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [StrategyAgent] Generating strategy from template: RSI_MeanReversion
+15:58:28 [BacktestAgent] Backtesting strategy strat_cfd268f5 (v1)
+15:58:28 [BacktestAgent]   Result: return=-5.73%, sharpe=-0.113, drawdown=-20.69%, trades=14
+15:58:28 [CriticAgent] Critiquing strategy strat_cfd268f5
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [StrategyAgent] Generating strategy from template: MACD_Trend
+15:58:28 [BacktestAgent] Backtesting strategy strat_ab85de02 (v1)
+15:58:28 [BacktestAgent]   Result: return=-5.43%, sharpe=-0.119, drawdown=-16.77%, trades=75
+15:58:28 [CriticAgent] Critiquing strategy strat_ab85de02
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [StrategyAgent] Generating strategy from template: MA_Crossover
+15:58:28 [BacktestAgent] Backtesting strategy strat_3d8a5d50 (v1)
+15:58:28 [BacktestAgent]   Result: return=-8.20%, sharpe=-0.332, drawdown=-9.37%, trades=8
+15:58:28 [CriticAgent] Critiquing strategy strat_3d8a5d50
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [StrategyAgent] Generating strategy from template: MA_Crossover
+15:58:28 [BacktestAgent] Backtesting strategy strat_b4da3dfa (v1)
+15:58:28 [BacktestAgent]   Result: return=-6.79%, sharpe=-0.227, drawdown=-12.66%, trades=7
+15:58:28 [CriticAgent] Critiquing strategy strat_b4da3dfa
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [StrategyAgent] Generating strategy from template: RSI_MeanReversion
+15:58:28 [BacktestAgent] Backtesting strategy strat_76af1471 (v1)
+15:58:28 [BacktestAgent]   Result: return=-8.09%, sharpe=-0.317, drawdown=-11.16%, trades=6
+15:58:28 [CriticAgent] Critiquing strategy strat_76af1471
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [StrategyAgent] Generating strategy from template: MA_Crossover
+15:58:28 [BacktestAgent] Backtesting strategy strat_1a60cdd9 (v1)
+15:58:28 [BacktestAgent]   Result: return=0.59%, sharpe=0.039, drawdown=-11.92%, trades=7
+15:58:28 [CriticAgent] Critiquing strategy strat_1a60cdd9
+15:58:28 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:28 [OrchestratorAgent] 
+Initial pool:
+15:58:28 [OrchestratorAgent]   #1 strat_52af5db5 | Sharpe: 0.160 | Return: 4.27% | DD: -12.08% | Grade: D
+15:58:28 [OrchestratorAgent]   #2 strat_d280c820 | Sharpe: 0.070 | Return: 1.24% | DD: -6.75% | Grade: D
+15:58:28 [OrchestratorAgent]   #3 strat_1a60cdd9 | Sharpe: 0.039 | Return: 0.59% | DD: -11.92% | Grade: D
+15:58:28 [OrchestratorAgent]   #4 strat_434fa374 | Sharpe: -0.106 | Return: -5.37% | DD: -17.66% | Grade: F
+15:58:28 [OrchestratorAgent]   #5 strat_a743fe4e | Sharpe: -0.112 | Return: -5.16% | DD: -13.19% | Grade: F
+15:58:28 [OrchestratorAgent] 
+--- Phase 2: Population-Based Optimization ---
+15:58:28 [OptimizerAgent] Optimizing strat_52af5db5 (grade=D, severity=0.7)
+15:58:28 [BacktestAgent] Backtesting strategy strat_edc028a1 (v2)
+15:58:28 [BacktestAgent]   Result: return=4.27%, sharpe=0.160, drawdown=-12.08%, trades=8
+15:58:28 [CriticAgent] Critiquing strategy strat_edc028a1
+15:58:28 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:28 [OptimizerAgent] Optimizing strat_52af5db5 (grade=D, severity=0.7)
+15:58:28 [BacktestAgent] Backtesting strategy strat_9dac1477 (v2)
+15:58:28 [BacktestAgent]   Result: return=4.27%, sharpe=0.160, drawdown=-12.08%, trades=8
+15:58:28 [CriticAgent] Critiquing strategy strat_9dac1477
+15:58:28 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:28 [OptimizerAgent] Optimizing strat_52af5db5 (grade=D, severity=0.7)
+15:58:28 [BacktestAgent] Backtesting strategy strat_23e18d32 (v2)
+15:58:28 [BacktestAgent]   Result: return=4.12%, sharpe=0.155, drawdown=-12.10%, trades=8
+15:58:28 [CriticAgent] Critiquing strategy strat_23e18d32
+15:58:28 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:28 [OptimizerAgent] Optimizing strat_d280c820 (grade=D, severity=0.7)
+15:58:28 [BacktestAgent] Backtesting strategy strat_a5cc84e1 (v2)
+15:58:28 [BacktestAgent]   Result: return=4.16%, sharpe=0.191, drawdown=-6.22%, trades=11
+15:58:28 [CriticAgent] Critiquing strategy strat_a5cc84e1
+15:58:28 [CriticAgent]   Grade: C | Weaknesses: 2 | Suggestions: 2
+15:58:28 [OptimizerAgent] Optimizing strat_d280c820 (grade=D, severity=0.7)
+15:58:28 [BacktestAgent] Backtesting strategy strat_82449ccd (v2)
+15:58:28 [BacktestAgent]   Result: return=2.85%, sharpe=0.140, drawdown=-6.75%, trades=9
+15:58:28 [CriticAgent] Critiquing strategy strat_82449ccd
+15:58:28 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:28 [OptimizerAgent] Optimizing strat_d280c820 (grade=D, severity=0.7)
+15:58:28 [BacktestAgent] Backtesting strategy strat_fb98f79b (v2)
+15:58:28 [BacktestAgent]   Result: return=-2.04%, sharpe=-0.078, drawdown=-8.24%, trades=11
+15:58:28 [CriticAgent] Critiquing strategy strat_fb98f79b
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [OptimizerAgent] Optimizing strat_1a60cdd9 (grade=D, severity=0.7)
+15:58:28 [BacktestAgent] Backtesting strategy strat_6eb11dd1 (v2)
+15:58:28 [BacktestAgent]   Result: return=1.52%, sharpe=0.066, drawdown=-11.58%, trades=7
+15:58:28 [CriticAgent] Critiquing strategy strat_6eb11dd1
+15:58:28 [CriticAgent]   Grade: C | Weaknesses: 2 | Suggestions: 2
+15:58:28 [OptimizerAgent] Optimizing strat_1a60cdd9 (grade=D, severity=0.7)
+15:58:28 [BacktestAgent] Backtesting strategy strat_e3a5a630 (v2)
+15:58:28 [BacktestAgent]   Result: return=-1.03%, sharpe=-0.008, drawdown=-11.63%, trades=7
+15:58:28 [CriticAgent] Critiquing strategy strat_e3a5a630
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 4 | Suggestions: 3
+15:58:28 [OptimizerAgent] Optimizing strat_1a60cdd9 (grade=D, severity=0.7)
+15:58:28 [BacktestAgent] Backtesting strategy strat_ee0d2ebf (v2)
+15:58:28 [BacktestAgent]   Result: return=-6.07%, sharpe=-0.186, drawdown=-12.23%, trades=6
+15:58:28 [CriticAgent] Critiquing strategy strat_ee0d2ebf
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [OptimizerAgent] Optimizing strat_434fa374 (grade=F, severity=1.0)
+15:58:28 [RiskManagerAgent]   Adjusted TP from 0.052 to 0.057 (min R:R = 1.5)
+15:58:28 [BacktestAgent] Backtesting strategy strat_5460dc54 (v2)
+15:58:28 [BacktestAgent]   Result: return=-5.77%, sharpe=-0.112, drawdown=-19.41%, trades=13
+15:58:28 [CriticAgent] Critiquing strategy strat_5460dc54
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [OptimizerAgent] Optimizing strat_434fa374 (grade=F, severity=1.0)
+15:58:28 [BacktestAgent] Backtesting strategy strat_172ae731 (v2)
+15:58:28 [BacktestAgent]   Result: return=-2.87%, sharpe=-0.033, drawdown=-19.07%, trades=23
+15:58:28 [CriticAgent] Critiquing strategy strat_172ae731
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [OptimizerAgent] Optimizing strat_434fa374 (grade=F, severity=1.0)
+15:58:28 [BacktestAgent] Backtesting strategy strat_32935046 (v2)
+15:58:28 [BacktestAgent]   Result: return=3.26%, sharpe=0.101, drawdown=-17.71%, trades=16
+15:58:28 [CriticAgent] Critiquing strategy strat_32935046
+15:58:28 [CriticAgent]   Grade: D | Weaknesses: 4 | Suggestions: 4
+15:58:28 [OptimizerAgent] Optimizing strat_a743fe4e (grade=F, severity=1.0)
+15:58:28 [BacktestAgent] Backtesting strategy strat_3411d404 (v2)
+15:58:28 [BacktestAgent]   Result: return=-12.21%, sharpe=-0.290, drawdown=-18.45%, trades=117
+15:58:28 [CriticAgent] Critiquing strategy strat_3411d404
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [OptimizerAgent] Optimizing strat_a743fe4e (grade=F, severity=1.0)
+15:58:28 [BacktestAgent] Backtesting strategy strat_46d5f66b (v2)
+15:58:28 [BacktestAgent]   Result: return=-7.37%, sharpe=-0.166, drawdown=-14.47%, trades=122
+15:58:28 [CriticAgent] Critiquing strategy strat_46d5f66b
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 4 | Suggestions: 3
+15:58:28 [OptimizerAgent] Optimizing strat_a743fe4e (grade=F, severity=1.0)
+15:58:28 [BacktestAgent] Backtesting strategy strat_dc80a3d3 (v2)
+15:58:28 [BacktestAgent]   Result: return=0.00%, sharpe=0.000, drawdown=0.00%, trades=0
+15:58:28 [CriticAgent] Critiquing strategy strat_dc80a3d3
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 4 | Suggestions: 4
+15:58:28 [StrategyAgent] Generating strategy from template: Stochastic_RSI
+15:58:28 [BacktestAgent] Backtesting strategy strat_a20517c5 (v1)
+15:58:28 [BacktestAgent]   Result: return=16.63%, sharpe=0.506, drawdown=-6.85%, trades=34
+15:58:28 [CriticAgent] Critiquing strategy strat_a20517c5
+15:58:28 [CriticAgent]   Grade: B | Weaknesses: 0 | Suggestions: 1
+15:58:28 [StrategyAgent] Generating strategy from template: Bollinger_Breakout
+15:58:28 [BacktestAgent] Backtesting strategy strat_09d3c98c (v1)
+15:58:28 [BacktestAgent]   Result: return=-3.08%, sharpe=-0.131, drawdown=-7.96%, trades=7
+15:58:28 [CriticAgent] Critiquing strategy strat_09d3c98c
+15:58:28 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:28 [OrchestratorAgent]   Gen 32: [IMPROVED +0.346] Best Sharpe: 0.506 | Return: 16.63% | DD: -6.85% | Trades: 34
+15:58:28 [OptimizerAgent] Optimizing strat_a20517c5 (grade=B, severity=0.3)
+15:58:28 [BacktestAgent] Backtesting strategy strat_b493edf3 (v2)
+15:58:28 [BacktestAgent]   Result: return=13.33%, sharpe=0.409, drawdown=-7.44%, trades=36
+15:58:28 [CriticAgent] Critiquing strategy strat_b493edf3
+15:58:28 [CriticAgent]   Grade: B | Weaknesses: 1 | Suggestions: 1
+15:58:28 [OptimizerAgent] Optimizing strat_a20517c5 (grade=B, severity=0.3)
+15:58:28 [BacktestAgent] Backtesting strategy strat_9e49154d (v2)
+15:58:28 [BacktestAgent]   Result: return=14.16%, sharpe=0.426, drawdown=-7.11%, trades=36
+15:58:28 [CriticAgent] Critiquing strategy strat_9e49154d
+15:58:28 [CriticAgent]   Grade: B | Weaknesses: 1 | Suggestions: 1
+15:58:28 [OptimizerAgent] Optimizing strat_a20517c5 (grade=B, severity=0.3)
+15:58:28 [BacktestAgent] Backtesting strategy strat_e86f6b3b (v2)
+15:58:28 [BacktestAgent]   Result: return=16.63%, sharpe=0.506, drawdown=-6.85%, trades=34
+15:58:28 [CriticAgent] Critiquing strategy strat_e86f6b3b
+15:58:28 [CriticAgent]   Grade: B | Weaknesses: 0 | Suggestions: 1
+15:58:28 [OptimizerAgent] Optimizing strat_a5cc84e1 (grade=C, severity=0.5)
+15:58:28 [BacktestAgent] Backtesting strategy strat_11be7273 (v3)
+15:58:28 [BacktestAgent]   Result: return=8.25%, sharpe=0.334, drawdown=-5.78%, trades=12
+15:58:28 [CriticAgent] Critiquing strategy strat_11be7273
+15:58:28 [CriticAgent]   Grade: C | Weaknesses: 2 | Suggestions: 2
+15:58:28 [OptimizerAgent] Optimizing strat_a5cc84e1 (grade=C, severity=0.5)
+15:58:28 [BacktestAgent] Backtesting strategy strat_89861e0c (v3)
+15:58:28 [BacktestAgent]   Result: return=4.12%, sharpe=0.170, drawdown=-6.67%, trades=11
+15:58:28 [CriticAgent] Critiquing strategy strat_89861e0c
+15:58:28 [CriticAgent]   Grade: C | Weaknesses: 3 | Suggestions: 3
+15:58:28 [OptimizerAgent] Optimizing strat_a5cc84e1 (grade=C, severity=0.5)
+15:58:28 [BacktestAgent] Backtesting strategy strat_e2ed86ef (v3)
+15:58:28 [BacktestAgent]   Result: return=4.16%, sharpe=0.191, drawdown=-6.22%, trades=11
+15:58:28 [CriticAgent] Critiquing strategy strat_e2ed86ef
+15:58:28 [CriticAgent]   Grade: C | Weaknesses: 2 | Suggestions: 2
+15:58:28 [OptimizerAgent] Optimizing strat_52af5db5 (grade=D, severity=0.7)
+15:58:28 [BacktestAgent] Backtesting strategy strat_3172458a (v2)
+15:58:29 [BacktestAgent]   Result: return=1.52%, sharpe=0.079, drawdown=-8.82%, trades=5
+15:58:29 [CriticAgent] Critiquing strategy strat_3172458a
+15:58:29 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:29 [OptimizerAgent] Optimizing strat_52af5db5 (grade=D, severity=0.7)
+15:58:29 [BacktestAgent] Backtesting strategy strat_88502c29 (v2)
+15:58:29 [BacktestAgent]   Result: return=-0.71%, sharpe=-0.010, drawdown=-11.34%, trades=7
+15:58:29 [CriticAgent] Critiquing strategy strat_88502c29
+15:58:29 [CriticAgent]   Grade: F | Weaknesses: 4 | Suggestions: 3
+15:58:29 [OptimizerAgent] Optimizing strat_52af5db5 (grade=D, severity=0.7)
+15:58:29 [BacktestAgent] Backtesting strategy strat_9692b93f (v2)
+15:58:29 [BacktestAgent]   Result: return=-0.35%, sharpe=0.007, drawdown=-10.58%, trades=8
+15:58:29 [CriticAgent] Critiquing strategy strat_9692b93f
+15:58:29 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:29 [OptimizerAgent] Optimizing strat_edc028a1 (grade=D, severity=0.7)
+15:58:29 [BacktestAgent] Backtesting strategy strat_95dd97d8 (v3)
+15:58:29 [BacktestAgent]   Result: return=4.12%, sharpe=0.155, drawdown=-12.10%, trades=8
+15:58:29 [CriticAgent] Critiquing strategy strat_95dd97d8
+15:58:29 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:29 [OptimizerAgent] Optimizing strat_edc028a1 (grade=D, severity=0.7)
+15:58:29 [BacktestAgent] Backtesting strategy strat_373e9cc7 (v3)
+15:58:29 [BacktestAgent]   Result: return=4.27%, sharpe=0.160, drawdown=-12.08%, trades=8
+15:58:29 [CriticAgent] Critiquing strategy strat_373e9cc7
+15:58:29 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:29 [OptimizerAgent] Optimizing strat_edc028a1 (grade=D, severity=0.7)
+15:58:29 [BacktestAgent] Backtesting strategy strat_d0604eb5 (v3)
+15:58:29 [BacktestAgent]   Result: return=5.17%, sharpe=0.188, drawdown=-12.05%, trades=8
+15:58:29 [CriticAgent] Critiquing strategy strat_d0604eb5
+15:58:29 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:29 [OptimizerAgent] Optimizing strat_9dac1477 (grade=D, severity=0.7)
+15:58:29 [BacktestAgent] Backtesting strategy strat_2bd12cc4 (v3)
+15:58:29 [BacktestAgent]   Result: return=-2.22%, sharpe=-0.068, drawdown=-11.55%, trades=9
+15:58:29 [CriticAgent] Critiquing strategy strat_2bd12cc4
+15:58:29 [CriticAgent]   Grade: F | Weaknesses: 5 | Suggestions: 4
+15:58:29 [OptimizerAgent] Optimizing strat_9dac1477 (grade=D, severity=0.7)
+15:58:29 [BacktestAgent] Backtesting strategy strat_53e51b8e (v3)
+15:58:29 [BacktestAgent]   Result: return=4.88%, sharpe=0.179, drawdown=-12.05%, trades=8
+15:58:29 [CriticAgent] Critiquing strategy strat_53e51b8e
+15:58:29 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:29 [OptimizerAgent] Optimizing strat_9dac1477 (grade=D, severity=0.7)
+15:58:29 [BacktestAgent] Backtesting strategy strat_e9cb378f (v3)
+15:58:29 [BacktestAgent]   Result: return=5.97%, sharpe=0.230, drawdown=-5.84%, trades=9
+15:58:29 [CriticAgent] Critiquing strategy strat_e9cb378f
+15:58:29 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:29 [StrategyAgent] Generating strategy from template: MA_Crossover
+15:58:29 [BacktestAgent] Backtesting strategy strat_1f6e0e3e (v1)
+15:58:29 [BacktestAgent]   Result: return=0.70%, sharpe=0.055, drawdown=-4.16%, trades=7
+15:58:29 [CriticAgent] Critiquing strategy strat_1f6e0e3e
+15:58:29 [CriticAgent]   Grade: D | Weaknesses: 3 | Suggestions: 3
+15:58:29 [StrategyAgent] Generating strategy from template: Bollinger_Breakout
+15:58:29 [BacktestAgent] Backtesting strategy strat_cebb4a3d (v1)
+15:58:29 [BacktestAgent]   Result: return=-14.84%, sharpe=-0.499, drawdown=-17.62%, trades=7
+15:58:29 [CriticAgent] Critiquing strategy strat_cebb4a3d
+15:58:29 [CriticAgent]   Grade: F | Weaknesses: 6 | Suggestions: 5
+15:58:29 [OrchestratorAgent]   Gen 49: No improvement (1) | Best Sharpe: 0.506
+15:58:29 [OptimizerAgent] Optimizing strat_a20517c5 (grade=B, severity=0.3)
+15:58:29 [BacktestAgent] Backtesting strategy strat_c1e6daf4 (v2)
+15:58:29 [BacktestAgent]   Result: return=16.63%, sharpe=0.506, drawdown=-6.85%, trades=34
+15:58:29 [CriticAgent] Critiquing strategy strat_c1e6daf4
+15:58:29 [CriticAgent]   Grade: B | Weaknesses: 0 | Suggestions: 1
+15:58:29 [OptimizerAgent] Optimizing strat_a20517c5 (grade=B, severity=0.3)
+15:58:29 [BacktestAgent] Backtesting strategy strat_e4c42302 (v2)
+15:58:29 [BacktestAgent]   Result: return=20.72%, sharpe=0.654, drawdown=-6.09%, trades=32
+15:58:29 [CriticAgent] Critiquing strategy strat_e4c42302
+15:58:29 [CriticAgent]   Grade: B | Weaknesses: 0 | Suggestions: 1
+15:58:29 [OptimizerAgent] Optimizing strat_a20517c5 (grade=B, severity=0.3)
+15:58:29 [BacktestAgent] Backtesting strategy strat_421837ee (v2)
+15:58:29 [BacktestAgent]   Result: return=16.63%, sharpe=0.506, drawdown=-6.85%, trades=34
+15:58:29 [CriticAgent] Critiquing strategy strat_421837ee
+15:58:29 [CriticAgent]   Grade: B | Weaknesses: 0 | Suggestions: 1
+15:58:29 [OptimizerAgent] Optimizing strat_e86f6b3b (grade=B, severity=0.3)
+15:58:29 [BacktestAgent] Backtesting strategy strat_0e8df0ee (v3)
+15:58:29 [BacktestAgent]   Result: return=20.72%, sharpe=0.654, drawdown=-6.09%, trades=32
+15:58:29 [CriticAgent] Critiquing strategy strat_0e8df0ee
+15:58:29 [CriticAgent]   Grade: B | Weaknesses: 0 | Suggestions: 1
+15:58:29 [OptimizerAgent] Optimizing strat_e86f6b3b (grade=B, severity=0.3)
+15:58:29 [BacktestAgent] Backtesting strategy strat_8631e06e (v3)
+15:58:29 [BacktestAgent]   Result: return=20.72%, sharpe=0.654, drawdown=-6.09%, trades=32
+15:58:29 [CriticAgent] Critiquing strategy strat_8631e06e
+15:58:29 [CriticAgent]   Grade: B | Weaknesses: 0 | Suggestions: 1
+15:58:29 [OptimizerAgent] Optimizing strat_e86f6b3b (grade=B, severity=0.3)
+15:58:29 [BacktestAgent] Backtesting strategy strat_6412524e (v3)
+15:58:29 [BacktestAgent]   Result: return=15.67%, sharpe=0.487, drawdown=-7.18%, trades=34
+15:58:29 [CriticAgent] Critiquing strategy strat_6412524e
+15:58:29 [CriticAgent]   Grade: B | Weaknesses: 1 | Suggestions: 1
+15:58:29 [OptimizerAgent] Optimizing strat_9e49154d (grade=B, severity=0.3)
+15:58:29 [BacktestAgent] Backtesting strategy strat_f6cb8ff6 (v3)
+15:58:29 [BacktestAgent]   Result: return=16.63%, sharpe=0.506, drawdown=-6.85%, trades=34
+15:58:29 [CriticAgent] Critiquing strategy strat_f6cb8ff6
+15:58:29 [CriticAgent]   Grade: B | Weaknesses: 0 | Suggestions: 1
+15:58:29 [OptimizerAgent] Optimizing strat_9e49154d (grade=B, severity=0.3)
+15:58:29 [BacktestAgent] Backtesting strategy strat_13965c4a (v3)
+15:58:29 [BacktestAgent]   Result: return=14.16%, sharpe=0.426, drawdown=-7.11%, trades=36
+15:58:29 [CriticAgent] Critiquing strategy strat_13965c4a
+15:58:29 [CriticAgent]   Grade: B | Weaknesses: 1 | Suggestions: 1
+15:58:29 [OptimizerAgent] Optimizing strat_9e49154d (grade=B, severity=0.3)
+15:58:29 [BacktestAgent] Backtesting strategy strat_814684ea (v3)
+15:58:29 [BacktestAgent]   Result: return=14.16%, sharpe=0.426, drawdown=-7.11%, trades=36
+15:58:29 [CriticAgent] Critiquing strategy strat_814684ea
+15:58:29 [CriticAgent]   Grade: B | Weaknesses: 1 | Suggestions: 1
+15:58:29 [OptimizerAgent] Optimizing strat_b493edf3 (grade=B, severity=0.3)
+15:58:29 [BacktestAgent] Backtesting strategy strat_4d250dc5 (v3)
+15:58:29 [BacktestAgent]   Result: return=16.70%, sharpe=0.514, drawdown=-7.14%, trades=37
+15:58:29 [CriticAgent] Critiquing strategy strat_4d250dc5
+15:58:29 [CriticAgent]   Grade: B | Weaknesses: 0 | Suggestions: 1
+15:58:29 [OptimizerAgent] Optimizing strat_b493edf3 (grade=B, severity=0.3)
+15:58:29 [BacktestAgent] Backtesting strategy strat_fea074b1 (v3)
+15:58:29 [BacktestAgent]   Result: return=19.83%, sharpe=0.590, drawdown=-7.41%, trades=40
+15:58:29 [CriticAgent] Critiquing strategy strat_fea074b1
+15:58:29 [CriticAgent]   Grade: B | Weaknesses: 0 | Suggestions: 1
+15:58:29 [OrchestratorAgent]   Gen 60: [IMPROVED +0.147] Best Sharpe: 0.654 | Return: 20.72% | DD: -6.09% | Trades: 32
+15:58:29 [OrchestratorAgent] 
+============================================================
+15:58:29 [OrchestratorAgent] OPTIMIZATION COMPLETE
+15:58:29 [OrchestratorAgent] ============================================================
+15:58:29 [OrchestratorAgent] Best Strategy: strat_e4c42302 (v2)
+15:58:29 [OrchestratorAgent]   Total Return:  20.72%
+15:58:29 [OrchestratorAgent]   Sharpe Ratio:  0.654
+15:58:29 [OrchestratorAgent]   Max Drawdown:  -6.09%
+15:58:29 [OrchestratorAgent]   Win Rate:      71.88%
+15:58:29 [OrchestratorAgent]   Profit Factor: 2.307
+15:58:29 [OrchestratorAgent]   Total Trades:  32
+15:58:29 [OrchestratorAgent]   Calmar Ratio:  3.403
+15:58:29 [OrchestratorAgent] 
+Final pool:
+15:58:29 [OrchestratorAgent]   #1 strat_e4c42302 | Sharpe: 0.654 | Return: 20.72% | Grade: B
+15:58:29 [OrchestratorAgent]   #2 strat_0e8df0ee | Sharpe: 0.654 | Return: 20.72% | Grade: B
+15:58:29 [OrchestratorAgent]   #3 strat_8631e06e | Sharpe: 0.654 | Return: 20.72% | Grade: B
+15:58:29 [OrchestratorAgent]   #4 strat_fea074b1 | Sharpe: 0.590 | Return: 19.83% | Grade: B
+15:58:29 [OrchestratorAgent]   #5 strat_4d250dc5 | Sharpe: 0.514 | Return: 16.70% | Grade: B
+15:58:29 [OrchestratorAgent] 
+Saved to: output/strategies/best_strategy.json

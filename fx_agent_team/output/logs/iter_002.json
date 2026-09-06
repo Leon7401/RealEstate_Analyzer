@@ -1,0 +1,84 @@
+{
+  "iteration": 2,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "RSI",
+        "params": {
+          "window": 13
+        }
+      },
+      {
+        "name": "BollingerBands",
+        "params": {
+          "window": 25,
+          "window_dev": 2.1
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "threshold_below",
+        "params": {
+          "indicator": "RSI_13",
+          "value": 30
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "threshold_above",
+        "params": {
+          "indicator": "RSI_13",
+          "value": 70
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.032,
+      "take_profit_pct": 0.052,
+      "max_position_pct": 0.05,
+      "max_drawdown_pct": 0.15
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_434fa374",
+    "version": 1,
+    "parent_id": null,
+    "created_at": "2026-03-09T15:58:27.859210"
+  },
+  "result": {
+    "strategy_id": "strat_434fa374",
+    "total_return": "-5.37%",
+    "sharpe_ratio": "-0.106",
+    "max_drawdown": "-17.66%",
+    "win_rate": "46.67%",
+    "profit_factor": "0.842",
+    "total_trades": 15,
+    "calmar_ratio": "-0.304"
+  },
+  "critique": {
+    "grade": "F",
+    "weaknesses": [
+      "Negative risk-adjusted return",
+      "High drawdown (> 15%)",
+      "Unprofitable (profit factor < 1.0)",
+      "Limited trade sample (< 30)",
+      "Negative total return"
+    ],
+    "suggestions": [
+      "Change strategy template entirely",
+      "Consider tighter stop-loss",
+      "Increase take-profit or tighten stop-loss",
+      "Consider loosening entry thresholds slightly"
+    ],
+    "scores": {
+      "sharpe": "-0.1061",
+      "max_drawdown": "-0.1766",
+      "win_rate": "0.4667",
+      "profit_factor": "0.8415",
+      "total_trades": 15,
+      "total_return": "-0.0537"
+    }
+  }
+}

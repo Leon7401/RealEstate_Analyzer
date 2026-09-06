@@ -1,0 +1,96 @@
+{
+  "iteration": 44,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "SMA",
+        "params": {
+          "window": 42
+        }
+      },
+      {
+        "name": "SMA",
+        "params": {
+          "window": 189
+        }
+      },
+      {
+        "name": "RSI",
+        "params": {
+          "window": 16
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "cross_above",
+        "params": {
+          "fast": "SMA_42",
+          "slow": "SMA_189"
+        }
+      },
+      {
+        "type": "threshold_below",
+        "params": {
+          "indicator": "RSI_16",
+          "value": 70
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "cross_below",
+        "params": {
+          "fast": "SMA_42",
+          "slow": "SMA_189"
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.04,
+      "take_profit_pct": 0.073,
+      "max_position_pct": 0.09,
+      "max_drawdown_pct": 0.18
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_2bd12cc4",
+    "version": 3,
+    "parent_id": "strat_9dac1477",
+    "created_at": "2026-03-09T15:58:29.163868"
+  },
+  "result": {
+    "strategy_id": "strat_2bd12cc4",
+    "total_return": "-2.22%",
+    "sharpe_ratio": "-0.068",
+    "max_drawdown": "-11.55%",
+    "win_rate": "22.22%",
+    "profit_factor": "0.808",
+    "total_trades": 9,
+    "calmar_ratio": "-0.192"
+  },
+  "critique": {
+    "grade": "F",
+    "weaknesses": [
+      "Negative risk-adjusted return",
+      "Very low win rate (< 30%)",
+      "Unprofitable (profit factor < 1.0)",
+      "Too few trades for statistical significance",
+      "Negative total return"
+    ],
+    "suggestions": [
+      "Change strategy template entirely",
+      "Adjust entry thresholds to be more selective",
+      "Increase take-profit or tighten stop-loss",
+      "Relax entry conditions to generate more signals"
+    ],
+    "scores": {
+      "sharpe": "-0.0685",
+      "max_drawdown": "-0.1155",
+      "win_rate": "0.2222",
+      "profit_factor": "0.8077",
+      "total_trades": 9,
+      "total_return": "-0.0222"
+    }
+  }
+}

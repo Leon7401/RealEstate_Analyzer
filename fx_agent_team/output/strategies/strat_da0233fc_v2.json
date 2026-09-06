@@ -1,0 +1,54 @@
+{
+  "indicators": [
+    {
+      "name": "Stochastic",
+      "params": {
+        "window": 10,
+        "smooth_window": 4
+      }
+    },
+    {
+      "name": "RSI",
+      "params": {
+        "window": 19
+      }
+    }
+  ],
+  "entry_rules": [
+    {
+      "type": "threshold_below",
+      "params": {
+        "indicator": "stoch_10",
+        "value": 20.6
+      }
+    },
+    {
+      "type": "threshold_below",
+      "params": {
+        "indicator": "RSI_20",
+        "value": 36.05
+      }
+    }
+  ],
+  "exit_rules": [
+    {
+      "type": "threshold_above",
+      "params": {
+        "indicator": "stoch_10",
+        "value": 80
+      }
+    }
+  ],
+  "risk": {
+    "stop_loss_pct": 0.034,
+    "take_profit_pct": 0.06,
+    "max_position_pct": 0.05,
+    "max_drawdown_pct": 0.12
+  },
+  "pair": "EURUSD=X",
+  "timeframe": "1d",
+  "id": "strat_da0233fc",
+  "version": 2,
+  "parent_id": "strat_edfb8a9f",
+  "created_at": "2026-03-09T15:57:06.240665"
+}

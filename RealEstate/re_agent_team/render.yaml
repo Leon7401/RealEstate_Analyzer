@@ -6,7 +6,7 @@ services:
     plan: starter
     autoDeploy: true
     healthCheckPath: /healthz
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
     startCommand: uvicorn web.app:app --host 0.0.0.0 --port $PORT
     disk:
       name: re-agent-data
@@ -23,3 +23,23 @@ services:
         value: 10000
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: SCRAPE_USE_BROWSER
+        value: "1"
+      - key: RE_SCHEDULER_AUTOSTART
+        value: "1"
+      - key: RE_AUTO_PROPERTY_SCRAPE
+        value: "1"
+      - key: RE_AUTO_PROPERTY_SOURCES
+        value: "rals,rakumachi,kenbiya,athome,homes"
+      - key: RE_AUTO_PROPERTY_PREFS
+        value: "13,14,11,12"
+      - key: RE_AUTO_PROPERTY_MAX_PAGES
+        value: "3"
+      - key: RE_AUTO_PROPERTY_INTERVAL_HOURS
+        value: "6"
+      - key: RE_AUTO_LISTING_VERIFY
+        value: "1"
+      - key: RE_AUTO_LISTING_VERIFY_INTERVAL_HOURS
+        value: "24"
+      - key: RE_AUTO_LISTING_VERIFY_BATCH
+        value: "300"

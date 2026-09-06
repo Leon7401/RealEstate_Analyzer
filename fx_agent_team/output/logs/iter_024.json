@@ -1,0 +1,83 @@
+{
+  "iteration": 24,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "RSI",
+        "params": {
+          "window": 15
+        }
+      },
+      {
+        "name": "ATR",
+        "params": {
+          "window": 15
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "threshold_below",
+        "params": {
+          "indicator": "RSI_15",
+          "value": 33.0
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "threshold_above",
+        "params": {
+          "indicator": "RSI_15",
+          "value": 70
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.037937963774121015,
+      "take_profit_pct": 0.05690694566118153,
+      "max_position_pct": 0.05,
+      "max_drawdown_pct": 0.15
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_5460dc54",
+    "version": 2,
+    "parent_id": "strat_434fa374",
+    "created_at": "2026-03-09T15:58:28.532677"
+  },
+  "result": {
+    "strategy_id": "strat_5460dc54",
+    "total_return": "-5.77%",
+    "sharpe_ratio": "-0.112",
+    "max_drawdown": "-19.41%",
+    "win_rate": "46.15%",
+    "profit_factor": "0.831",
+    "total_trades": 13,
+    "calmar_ratio": "-0.297"
+  },
+  "critique": {
+    "grade": "F",
+    "weaknesses": [
+      "Negative risk-adjusted return",
+      "High drawdown (> 15%)",
+      "Unprofitable (profit factor < 1.0)",
+      "Limited trade sample (< 30)",
+      "Negative total return"
+    ],
+    "suggestions": [
+      "Change strategy template entirely",
+      "Consider tighter stop-loss",
+      "Increase take-profit or tighten stop-loss",
+      "Consider loosening entry thresholds slightly"
+    ],
+    "scores": {
+      "sharpe": "-0.1125",
+      "max_drawdown": "-0.1941",
+      "win_rate": "0.4615",
+      "profit_factor": "0.8309",
+      "total_trades": 13,
+      "total_return": "-0.0577"
+    }
+  }
+}

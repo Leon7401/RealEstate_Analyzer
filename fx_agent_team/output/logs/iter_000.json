@@ -1,0 +1,92 @@
+{
+  "iteration": 0,
+  "strategy": {
+    "indicators": [
+      {
+        "name": "MACD",
+        "params": {
+          "window_slow": 24,
+          "window_fast": 11,
+          "window_sign": 9
+        }
+      },
+      {
+        "name": "EMA",
+        "params": {
+          "window": 195
+        }
+      }
+    ],
+    "entry_rules": [
+      {
+        "type": "threshold_above",
+        "params": {
+          "indicator": "macd_diff_24",
+          "value": 0
+        }
+      },
+      {
+        "type": "threshold_above",
+        "params": {
+          "indicator": "close",
+          "value": 0
+        }
+      }
+    ],
+    "exit_rules": [
+      {
+        "type": "threshold_below",
+        "params": {
+          "indicator": "macd_diff_24",
+          "value": 0
+        }
+      }
+    ],
+    "risk": {
+      "stop_loss_pct": 0.038,
+      "take_profit_pct": 0.096,
+      "max_position_pct": 0.07,
+      "max_drawdown_pct": 0.16
+    },
+    "pair": "EURUSD=X",
+    "timeframe": "1d",
+    "id": "strat_9a0721b5",
+    "version": 1,
+    "parent_id": null,
+    "created_at": "2026-03-09T15:58:27.792784"
+  },
+  "result": {
+    "strategy_id": "strat_9a0721b5",
+    "total_return": "-12.72%",
+    "sharpe_ratio": "-0.326",
+    "max_drawdown": "-18.14%",
+    "win_rate": "30.23%",
+    "profit_factor": "0.714",
+    "total_trades": 86,
+    "calmar_ratio": "-0.701"
+  },
+  "critique": {
+    "grade": "F",
+    "weaknesses": [
+      "Negative risk-adjusted return",
+      "High drawdown (> 15%)",
+      "Low win rate (< 40%)",
+      "Unprofitable (profit factor < 1.0)",
+      "Negative total return"
+    ],
+    "suggestions": [
+      "Change strategy template entirely",
+      "Consider tighter stop-loss",
+      "Add confirmation indicator to entry rules",
+      "Increase take-profit or tighten stop-loss"
+    ],
+    "scores": {
+      "sharpe": "-0.3264",
+      "max_drawdown": "-0.1814",
+      "win_rate": "0.3023",
+      "profit_factor": "0.7138",
+      "total_trades": 86,
+      "total_return": "-0.1272"
+    }
+  }
+}

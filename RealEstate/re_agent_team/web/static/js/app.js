@@ -28,6 +28,17 @@ function getPropertyCacheKeys(p) {
     return keys;
 }
 
+function getAnalysisCacheKey(p) {
+    if (!p) return '';
+    if (p._type === 'land' || p._land_listing_id) {
+        const lid = p._land_listing_id || p.id;
+        return lid != null ? `land:${lid}` : '';
+    }
+    if (p.id != null) return `property:${p.id}`;
+    if (p.source_url) return `url:${_safeLower(p.source_url)}`;
+    return '';
+}
+
 function loadAnalysisCache() {
     try {
         const raw = localStorage.getItem(ANALYSIS_CACHE_KEY);
@@ -57,7 +68,10 @@ function applyCachedAnalysisToProperty(p) {
     }
     if (!cached) return;
 
-    if (cached.grade) p.grade = cached.grade;
+    if (cached.grade) {
+        p._analysis_grade = cached.grade;
+        p.grade = cached.grade;
+    }
     if (cached.gross_yield != null) p.gross_yield = cached.gross_yield;
     if (cached.net_yield != null) p.net_yield = cached.net_yield;
     if (cached.score != null) p._analysis_score = cached.score;
@@ -72,6 +86,18 @@ function applyCachedAnalysisToProperty(p) {
 function persistPropertyAnalysisResult(p, row) {
     if (!p || !row) return;
     const selected = row.selected || {};
+    if (typeof window.applySelectedJudgment === 'function') {
+        window.applySelectedJudgment(p, selected);
+    } else {
+        if (selected.grade) {
+            p._analysis_grade = selected.grade;
+            p.grade = selected.grade;
+        }
+        if (selected.score != null) p._analysis_score = selected.score;
+        if (selected.recommendation) p._analysis_recommendation = selected.recommendation;
+        if (selected.scenario) p._analysis_scenario = selected.scenario;
+        p._selected = selected;
+    }
     const payload = {
         grade: selected.grade || p.grade || null,
         gross_yield: selected.gross_yield ?? p.gross_yield ?? null,
@@ -88,6 +114,55 @@ function persistPropertyAnalysisResult(p, row) {
     keys.forEach(k => { analysisCache[k] = payload; });
 }
 
+function applyServerCachedAnalysisToProperty(p, cacheRow) {
+    if (!p || !cacheRow) return;
+    const selected = cacheRow.selected || {};
+    if (typeof window.applySelectedJudgment === 'function') {
+        window.applySelectedJudgment(p, selected);
+    } else {
+        if (selected.grade) {
+            p._analysis_grade = selected.grade;
+            p.grade = selected.grade;
+        }
+        if (selected.score != null) p._analysis_score = selected.score;
+        if (selected.recommendation) p._analysis_recommendation = selected.recommendation;
+        if (selected.scenario) p._analysis_scenario = selected.scenario;
+        p._selected = selected;
+    }
+    if (selected.gross_yield != null) p.gross_yield = selected.gross_yield;
+    if (selected.net_yield != null) p.net_yield = selected.net_yield;
+    if (selected.confidence != null) p._analysis_confidence = selected.confidence;
+    p._scenario_as_is = cacheRow.as_is || p._scenario_as_is || null;
+    p._scenario_rebuild = cacheRow.rebuild || p._scenario_rebuild || null;
+    p._analysis_cache = cacheRow;
+}
+
+async function loadServerAnalysisCacheForProperties(props) {
+    const list = Array.isArray(props) ? props : [];
+    const keyToProp = new Map();
+    list.forEach(p => {
+        const key = getAnalysisCacheKey(p);
+        if (key) keyToProp.set(key, p);
+    });
+    if (!keyToProp.size) return;
+    try {
+        const resp = await fetch('/api/properties/analysis-cache/bulk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keys: Array.from(keyToProp.keys()) }),
+        });
+        const data = await resp.json();
+        const items = data.items || {};
+        Object.entries(items).forEach(([key, row]) => {
+            const p = keyToProp.get(key);
+            if (!p) return;
+            applyServerCachedAnalysisToProperty(p, row);
+        });
+    } catch (e) {
+        console.debug('analysis-cache bulk fetch failed:', e);
+    }
+}
+
 // ===== スクレイパー切替 =====
 
 function switchScraperPanel(mode) {
@@ -98,15 +173,90 @@ function switchScraperPanel(mode) {
 
 // ===== ユーティリティ =====
 
-function gradeColor(grade) {
-    const colors = {S:'#1a9641',A:'#4dac26',B:'#b8e186',C:'#fdb863',D:'#e66101',F:'#d7191c'};
-    return colors[grade] || '#546e7a';
+function gradeColor(grade, opts) {
+    if (typeof window.gradeColor === 'function' && window.gradeColor !== gradeColor) {
+        return window.gradeColor(grade, opts);
+    }
+    const colors = (window.GRADE_PALETTE) || {S:'#1a9641',A:'#4dac26',B:'#b8e186',C:'#fdb863',D:'#e66101',F:'#d7191c'};
+    return colors[normalizeGrade(grade)] || (opts && opts.fallback) || '#546e7a';
+}
+
+function normalizeGrade(grade) {
+    if (typeof window.normalizeGrade === 'function' && window.normalizeGrade !== normalizeGrade) {
+        return window.normalizeGrade(grade);
+    }
+    const g = String(grade || '').trim().toUpperCase();
+    return ['S', 'A', 'B', 'C', 'D', 'F'].includes(g) ? g : '';
+}
+
+function resolvePropertyGrade(p) {
+    if (typeof window.resolvePropertyGrade === 'function' && window.resolvePropertyGrade !== resolvePropertyGrade) {
+        return window.resolvePropertyGrade(p);
+    }
+    if (!p) return '';
+    // 投資グレードのみ（資産性グレードは混ぜない）
+    return normalizeGrade(
+        (p._selected && p._selected.grade) ||
+        p._analysis_grade ||
+        p.grade ||
+        p.judge_grade
+    );
+}
+
+function resolvePropertyScore(p) {
+    if (typeof window.resolvePropertyScore === 'function') return window.resolvePropertyScore(p);
+    if (!p) return 0;
+    if (p._selected && p._selected.score != null) return Number(p._selected.score) || 0;
+    if (p._analysis_score != null) return Number(p._analysis_score) || 0;
+    return 0;
+}
+
+function assetGradeColor(grade) {
+    return gradeColor(grade, { asset: true });
+}
+
+function getSelectedPrefectureCodes(group, fallback = ['13']) {
+    const checked = Array.from(
+        document.querySelectorAll(`input[data-pref-group="${group}"]:checked`)
+    ).map(el => String(el.value || '').trim()).filter(Boolean);
+    return checked.length ? checked : [...fallback];
+}
+
+function getPrefectureParam(group, fallback = ['13']) {
+    return getSelectedPrefectureCodes(group, fallback).join(',');
+}
+
+function getPrimaryPrefectureCode(group, fallback = ['13']) {
+    const codes = getSelectedPrefectureCodes(group, fallback);
+    return codes[0] || fallback[0] || '13';
+}
+
+function isLayerEnabled(layerId, defaultValue = true) {
+    const el = document.getElementById(layerId);
+    if (!el) return defaultValue;
+    return !!el.checked;
+}
+
+function setupMapPanes() {
+    if (!map) return;
+    // ヒートマップ系を物件より下に固定
+    if (!map.getPane('heatPane')) {
+        map.createPane('heatPane');
+    }
+    map.getPane('heatPane').style.zIndex = 350;
+
+    // 物件オブジェクトは常に最前面側へ
+    if (!map.getPane('objectPane')) {
+        map.createPane('objectPane');
+    }
+    map.getPane('objectPane').style.zIndex = 650;
 }
 
 // ===== 初期化 =====
 
 function initMap(center, zoom) {
     map = L.map('map').setView(center, zoom);
+    setupMapPanes();
     loadAnalysisCache();
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -120,34 +270,90 @@ function initMap(center, zoom) {
     });
 
     // イベント
-    document.getElementById('prefecture-select').addEventListener('change', loadCities);
-    document.getElementById('btn-load-data').addEventListener('click', loadAreaData);
-    document.getElementById('btn-analyze').addEventListener('click', analyzeProperty);
-    document.getElementById('btn-batch-analyze').addEventListener('click', batchAnalyze);
+    const sortEl = document.getElementById('prop-sort');
+    if (sortEl && (sortEl.value === 'rank_desc' || sortEl.value === 'rank_asc')) {
+        // 初期表示での重い自動分析を避け、API応答性と地図レイヤー描画を優先
+        sortEl.value = 'updated_at';
+    }
+    document.querySelectorAll('input[data-pref-group="map"]').forEach(el => {
+        el.addEventListener('change', (e) => {
+            const selected = getSelectedPrefectureCodes('map', []);
+            if (selected.length === 0) {
+                e.target.checked = true;
+            }
+            loadCities();
+            loadDbLayersFromDatabase();
+        });
+    });
+    const citySel = document.getElementById('city-select');
+    if (citySel) {
+        citySel.addEventListener('change', () => {
+            loadSampleProperties();
+            loadDbLayersFromDatabase();
+        });
+    }
+    document.getElementById('btn-load-data')?.addEventListener('click', loadAreaData);
+    document.getElementById('btn-analyze')?.addEventListener('click', analyzeProperty);
+
+    // 物件フィルタ・ソートは変更時に即反映
+    let _propFilterTimer = null;
+    const reloadPropsDebounced = () => {
+        clearTimeout(_propFilterTimer);
+        _propFilterTimer = setTimeout(() => loadSampleProperties(), 250);
+    };
+    document.getElementById('prop-filter-station')?.addEventListener('input', reloadPropsDebounced);
+    document.getElementById('prop-filter-type')?.addEventListener('change', () => loadSampleProperties());
+    document.getElementById('prop-sort')?.addEventListener('change', () => loadSampleProperties());
+    document.getElementById('compare-station')?.addEventListener('change', () => loadCompareTable());
+    document.getElementById('compare-sort')?.addEventListener('change', () => loadCompareTable());
+    document.getElementById('compare-grade')?.addEventListener('change', () => loadCompareTable());
+
+    // 歪みランキングの絞込・表示切替
+    document.getElementById('distortion-filter')?.addEventListener('input', () => {
+        if (typeof window._lastDistortionRanking !== 'undefined') {
+            renderDistortionRanking(window._lastDistortionRanking);
+        }
+    });
+    document.getElementById('distortion-view')?.addEventListener('change', () => {
+        if (typeof window._lastDistortionRanking !== 'undefined') {
+            renderDistortionRanking(window._lastDistortionRanking);
+        }
+    });
+    const manualSaveBtn = document.getElementById('btn-save-manual-update');
+    if (manualSaveBtn) manualSaveBtn.addEventListener('click', saveManualPropertyUpdate);
+    const verifyBtn = document.getElementById('btn-verify-listings');
+    if (verifyBtn) verifyBtn.addEventListener('click', verifyListingSources);
+    const inclDelisted = document.getElementById('prop-include-delisted');
+    if (inclDelisted) inclDelisted.addEventListener('change', loadSampleProperties);
+    document.getElementById('btn-batch-analyze')?.addEventListener('click', batchAnalyze);
     const autoAnalyzeBtn = document.getElementById('btn-auto-analyze-map');
     if (autoAnalyzeBtn) autoAnalyzeBtn.addEventListener('click', autoAnalyzeAndReflect);
+    const autoAnalyzeSaveBtn = document.getElementById('btn-auto-analyze-save');
+    if (autoAnalyzeSaveBtn) autoAnalyzeSaveBtn.addEventListener('click', analyzeUnanalyzedAndSave);
     const rankingCloseBtn = document.getElementById('ranking-close-btn');
     if (rankingCloseBtn) rankingCloseBtn.addEventListener('click', hideRankingPanel);
     const rankingToggleBtn = document.getElementById('ranking-toggle-btn');
     if (rankingToggleBtn) rankingToggleBtn.addEventListener('click', toggleRankingPanel);
-    document.getElementById('btn-upload-csv').addEventListener('click', uploadCSV);
-    document.getElementById('btn-scrape').addEventListener('click', scrapeProperties);
-    document.getElementById('btn-scrape-url').addEventListener('click', scrapeUrl);
+    document.getElementById('btn-upload-csv')?.addEventListener('click', uploadCSV);
+    document.getElementById('btn-scrape')?.addEventListener('click', scrapeProperties);
+    const consistencyBtn = document.getElementById('btn-consistency-check');
+    if (consistencyBtn) consistencyBtn.addEventListener('click', startConsistencyCheck);
+    document.getElementById('btn-scrape-url')?.addEventListener('click', scrapeUrl);
     const reportsBtn = document.getElementById('btn-refresh-reports');
     if (reportsBtn) reportsBtn.addEventListener('click', loadReports);
-    document.getElementById('preset-select').addEventListener('change', fillPreset);
+    document.getElementById('preset-select')?.addEventListener('change', fillPreset);
 
     // 土地タブイベント
-    document.getElementById('btn-land-scrape').addEventListener('click', scrapeLandListings);
-    document.getElementById('btn-land-csv').addEventListener('click', uploadLandCSV);
-    document.getElementById('btn-generate-plans').addEventListener('click', batchGeneratePlans);
-    document.getElementById('btn-geocode').addEventListener('click', batchGeocode);
-    document.getElementById('btn-batch-judge').addEventListener('click', batchJudgeLand);
-    document.getElementById('btn-collect-data').addEventListener('click', collectAllData);
-    document.getElementById('btn-ingest-api').addEventListener('click', ingestRealData);
-    document.getElementById('btn-save-config').addEventListener('click', saveScrapeConfig);
-    document.getElementById('btn-competition').addEventListener('click', loadCompetition);
-    document.getElementById('btn-refresh-land').addEventListener('click', () => loadLandListings());
+    document.getElementById('btn-land-scrape')?.addEventListener('click', scrapeLandListings);
+    document.getElementById('btn-land-csv')?.addEventListener('click', uploadLandCSV);
+    document.getElementById('btn-generate-plans')?.addEventListener('click', batchGeneratePlans);
+    document.getElementById('btn-geocode')?.addEventListener('click', batchGeocode);
+    document.getElementById('btn-batch-judge')?.addEventListener('click', batchJudgeLand);
+    document.getElementById('btn-collect-data')?.addEventListener('click', collectAllData);
+    document.getElementById('btn-ingest-api')?.addEventListener('click', ingestRealData);
+    document.getElementById('btn-save-config')?.addEventListener('click', saveScrapeConfig);
+    document.getElementById('btn-competition')?.addEventListener('click', loadCompetition);
+    document.getElementById('btn-refresh-land')?.addEventListener('click', () => loadLandListings());
     const unifiedBtn = document.getElementById('btn-unified-load');
     if (unifiedBtn) unifiedBtn.addEventListener('click', () => loadUnifiedData(0));
 
@@ -187,7 +393,6 @@ function initMap(center, zoom) {
     const meshMetrics = {
         'layer-mesh-landprice': 'land_price',
         'layer-mesh-rent':      'rent',
-        'layer-mesh-tx':        'tx_price',
         'layer-mesh-yield':     'yield',
         // layer-mesh-pop is handled separately with dropdown
         'layer-mesh-facility':  'facility',
@@ -258,46 +463,135 @@ function initMap(center, zoom) {
 
     // 凡例
     try { addLegendControl(); _hookLegendUpdate(); } catch(e) {}
+    window.addEventListener('resize', () => setTimeout(adjustRankingPanelPosition, 50));
 
     // 初期読込
     loadCities();
-    loadSampleProperties();
     loadRentalStats();
     loadReports();
     loadLandListings();
     loadScrapeConfigs();
     loadLandStats();
-    loadStationMarkers();
+    loadDbLayersFromDatabase();
+    refreshAutoScrapeStatus();
+    setInterval(refreshAutoScrapeStatus, 10000);
+    setTimeout(resumeTaskProgressUI, 500);
+    setTimeout(adjustRankingPanelPosition, 200);
+    // 初期表示で平米単価・賃料メッシュを載せる
+    setTimeout(() => ensurePrimaryMeshLayers(true), 800);
 }
 
+async function refreshAutoScrapeStatus() {
+    const el = document.getElementById('auto-scrape-status');
+    if (!el) return;
+    try {
+        const resp = await fetch('/api/scheduler/status');
+        const s = await resp.json();
+        const prop = s.property || {};
+        const db = s.db || {};
+        const running = s.running ? '稼働中' : '停止中';
+        const last = prop.last_run_at || '未実行';
+        const next = prop.next_run_at || '-';
+        const result = prop.last_result || {};
+        const err = prop.last_error;
+        const count = result.count != null ? result.count : '-';
+        const saved = result.saved != null ? result.saved : count;
+        const sources = (result.sources || ['rals']).join(',');
+        let line = `自動取得: ${running} / 最終: ${last} / 次回: ${next} / 直近 ${saved}件保存 (${sources})`;
+        if (db.properties != null) line += ` / DB物件 ${db.properties}件`;
+        if (err) line += ` / エラー: ${err}`;
+        el.textContent = line;
+        el.style.color = err ? '#ef9a9a' : (s.running ? '#90caf9' : '#ffcc80');
+    } catch (e) {
+        el.textContent = '自動取得: 状態取得失敗';
+        el.style.color = '#ef9a9a';
+    }
+}
+
+async function runAutoScrapeNow() {
+    const btn = document.getElementById('btn-auto-scrape-now');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '自動取得中...';
+    }
+    try {
+        const resp = await fetch('/api/scheduler/run-now', { method: 'POST' });
+        const data = await resp.json();
+        await refreshAutoScrapeStatus();
+        if (data.status !== 'started' && data.status !== 'ok') {
+            alert(data.message || data.error || '自動取得の開始に失敗しました');
+        }
+    } catch (e) {
+        alert('通信エラー: ' + e.message);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '今すぐ自動取得';
+        }
+        setTimeout(refreshAutoScrapeStatus, 3000);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const btn = document.getElementById('btn-auto-scrape-now');
+    if (btn) btn.addEventListener('click', runAutoScrapeNow);
+});
+
+
 function switchTab(tabId) {
+    // 旧「全物件比較」タブは物件タブへ統合
+    if (tabId === 'tab-data') tabId = 'tab-property';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-    document.querySelector(`.tab[data-tab="${tabId}"]`).classList.add('active');
-    document.getElementById(tabId).classList.add('active');
-    if (tabId === 'tab-data') loadCompareTable();
+    const tabBtn = document.querySelector(`.tab[data-tab="${tabId}"]`);
+    const tabPane = document.getElementById(tabId);
+    if (tabBtn) tabBtn.classList.add('active');
+    if (tabPane) tabPane.classList.add('active');
+    if (tabId === 'tab-property') {
+        try { loadCompareTable(); } catch (e) {}
+        try { refreshAutoScrapeStatus(); } catch (e) {}
+    }
 }
 
 // ===== 市区町村ロード =====
 
 async function loadCities() {
-    const pref = document.getElementById('prefecture-select').value;
+    const pref = getPrefectureParam('map', ['13', '14', '11', '12']);
     try {
-        const resp = await fetch(`/api/cities/${pref}`);
+        const resp = await fetch(`/api/cities/${encodeURIComponent(pref)}`);
         const data = await resp.json();
         const sel = document.getElementById('city-select');
-        sel.innerHTML = '';
-        data.cities.forEach(c => {
+        const prev = sel?.value || '';
+        sel.innerHTML = '<option value="">全域</option>';
+        (data.cities || []).forEach(c => {
             const opt = document.createElement('option');
             opt.value = c.code;
             opt.textContent = c.name;
             sel.appendChild(opt);
         });
+        if (prev && [...sel.options].some(o => o.value === prev)) {
+            sel.value = prev;
+        } else {
+            sel.value = '';
+        }
         // 駅マーカーも更新
         loadStationMarkers();
+        const prefCount = getSelectedPrefectureCodes('map', ['13']).length;
+        if (map && prefCount > 1) {
+            map.setView([35.72, 139.75], 9);
+        }
+        loadSampleProperties();
+        ensurePrimaryMeshLayers();
     } catch (e) {
         console.error('市区町村取得エラー:', e);
     }
+}
+
+function ensurePrimaryMeshLayers(forceRefresh = false) {
+    const landEl = document.getElementById('layer-mesh-landprice');
+    const rentEl = document.getElementById('layer-mesh-rent');
+    if (landEl?.checked) loadMeshLayer('land_price', forceRefresh);
+    if (rentEl?.checked) loadMeshLayer('rent', forceRefresh);
 }
 
 // ===== 統合物件一覧 =====
@@ -313,18 +607,22 @@ async function loadSampleProperties() {
     const stationFilter = (document.getElementById('prop-filter-station')?.value || '').trim();
     const typeFilter = document.getElementById('prop-filter-type')?.value || '';
     const sortBy = document.getElementById('prop-sort')?.value || 'yield_desc';
+    const pref = getPrefectureParam('map', ['13', '14', '11', '12']);
     const includeRebuild = document.getElementById('auto-include-rebuild')?.checked !== false;
 
     // ランク系はクライアント側で自動分析後に並べる
     const apiSortBy = (sortBy === 'rank_desc' || sortBy === 'rank_asc') ? 'updated_at' : sortBy;
-    let url = `/api/sample-properties?sort_by=${apiSortBy}&include_land=true`;
+    const includeDelisted = document.getElementById('prop-include-delisted')?.checked === true;
+    let url = `/api/sample-properties?sort_by=${apiSortBy}&include_land=true&prefecture_code=${encodeURIComponent(pref)}`;
     if (stationFilter) url += `&station_filter=${encodeURIComponent(stationFilter)}`;
+    if (includeDelisted) url += `&include_delisted=true`;
 
     try {
         const resp = await fetch(url);
         const data = await resp.json();
         sampleProperties = data.properties || [];
         sampleProperties.forEach(applyCachedAnalysisToProperty);
+        await loadServerAnalysisCacheForProperties(sampleProperties);
 
         // クライアントサイド種別フィルタ
         let filtered = getFilteredProperties(sampleProperties, typeFilter);
@@ -384,10 +682,10 @@ function sortPropertiesForView(props, sortBy) {
         const by = Number(b.net_yield ?? b.gross_yield ?? 0);
         const ap = Number(a.asking_price ?? 0);
         const bp = Number(b.asking_price ?? 0);
-        const as = Number(a._analysis_score ?? 0);
-        const bs = Number(b._analysis_score ?? 0);
-        const ag = gradeScore(a.grade);
-        const bg = gradeScore(b.grade);
+        const as = resolvePropertyScore(a);
+        const bs = resolvePropertyScore(b);
+        const ag = gradeScore(resolvePropertyGrade(a));
+        const bg = gradeScore(resolvePropertyGrade(b));
         const ad = Number(a.station_distance_min ?? 999);
         const bd = Number(b.station_distance_min ?? 999);
         const au = String(a.updated_at || a.fetched_at || '');
@@ -413,18 +711,31 @@ function applyRankOrderToProperties(sortedProps) {
 }
 
 function buildRankingFromProperties(props) {
-    return (props || [])
-        .filter(p => p.grade || p._analysis_score != null)
+    const rows = (props || [])
+        .filter(p => resolvePropertyGrade(p) || resolvePropertyScore(p))
         .map(p => ({
+            id: p.id || null,
+            client_index: sampleProperties.indexOf(p),
             name: p.name || p.address || '物件',
-            grade: p.grade || '?',
-            score: Number(p._analysis_score || 0),
-            recommendation: p._analysis_recommendation || '',
+            grade: resolvePropertyGrade(p) || '?',
+            score: resolvePropertyScore(p),
+            recommendation: p._analysis_recommendation || (p._selected && p._selected.recommendation) || '',
             net_yield: p.net_yield ?? null,
             hold_sell_roi: p._scenario_as_is?.simulation?.hold_sell_roi ?? p._scenario_rebuild?.simulation?.hold_sell_roi ?? null,
             exit_cap_rate: p._scenario_as_is?.valuation?.exit_cap_rate ?? p._scenario_rebuild?.valuation?.exit_cap_rate ?? null,
-            scenario: p._analysis_scenario || null,
+            scenario: p._analysis_scenario || (p._selected && p._selected.scenario) || null,
         }));
+    const gradeOrder = { S: 0, A: 1, B: 2, C: 3, D: 4, F: 5, '?': 9 };
+    rows.sort((a, b) => {
+        const sa = Number(a.score || 0);
+        const sb = Number(b.score || 0);
+        if (sb !== sa) return sb - sa;
+        const ga = gradeOrder[a.grade] ?? 9;
+        const gb = gradeOrder[b.grade] ?? 9;
+        if (ga !== gb) return ga - gb;
+        return (a.name || '').localeCompare(b.name || '', 'ja');
+    });
+    return rows;
 }
 
 async function analyzePropertiesForRanking(targets, includeRebuild = true, btn = null) {
@@ -459,6 +770,7 @@ async function analyzePropertiesForRanking(targets, includeRebuild = true, btn =
             if (Number.isNaN(idx) || !sampleProperties[idx]) return;
             const p = sampleProperties[idx];
             const selected = r.selected || {};
+            p._analysis_grade = selected.grade || p._analysis_grade;
             p.grade = selected.grade || p.grade;
             p.gross_yield = selected.gross_yield || p.gross_yield;
             if (selected.net_yield != null) p.net_yield = selected.net_yield;
@@ -468,6 +780,12 @@ async function analyzePropertiesForRanking(targets, includeRebuild = true, btn =
             p._analysis_confidence = selected.confidence;
             p._scenario_as_is = r.as_is || null;
             p._scenario_rebuild = r.rebuild || null;
+            p._analysis_cache = {
+                analysis_key: getAnalysisCacheKey(p),
+                selected: selected,
+                as_is: r.as_is || null,
+                rebuild: r.rebuild || null,
+            };
             p._analysis_updated_at = new Date().toISOString();
             persistPropertyAnalysisResult(p, r);
         });
@@ -501,24 +819,51 @@ function renderPropertyList(props) {
             : Math.round(p.asking_price / 1e4).toLocaleString() + '万') : '?';
         const yldVal = p.net_yield || p.gross_yield || 0;
         const yld = yldVal ? (yldVal * 100).toFixed(1) + '%' : '?';
-        const grade = p.grade || '';
+        const grade = resolvePropertyGrade(p);
         const isLand = (p._type === 'land');
+        const buildingPresence = p._building_presence
+            || (isLand ? 'land_only' : (p.building_area || p.structure ? 'building' : 'unknown'));
         const scenario = p._analysis_scenario === 'rebuild' ? '建替' : (p._analysis_scenario === 'as_is' ? '現況' : '');
-        const gradeColors = {S:'#4caf50',A:'#66bb6a',B:'#ffd54f',C:'#ffa726',D:'#ef5350',F:'#b71c1c'};
-        const gc = gradeColors[grade] || '#546e7a';
+        const gc = gradeColor(grade);
         const typeBadge = isLand
             ? '<span style="background:#1565c0;color:#fff;padding:0 4px;border-radius:2px;font-size:0.6rem;margin-right:4px;">土地</span>'
             : '<span style="background:#2e7d32;color:#fff;padding:0 4px;border-radius:2px;font-size:0.6rem;margin-right:4px;">収益</span>';
+        const presenceBadge = buildingPresence === 'land_only'
+            ? '<span style="background:#455a64;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">建物なし</span>'
+            : (buildingPresence === 'building'
+                ? '<span style="background:#6a1b9a;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">建物あり</span>'
+                : '<span style="background:#546e7a;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">建物不明</span>');
+        const linkCode = (() => {
+            const url = String(p.source_url || '').trim();
+            if (!url) return 'no_url';
+            if (String(p.listing_status || 'active') === 'delisted') return 'dead';
+            if (Number(p.verify_fail_count || 0) > 0) return 'suspect';
+            if (!p.last_verified_at) return 'unchecked';
+            return 'alive';
+        })();
+        const isDelisted = linkCode === 'dead';
+        const linkBadgeMap = {
+            alive: ['#2e7d32', '掲載中'],
+            unchecked: ['#546e7a', '未確認'],
+            suspect: ['#f57f17', '要確認'],
+            dead: ['#b71c1c', 'リンク切れ'],
+            no_url: ['#6a1b9a', 'URLなし'],
+        };
+        const [linkColor, linkLabel] = linkBadgeMap[linkCode] || linkBadgeMap.unchecked;
+        const delistedBadge = `<span style="background:${linkColor};color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;" title="${(p.verify_note || '').replace(/"/g,'&quot;')}">${linkLabel}</span>`;
         const station = p.nearest_station ? `${p.nearest_station}${p.station_distance_min ? ' ' + p.station_distance_min + '分' : ''}` : '';
         const selected = realIdx === _selectedPropIdx ? 'background:#1a3a5f;' : '';
+        const dimmed = isDelisted ? 'opacity:0.55;' : '';
         const rankTag = p._rank_order ? `<span style="background:#263238;color:#fff;padding:0 5px;border-radius:10px;font-size:0.58rem;">#${p._rank_order}</span>` : '';
 
-        html += `<div onclick="selectProperty(${realIdx})" style="padding:5px 8px;border-bottom:1px solid #1a2744;cursor:pointer;font-size:0.72rem;${selected}display:flex;align-items:center;gap:6px;"
+        html += `<div onclick="selectProperty(${realIdx})" style="padding:5px 8px;border-bottom:1px solid #1a2744;cursor:pointer;font-size:0.72rem;${selected}${dimmed}display:flex;align-items:center;gap:6px;"
                       onmouseover="this.style.background='#1a3a5f'" onmouseout="this.style.background='${realIdx === _selectedPropIdx ? '#1a3a5f' : ''}'">
             <div style="flex:1;min-width:0;">
                 <div style="display:flex;align-items:center;gap:2px;">
                     ${rankTag}
                     ${typeBadge}
+                    ${delistedBadge}
+                    ${presenceBadge}
                     ${grade ? `<span style="color:${gc};font-weight:bold;font-size:0.7rem;">${grade}</span>` : ''}
                     ${scenario ? `<span style="background:#455a64;color:#fff;padding:0 4px;border-radius:2px;font-size:0.58rem;">${scenario}</span>` : ''}
                     <span style="color:#e0e0e0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.name || p.address || '物件'}</span>
@@ -553,6 +898,7 @@ function selectProperty(idx) {
     let filtered = sampleProperties;
     if (typeFilter) filtered = sampleProperties.filter(pp => (pp._type || 'property') === typeFilter);
     renderPropertyList(filtered);
+    renderSavedAnalysisDetail(p);
 }
 
 function plotSampleProperties(propsToPlot) {
@@ -568,7 +914,7 @@ function plotSampleProperties(propsToPlot) {
         const price = p.asking_price ? `${(p.asking_price/10000).toLocaleString()}万円` : '?';
         const yldBase = p.net_yield || p.gross_yield || (p.current_rent_annual && p.asking_price ? (p.current_rent_annual / p.asking_price) : 0);
         const yld = yldBase ? `${(yldBase*100).toFixed(1)}%` : '?';
-        const grade = p.grade || '?';
+        const grade = resolvePropertyGrade(p) || '?';
         const source = p.source || '';
         const sourceLink = p.source_url ? `<a href="${p.source_url}" target="_blank" rel="noopener" style="color:#4fc3f7;">物件ページ</a>` : '';
         const structure = p.structure || '';
@@ -576,14 +922,35 @@ function plotSampleProperties(propsToPlot) {
         const isLand = (p._type === 'land');
         const rankNo = p._rank_order || null;
 
-        const gradeColor = grade === 'S' ? '#4caf50' : grade === 'A' ? '#66bb6a' : grade === 'B' ? '#ffd54f' : grade === 'C' ? '#ffa726' : grade === 'D' ? '#ef5350' : grade === 'F' ? '#b71c1c' : (isLand ? '#42a5f5' : '#78909c');
+        const markerColor = gradeColor(grade) || (isLand ? '#42a5f5' : '#78909c');
         const markerShape = isLand ? { radius: 7, weight: 2, dashArray: '3' } : { radius: 8, weight: 2 };
 
         const marker = L.circleMarker([p.latitude, p.longitude], {
-            ...markerShape, color: gradeColor, fillColor: gradeColor, fillOpacity: 0.7,
+            ...markerShape,
+            pane: 'objectPane',
+            color: markerColor,
+            fillColor: markerColor,
+            fillOpacity: 0.7,
         });
 
         const estimated = p._coords_estimated ? '<span style="color:#ffa726;font-size:0.6rem;">(推定位置)</span>' : '';
+        const delistedBadge = (() => {
+            const url = String(p.source_url || '').trim();
+            let code = 'unchecked';
+            if (!url) code = 'no_url';
+            else if (String(p.listing_status || 'active') === 'delisted') code = 'dead';
+            else if (Number(p.verify_fail_count || 0) > 0) code = 'suspect';
+            else if (p.last_verified_at) code = 'alive';
+            const map = {
+                alive: ['#2e7d32', '掲載中'],
+                unchecked: ['#546e7a', '未確認'],
+                suspect: ['#f57f17', '要確認'],
+                dead: ['#b71c1c', 'リンク切れ'],
+                no_url: ['#6a1b9a', 'URLなし'],
+            };
+            const [bg, label] = map[code] || map.unchecked;
+            return `<span style="background:${bg};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;margin-left:4px;" title="${(p.verify_note || '').replace(/"/g,'&quot;')}">${label}</span>`;
+        })();
         const typeBadge = isLand ? '<span style="background:#1565c0;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;margin-left:4px;">土地</span>' : '';
         const scenarioBadge = p._analysis_scenario === 'rebuild'
             ? '<span style="background:#455a64;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.62rem;margin-left:4px;">建替案採用</span>'
@@ -595,7 +962,7 @@ function plotSampleProperties(propsToPlot) {
                 <strong>${p.name || p.address || '物件'}</strong>
                 ${rankNo ? `<span style="background:#263238;color:#fff;padding:1px 6px;border-radius:10px;font-size:0.65rem;margin-left:4px;">#${rankNo}</span>` : ''}
                 ${source ? `<span style="background:#1e3a5f;color:#4fc3f7;padding:1px 5px;border-radius:3px;font-size:0.65rem;margin-left:4px;">${source}</span>` : ''}
-                ${typeBadge} ${scenarioBadge} ${estimated}
+                ${typeBadge} ${delistedBadge} ${scenarioBadge} ${estimated}
                 <br>
                 <span style="color:#888;">${p.address || ''}</span><br>
                 <table style="margin:4px 0;font-size:0.75rem;">
@@ -608,6 +975,7 @@ function plotSampleProperties(propsToPlot) {
                 ${sourceLink}
                 <br>
                 <button onclick="selectProperty(${realIdx})" style="margin-top:4px;padding:3px 10px;background:#4fc3f7;color:#000;border:none;border-radius:3px;cursor:pointer;font-size:0.72rem;">選択して分析</button>
+                <button onclick="openManualEditFromMap(${realIdx})" style="margin-top:4px;margin-left:4px;padding:3px 10px;background:#90caf9;color:#000;border:none;border-radius:3px;cursor:pointer;font-size:0.72rem;">手動修正</button>
             </div>
         `);
         if (rankNo && rankNo <= 50) {
@@ -624,6 +992,20 @@ function plotSampleProperties(propsToPlot) {
 
     if (document.getElementById('layer-properties')?.checked) {
         propertyLayer.addTo(map);
+    }
+
+    // プロット済み物件が見えるようにビューを合わせる
+    const plotted = [];
+    propertyLayer.eachLayer(layer => {
+        if (layer.getLatLng) plotted.push(layer.getLatLng());
+    });
+    if (plotted.length > 0) {
+        try {
+            const bounds = L.latLngBounds(plotted);
+            if (bounds.isValid()) {
+                map.fitBounds(bounds.pad(0.15), { maxZoom: 13 });
+            }
+        } catch (e) { /* ignore */ }
     }
 
     // 物件利回りヒートマップデータも生成
@@ -648,10 +1030,13 @@ function fillPropertyForm(idx) {
     setVal('prop-price', p.asking_price ? Math.round(p.asking_price / 10000) : '');
     setVal('prop-land-area', p.land_area || '');
     setVal('prop-building-area', p.building_area || '');
+    setVal('prop-nearest-station', p.nearest_station || '');
     setVal('prop-age', p.building_age || '');
     setVal('prop-station', p.station_distance_min || '');
     setVal('prop-rent', p.current_rent_annual ? Math.round(p.current_rent_annual / 10000) : '');
     setVal('prop-units', p.units || '');
+    setVal('prop-latitude', p.latitude || '');
+    setVal('prop-longitude', p.longitude || '');
     if (p.structure) {
         const sel = document.getElementById('prop-structure');
         if (sel) sel.value = p.structure;
@@ -659,6 +1044,155 @@ function fillPropertyForm(idx) {
     // preset selectも同期
     const presetSel = document.getElementById('preset-select');
     if (presetSel) presetSel.value = idx;
+}
+
+function openManualEditFromMap(idx) {
+    selectProperty(idx);
+    switchTab('tab-property');
+}
+
+function _numOrNull(v) {
+    const t = (v == null ? '' : String(v)).trim();
+    if (!t) return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
+}
+
+function _findPropertyIndexById(id) {
+    if (id == null) return -1;
+    return sampleProperties.findIndex(p => String(p.id) === String(id));
+}
+
+function _findPropertyIndexByLandId(id) {
+    if (id == null) return -1;
+    return sampleProperties.findIndex(p => String(p._land_listing_id) === String(id));
+}
+
+async function saveManualPropertyUpdate() {
+    const resultEl = document.getElementById('manual-update-result');
+    if (_selectedPropIdx < 0 || !sampleProperties[_selectedPropIdx]) {
+        if (resultEl) resultEl.innerHTML = '<span style="color:#ef5350;">先に地図または一覧から物件を選択してください。</span>';
+        return;
+    }
+    const p = sampleProperties[_selectedPropIdx];
+
+    const isLand = (p._type === 'land' || p._land_listing_id != null);
+    const payload = {
+        address: document.getElementById('prop-address')?.value?.trim() || '',
+        latitude: _numOrNull(document.getElementById('prop-latitude')?.value),
+        longitude: _numOrNull(document.getElementById('prop-longitude')?.value),
+    };
+    let endpoint = '';
+    if (isLand) {
+        const lid = p._land_listing_id ?? p.id;
+        if (lid == null) {
+            if (resultEl) resultEl.innerHTML = '<span style="color:#ef5350;">土地IDが不明なため保存できません。</span>';
+            return;
+        }
+        endpoint = `/api/land-listings/${encodeURIComponent(lid)}`;
+        payload.station = document.getElementById('prop-nearest-station')?.value?.trim() || null;
+        payload.walk_minutes = _numOrNull(document.getElementById('prop-station')?.value);
+        const priceMan = _numOrNull(document.getElementById('prop-price')?.value);
+        payload.land_price = priceMan != null ? Math.round(priceMan * 10000) : null;
+        payload.land_area_sqm = _numOrNull(document.getElementById('prop-land-area')?.value);
+    } else {
+        if (!p.id) {
+            if (resultEl) resultEl.innerHTML = '<span style="color:#ef5350;">物件IDが不明なため保存できません。</span>';
+            return;
+        }
+        endpoint = `/api/properties/${encodeURIComponent(p.id)}`;
+        payload.name = document.getElementById('prop-name')?.value?.trim() || '無題物件';
+        payload.asking_price = (() => {
+            const priceMan = _numOrNull(document.getElementById('prop-price')?.value);
+            return priceMan != null ? Math.round(priceMan * 10000) : null;
+        })();
+        payload.land_area = _numOrNull(document.getElementById('prop-land-area')?.value);
+        payload.building_area = _numOrNull(document.getElementById('prop-building-area')?.value);
+        payload.structure = document.getElementById('prop-structure')?.value || null;
+        payload.building_age = _numOrNull(document.getElementById('prop-age')?.value);
+        payload.nearest_station = document.getElementById('prop-nearest-station')?.value?.trim() || null;
+        payload.station_distance_min = _numOrNull(document.getElementById('prop-station')?.value);
+        payload.current_rent_annual = (() => {
+            const rentMan = _numOrNull(document.getElementById('prop-rent')?.value);
+            return rentMan != null ? Math.round(rentMan * 10000) : null;
+        })();
+        payload.units = _numOrNull(document.getElementById('prop-units')?.value);
+    }
+
+    if (resultEl) resultEl.innerHTML = '<span style="color:#4fc3f7;">手動更新を保存中...</span>';
+    try {
+        const resp = await fetch(endpoint, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+
+        const updated = data.property || data.listing || null;
+        if (updated) {
+            if (isLand) {
+                const idx = _findPropertyIndexByLandId(updated.id);
+                if (idx >= 0) {
+                    sampleProperties[idx].address = updated.address;
+                    sampleProperties[idx].latitude = updated.latitude;
+                    sampleProperties[idx].longitude = updated.longitude;
+                    sampleProperties[idx].nearest_station = updated.station;
+                    sampleProperties[idx].station_distance_min = updated.walk_minutes;
+                    sampleProperties[idx].land_area = updated.land_area_sqm;
+                    if (updated.land_price != null) sampleProperties[idx].asking_price = updated.land_price;
+                }
+            } else {
+                const idx = _findPropertyIndexById(updated.id);
+                if (idx >= 0) sampleProperties[idx] = { ...sampleProperties[idx], ...updated };
+            }
+        }
+
+        const typeFilter = document.getElementById('prop-filter-type')?.value || '';
+        const sortBy = document.getElementById('prop-sort')?.value || 'updated_at';
+        const refreshed = getFilteredProperties(sampleProperties, typeFilter);
+        const sorted = sortPropertiesForView(refreshed, sortBy);
+        applyRankOrderToProperties(sorted);
+        renderPropertyList(sorted);
+        plotSampleProperties(sorted);
+        if (resultEl) resultEl.innerHTML = '<span style="color:#66bb6a;">手動更新を保存しました（DB反映済み）</span>';
+    } catch (e) {
+        if (resultEl) resultEl.innerHTML = `<span style="color:#ef5350;">保存失敗: ${e.message}</span>`;
+    }
+}
+
+async function verifyListingSources() {
+    const btn = document.getElementById('btn-verify-listings');
+    const resultEl = document.getElementById('verify-listings-result');
+    if (btn) btn.disabled = true;
+    if (resultEl) resultEl.innerHTML = '<span style="color:#4fc3f7;">掲載URLを確認中... (時間がかかる場合があります)</span>';
+    try {
+        const resp = await fetch('/api/listings/verify-source', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+        const r = data.result || {};
+        const prop = r.properties || {};
+        const land = r.land_listings || {};
+        const totalChecked = (prop.checked || 0) + (land.checked || 0);
+        const totalFailed = (prop.failed || 0) + (land.failed || 0);
+        if (resultEl) {
+            resultEl.innerHTML = `<span style="color:#66bb6a;">確認 ${totalChecked}件 / 消失候補 ${totalFailed}件 `
+                + `(物件 ${prop.checked || 0}件・土地 ${land.checked || 0}件)</span>`;
+        }
+        await loadSampleProperties();
+    } catch (e) {
+        if (resultEl) resultEl.innerHTML = `<span style="color:#ef5350;">掲載チェック失敗: ${e.message}</span>`;
+    } finally {
+        if (btn) btn.disabled = false;
+    }
 }
 
 function fillPreset() {
@@ -724,38 +1258,29 @@ async function fillGaps(target) {
 
 async function loadAreaData() {
     const btn = document.getElementById('btn-load-data');
-    const pref = document.getElementById('prefecture-select').value;
+    const pref = getPrefectureParam('map', ['13', '14', '11', '12']);
     const city = document.getElementById('city-select').value;
 
     btn.disabled = true;
     btn.textContent = '地価+賃料 読込中...';
 
     try {
-        // 1. 既存地価データ + 取引データ
-        const [lpResp, txResp] = await Promise.all([
-            fetch(`/api/land-prices/${pref}?city_code=${city}`),
-            fetch(`/api/transactions/${pref}?city_code=${city}`),
-        ]);
+        // 1. 既存地価データ
+        const lpResp = await fetch(`/api/land-prices/${encodeURIComponent(pref)}?city_code=${city}`);
         const lpData = await lpResp.json();
         renderLandPrices(lpData.geojson);
         showAreaStats(lpData.summary);
-        const txData = await txResp.json();
-        renderTransactions(txData.geojson);
 
         // 2. 公示地価API (bounds→DB保存) + 賃料スクレイピングを同時実行
         btn.textContent = 'API地価+賃料取得中...';
         const [apiLpResp, rentalResp] = await Promise.all([
             fetch(`/api/reinfolib/land-prices?${_mapBoundsParams()}&zoom=13&force_fetch=true`),
-            fetch('/api/scrape/rental', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({prefecture_code: pref, max_pages: 5}),
-            }),
+            // 実装は GET /api/scrape-rentals（POST /api/scrape/rental は存在しない）
+            fetch(`/api/scrape-rentals?prefecture_code=${encodeURIComponent(pref)}&max_pages=5`),
         ]);
 
         const apiLpData = await apiLpResp.json();
         if (apiLpData.count > 0) {
-            // 公示地価レイヤーを自動表示
             const olpCheck = document.getElementById('layer-official-land-price');
             if (olpCheck && !olpCheck.checked) olpCheck.checked = true;
             loadOfficialLandPriceLayer();
@@ -767,11 +1292,41 @@ async function loadAreaData() {
             console.log(`賃料スクレイピング: ${rentalData.count}件`);
             loadRentalStats();
         }
+
+        // 3. メッシュ再計算 → 平米単価/賃料を本線表示
+        btn.textContent = 'メッシュ更新中...';
+        try {
+            await fetch('/api/mesh/compute', { method: 'POST' });
+        } catch (e) {
+            console.warn('mesh compute trigger failed', e);
+        }
+        const landCheck = document.getElementById('layer-mesh-landprice');
+        const rentCheck = document.getElementById('layer-mesh-rent');
+        if (landCheck) landCheck.checked = true;
+        if (rentCheck) rentCheck.checked = true;
+        // 計算完了を少し待ってから再描画
+        setTimeout(() => ensurePrimaryMeshLayers(true), 1500);
+        await loadSampleProperties();
     } catch (err) {
         console.error('データ読込エラー:', err);
     } finally {
         btn.disabled = false;
-        btn.textContent = '地価データ読込';
+        btn.textContent = '地図を更新';
+    }
+}
+
+async function loadDbLayersFromDatabase() {
+    const pref = getPrefectureParam('map', ['13', '14', '11', '12']);
+    const city = document.getElementById('city-select')?.value || '';
+    try {
+        const lpResp = await fetch(`/api/land-prices/${encodeURIComponent(pref)}?city_code=${city}`);
+        const lpData = await lpResp.json();
+        renderLandPrices(lpData.geojson);
+        showAreaStats(lpData.summary);
+        // 取引平均プロットと吹き出しは表示しない
+        renderTransactions(null);
+    } catch (err) {
+        console.error('DBレイヤー読込エラー:', err);
     }
 }
 
@@ -779,34 +1334,38 @@ async function loadAreaData() {
 
 function renderLandPrices(geojson) {
     if (landPriceLayer) map.removeLayer(landPriceLayer);
+    landPriceLayer = null;
+    if (!geojson || !geojson.features || !geojson.features.length) return;
 
     landPriceLayer = L.geoJSON(geojson, {
         pointToLayer: (f, ll) => L.circleMarker(ll, {
-            radius: 6, fillColor: f.properties.color,
-            color: '#fff', weight: 1, fillOpacity: 0.8,
+            radius: 5,
+            fillColor: f.properties?.color || '#26a69a',
+            color: '#fff',
+            weight: 1,
+            fillOpacity: 0.55,
+            pane: 'heatPane',
         }),
         onEachFeature: (f, layer) => {
-            const p = f.properties;
-            let changeStr = '';
-            if (p.change_rate != null) {
-                const sign = p.change_rate >= 0 ? '+' : '';
-                changeStr = `<br>前年比: ${sign}${(p.change_rate * 100).toFixed(1)}%`;
-            }
+            const p = f.properties || {};
             layer.bindPopup(`
-                <div class="popup-title">${p.type}</div>
-                <div class="popup-price">${p.price_label}</div>
-                <div class="popup-detail">
-                    ${p.address}<br>用途: ${p.use_zone}${changeStr}
-                    ${p.station ? '<br>最寄駅: ' + p.station : ''}
-                </div>
+                <div class="popup-title">${p.type || '地価'}</div>
+                <div class="popup-price">${p.price_label || ''}</div>
+                <div class="popup-detail">${p.address || ''}</div>
             `);
         },
     });
-    if (document.getElementById('layer-land-price').checked) landPriceLayer.addTo(map);
+    // メッシュが主表示。ポイントは詳細確認用に薄く重ねる
+    landPriceLayer.addTo(map);
 }
 
 function renderTransactions(geojson) {
     if (transactionLayer) map.removeLayer(transactionLayer);
+    // 取引平均のプロット/吹き出しは廃止
+    if (!geojson || !geojson.features || !geojson.features.length) {
+        transactionLayer = null;
+        return;
+    }
 
     transactionLayer = L.geoJSON(geojson, {
         pointToLayer: (f, ll) => L.circleMarker(ll, {
@@ -825,7 +1384,7 @@ function renderTransactions(geojson) {
             `);
         },
     });
-    if (document.getElementById('layer-transactions').checked) transactionLayer.addTo(map);
+    if (isLayerEnabled('layer-transactions', true)) transactionLayer.addTo(map);
 }
 
 function showAreaStats(summary) {
@@ -850,7 +1409,7 @@ async function analyzeProperty() {
     btn.disabled = true;
     btn.textContent = '分析中...';
 
-    const pref = document.getElementById('prefecture-select').value;
+    const pref = getPrimaryPrefectureCode('map', ['13']);
     const city = document.getElementById('city-select').value;
 
     const propData = {
@@ -866,12 +1425,25 @@ async function analyzeProperty() {
         station_distance_min: parseInt(document.getElementById('prop-station').value) || null,
         current_rent_annual: (parseInt(document.getElementById('prop-rent').value) || 0) * 10000,
         units: parseInt(document.getElementById('prop-units').value) || null,
+        nearest_station: document.getElementById('prop-nearest-station')?.value || null,
+        latitude: parseFloat(document.getElementById('prop-latitude')?.value) || null,
+        longitude: parseFloat(document.getElementById('prop-longitude')?.value) || null,
+        loan_rate: parseFloat(document.getElementById('loan-rate')?.value) || null,
+        loan_term_years: parseInt(document.getElementById('loan-term')?.value) || null,
+        loan_ltv: parseFloat(document.getElementById('loan-ltv')?.value) || null,
     };
+    if (!propData.latitude) delete propData.latitude;
+    if (!propData.longitude) delete propData.longitude;
+    if (!propData.nearest_station) delete propData.nearest_station;
 
     // 選択中の物件から座標を取得
     const presetIdx = document.getElementById('preset-select').value;
     if (presetIdx !== '' && sampleProperties[parseInt(presetIdx)]) {
         const sp = sampleProperties[parseInt(presetIdx)];
+        if (sp.id != null) propData.id = sp.id;
+        if (sp._type) propData._type = sp._type;
+        if (sp._land_listing_id != null) propData._land_listing_id = sp._land_listing_id;
+        if (sp.source_url) propData.source_url = sp.source_url;
         if (sp.latitude) propData.latitude = sp.latitude;
         if (sp.longitude) propData.longitude = sp.longitude;
         if (sp.road_frontage) propData.road_frontage = sp.road_frontage;
@@ -905,7 +1477,73 @@ async function analyzeProperty() {
             data.analysis_input_after || null
         );
         if (data.asset_score) showAssetScoreInResult(data.asset_score);
-        switchTab('tab-property');
+
+        // 判定結果と地図色を一致させるため、選択中物件の表示データを更新
+        const presetIdxNum = parseInt(presetIdx);
+        if (!Number.isNaN(presetIdxNum) && sampleProperties[presetIdxNum] && data.judgment) {
+            const p = sampleProperties[presetIdxNum];
+            p._analysis_grade = data.judgment.grade || p._analysis_grade;
+            p.grade = data.judgment.grade || p.grade;
+            if (data.valuation?.gross_yield != null) p.gross_yield = data.valuation.gross_yield;
+            if (data.valuation?.net_yield != null) p.net_yield = data.valuation.net_yield;
+            p._analysis_score = data.judgment.overall_score ?? p._analysis_score;
+            p._analysis_recommendation = data.judgment.recommendation || p._analysis_recommendation;
+            p._analysis_updated_at = new Date().toISOString();
+            p._analysis_cache = {
+                analysis_key: getAnalysisCacheKey(p),
+                selected: {
+                    scenario: p._analysis_scenario || 'as_is',
+                    grade: p.grade,
+                    score: p._analysis_score,
+                    recommendation: p._analysis_recommendation,
+                    confidence: data.judgment.confidence,
+                    gross_yield: p.gross_yield,
+                    net_yield: p.net_yield,
+                },
+                as_is: p._scenario_as_is || {
+                    scenario: 'as_is',
+                    grade: p.grade,
+                    score: p._analysis_score,
+                    recommendation: p._analysis_recommendation,
+                    gross_yield: p.gross_yield,
+                    net_yield: p.net_yield,
+                },
+                rebuild: p._scenario_rebuild || null,
+            };
+
+            // キャッシュも更新
+            persistPropertyAnalysisResult(p, {
+                selected: {
+                    grade: p.grade,
+                    gross_yield: p.gross_yield,
+                    net_yield: p.net_yield,
+                    score: p._analysis_score,
+                    recommendation: p._analysis_recommendation,
+                    scenario: p._analysis_scenario,
+                    confidence: data.judgment.confidence,
+                },
+                as_is: p._scenario_as_is,
+                rebuild: p._scenario_rebuild,
+            });
+            saveAnalysisCache();
+
+            const typeFilter = document.getElementById('prop-filter-type')?.value || '';
+            const sortBy = document.getElementById('prop-sort')?.value || 'updated_at';
+            const refreshed = getFilteredProperties(sampleProperties, typeFilter);
+            const sorted = sortPropertiesForView(refreshed, sortBy);
+            applyRankOrderToProperties(sorted);
+            renderPropertyList(sorted);
+            plotSampleProperties(sorted);
+            showRanking(buildRankingFromProperties(sorted));
+            renderSavedAnalysisDetail(p);
+        }
+        // 判定結果パネルは地図タブ側にあるため、地図タブに留める
+        switchTab('tab-map');
+        const resultPanel = document.getElementById('result-panel');
+        if (resultPanel) {
+            resultPanel.style.display = 'block';
+            resultPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
     } catch (err) {
         console.error('分析エラー:', err);
         alert('分析に失敗しました');
@@ -963,6 +1601,72 @@ async function autoAnalyzeAndReflect() {
     }
 }
 
+async function analyzeUnanalyzedAndSave() {
+    const btn = document.getElementById('btn-auto-analyze-save');
+    const resultEl = document.getElementById('auto-analyze-save-result');
+    const includeRebuild = document.getElementById('auto-include-rebuild')?.checked !== false;
+    const typeFilter = document.getElementById('prop-filter-type')?.value || '';
+    const sortBy = document.getElementById('prop-sort')?.value || 'updated_at';
+    const targets = getFilteredProperties(sampleProperties, typeFilter);
+    if (!targets.length) {
+        if (resultEl) resultEl.textContent = '分析対象物件がありません';
+        return;
+    }
+
+    const oldText = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '未分析を分析中...'; }
+    if (resultEl) resultEl.textContent = `未分析物件を判定中... (${targets.length}件)`;
+    try {
+        const payloadProps = targets.map(p => ({
+            ...p,
+            _client_index: sampleProperties.indexOf(p),
+        })).filter(p => p._client_index >= 0);
+        const resp = await fetch('/api/properties/analyze-unanalyzed', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                properties: payloadProps,
+                include_rebuild: includeRebuild,
+                limit: 1000,
+            }),
+        });
+        const data = await resp.json();
+        const rows = data.results || [];
+        rows.forEach(r => {
+            const key = r.analysis_key || '';
+            const idx = payloadProps.findIndex(pp => getAnalysisCacheKey(pp) === key);
+            if (idx < 0) return;
+            const clientIdx = payloadProps[idx]._client_index;
+            const p = sampleProperties[clientIdx];
+            if (!p) return;
+            applyServerCachedAnalysisToProperty(p, {
+                analysis_key: key,
+                selected: r.selected || {},
+                as_is: r.as_is || {},
+                rebuild: r.rebuild || {},
+            });
+            persistPropertyAnalysisResult(p, { selected: r.selected || {}, as_is: r.as_is || {}, rebuild: r.rebuild || {} });
+        });
+        saveAnalysisCache();
+
+        const refreshed = getFilteredProperties(sampleProperties, typeFilter);
+        const sorted = sortPropertiesForView(refreshed, sortBy);
+        applyRankOrderToProperties(sorted);
+        renderPropertyList(sorted);
+        plotSampleProperties(sorted);
+        showRanking(buildRankingFromProperties(sorted));
+
+        if (resultEl) {
+            resultEl.innerHTML = `<span style="color:#66bb6a;">保存完了: 新規分析 ${data.analyzed || 0}件 / 既分析スキップ ${data.skipped_already_analyzed || 0}件</span>`;
+        }
+    } catch (e) {
+        console.error('未分析自動分析エラー:', e);
+        if (resultEl) resultEl.innerHTML = `<span style="color:#ef5350;">エラー: ${e.message}</span>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = oldText || '未分析を自動分析・保存'; }
+    }
+}
+
 // ===== 結果表示 =====
 
 function showJudgmentResult(
@@ -980,7 +1684,7 @@ function showJudgmentResult(
     panel.style.display = 'block';
 
     // Grade badge (keep as-is)
-    const gradeColors = {S:'#4caf50',A:'#66bb6a',B:'#ffd54f',C:'#ffa726',D:'#ef5350',F:'#b71c1c'};
+    const gradeColors = window.GRADE_PALETTE || {S:'#1a9641',A:'#4dac26',B:'#b8e186',C:'#fdb863',D:'#e66101',F:'#d7191c'};
     document.getElementById('result-grade').textContent = judgment.grade;
     document.getElementById('result-grade').style.background = gradeColors[judgment.grade] || '#78909c';
     document.getElementById('result-recommendation').textContent = judgment.recommendation;
@@ -1185,6 +1889,75 @@ function showJudgmentResult(
     panel.scrollIntoView({behavior: 'smooth', block: 'start'});
 }
 
+function _fmtPct(v, digits = 1) {
+    if (v == null || Number.isNaN(Number(v))) return '-';
+    return `${(Number(v) * 100).toFixed(digits)}%`;
+}
+
+function _fmtNum(v) {
+    if (v == null || Number.isNaN(Number(v))) return '-';
+    return Number(v).toLocaleString();
+}
+
+function _fmtYen(v) {
+    if (v == null || Number.isNaN(Number(v))) return '-';
+    return `¥${Math.round(Number(v)).toLocaleString()}`;
+}
+
+function renderSavedAnalysisDetail(p) {
+    const panel = document.getElementById('saved-analysis-panel');
+    const content = document.getElementById('saved-analysis-content');
+    if (!panel || !content) return;
+    const cache = p?._analysis_cache;
+    if (!cache || !cache.selected) {
+        panel.style.display = 'none';
+        content.innerHTML = '';
+        return;
+    }
+
+    const selected = cache.selected || {};
+    const asIs = cache.as_is || {};
+    const rebuild = cache.rebuild || {};
+    const hasRebuild = !!(rebuild && Object.keys(rebuild).length);
+    const assumptions = rebuild.assumptions || {};
+
+    const row = (label, v1, v2) => `
+        <div style="display:grid;grid-template-columns:120px 1fr 1fr;gap:8px;padding:2px 0;border-bottom:1px solid #1a2744;">
+            <span style="color:#78909c;">${label}</span>
+            <span>${v1}</span>
+            <span>${v2}</span>
+        </div>
+    `;
+
+    content.innerHTML = `
+        <div style="padding:6px 8px;background:#101b2d;border:1px solid #1a2744;border-radius:6px;margin-bottom:8px;">
+            <div style="font-weight:700;">採用シナリオ: ${selected.scenario === 'rebuild' ? '建替' : '現況'} / ${selected.grade || '-'} / Score ${_fmtNum(selected.score)}</div>
+            <div style="color:#90a4ae;font-size:0.72rem;">${selected.recommendation || ''}</div>
+        </div>
+        <div style="font-size:0.72rem;color:#90a4ae;margin-bottom:4px;">現況案 / 建替案 比較</div>
+        ${row('スコア', _fmtNum(asIs.score), hasRebuild ? _fmtNum(rebuild.score) : '-')}
+        ${row('正味利回り', _fmtPct(asIs.net_yield), hasRebuild ? _fmtPct(rebuild.net_yield) : '-')}
+        ${row('IRR', _fmtPct(asIs.irr), hasRebuild ? _fmtPct(rebuild.irr) : '-')}
+        ${row('DSCR', _fmtNum(asIs.dscr), hasRebuild ? _fmtNum(rebuild.dscr) : '-')}
+        ${row('初年度CF', _fmtYen(asIs.year1_cash_flow), hasRebuild ? _fmtYen(rebuild.year1_cash_flow) : '-')}
+        ${row('8年ROI', _fmtPct(asIs.hold_sell_roi, 0), hasRebuild ? _fmtPct(rebuild.hold_sell_roi, 0) : '-')}
+        ${row('出口Cap', _fmtPct(asIs.exit_cap_rate), hasRebuild ? _fmtPct(rebuild.exit_cap_rate) : '-')}
+        ${hasRebuild ? `
+        <div style="margin-top:8px;padding:6px;border:1px solid #1a2744;border-radius:6px;background:#0f172a;">
+            <div style="font-weight:700;color:#81d4fa;margin-bottom:4px;">建替コスト前提</div>
+            <div style="display:grid;grid-template-columns:140px 1fr;gap:6px;">
+                <span style="color:#78909c;">増分総額</span><span>${_fmtYen(assumptions.rebuild_incremental_cost)}</span>
+                <span style="color:#78909c;">建築本体</span><span>${_fmtYen(assumptions.rebuild_cost_hard)}</span>
+                <span style="color:#78909c;">付帯・諸経費</span><span>${_fmtYen(assumptions.rebuild_cost_overhead)}</span>
+                <span style="color:#78909c;">セットバック補正</span><span>${_fmtYen(assumptions.rebuild_cost_setback)}</span>
+                <span style="color:#78909c;">解体費</span><span>${_fmtYen(assumptions.demolition_cost)}</span>
+                <span style="color:#78909c;">採用プラン</span><span>${assumptions.selected_plan || '-'}</span>
+            </div>
+        </div>` : ''}
+    `;
+    panel.style.display = 'block';
+}
+
 function showAssetScoreInResult(data) {
     /**
      * 投資判定結果パネル内に資産性スコアを統合表示する
@@ -1234,6 +2007,7 @@ function showRanking(ranking) {
     if (toggleBtn) toggleBtn.textContent = rankingPanelCollapsed ? '展開' : '折りたたむ';
     if (wrap) wrap.style.display = rankingPanelCollapsed ? 'none' : 'block';
     panel.style.display = 'block';
+    adjustRankingPanelPosition();
 
     let html = '';
     ranking.forEach((r, i) => {
@@ -1241,8 +2015,11 @@ function showRanking(ranking) {
         const netY = r.net_yield != null ? ` / 正味${(r.net_yield * 100).toFixed(1)}%` : '';
         const holdRoi = r.hold_sell_roi != null ? ` / 8年ROI${(r.hold_sell_roi * 100).toFixed(0)}%` : '';
         const exitCap = r.exit_cap_rate != null ? ` / 出口Cap${(r.exit_cap_rate * 100).toFixed(1)}%` : '';
+        const ci = Number.isFinite(Number(r.client_index)) ? Number(r.client_index) : '';
+        const pid = (r.id == null ? '' : String(r.id).replace(/"/g, '&quot;'));
+        const selectable = (ci !== '' || pid) ? 'ranking-selectable' : '';
         html += `
-            <div class="ranking-item">
+            <div class="ranking-item ${selectable}" data-client-index="${ci}" data-property-id="${pid}" style="${selectable ? 'cursor:pointer;' : ''}">
                 <span class="ranking-rank">#${i + 1}</span>
                 <span class="ranking-grade grade-badge grade-${r.grade}" style="width:28px;height:28px;font-size:0.85rem;border-radius:6px;">${r.grade}</span>
                 <div class="ranking-info">
@@ -1252,12 +2029,44 @@ function showRanking(ranking) {
             </div>`;
     });
     document.getElementById('ranking-list').innerHTML = html;
+    document.querySelectorAll('#ranking-list .ranking-selectable').forEach(el => {
+        el.addEventListener('click', async () => {
+            const ciRaw = el.getAttribute('data-client-index');
+            const ci = ciRaw === '' ? null : Number(ciRaw);
+            const pid = el.getAttribute('data-property-id') || '';
+            await openRankingItem(ci, pid);
+        });
+    });
+    requestAnimationFrame(adjustRankingPanelPosition);
+}
+
+async function openRankingItem(clientIndex, propertyId) {
+    let resolved = false;
+    if (Number.isInteger(clientIndex) && clientIndex >= 0 && sampleProperties[clientIndex]) {
+        selectProperty(clientIndex);
+        resolved = true;
+    } else if (propertyId) {
+        resolved = await selectPropertyById(propertyId);
+    }
+    if (!resolved) return;
+    switchTab('tab-property');
+    const selected = (_selectedPropIdx >= 0 ? sampleProperties[_selectedPropIdx] : null);
+    if (selected && selected._analysis_cache) {
+        renderSavedAnalysisDetail(selected);
+        return;
+    }
+    try {
+        await analyzeProperty();
+    } catch (e) {
+        console.debug('ranking詳細分析エラー:', e);
+    }
 }
 
 function hideRankingPanel() {
     const panel = document.getElementById('ranking-panel');
     if (!panel) return;
     panel.style.display = 'none';
+    panel.style.bottom = '16px';
 }
 
 function toggleRankingPanel() {
@@ -1266,6 +2075,22 @@ function toggleRankingPanel() {
     const toggleBtn = document.getElementById('ranking-toggle-btn');
     if (wrap) wrap.style.display = rankingPanelCollapsed ? 'none' : 'block';
     if (toggleBtn) toggleBtn.textContent = rankingPanelCollapsed ? '展開' : '折りたたむ';
+    adjustRankingPanelPosition();
+}
+
+function adjustRankingPanelPosition() {
+    const panel = document.getElementById('ranking-panel');
+    if (!panel) return;
+    let bottom = 16;
+    const legend = document.getElementById('map-legend');
+    if (legend && legend.style.display !== 'none') {
+        const rect = legend.getBoundingClientRect();
+        if (rect.height > 0) {
+            // 凡例高さ + 余白分だけランキングパネルを上に逃がす
+            bottom = Math.max(bottom, Math.round(window.innerHeight - rect.top + 12));
+        }
+    }
+    panel.style.bottom = `${bottom}px`;
 }
 
 // ===== CSV取込 =====
@@ -1392,44 +2217,149 @@ async function scrapeUrl() {
 
 async function scrapeProperties() {
     const btn = document.getElementById('btn-scrape');
+    const resultEl = document.getElementById('scrape-result');
     btn.disabled = true;
     btn.textContent = 'スクレイピング中...';
-    document.getElementById('scrape-result').innerHTML = '<div class="loading">複数ソースから取得中...</div>';
+    resultEl.innerHTML =
+        '<div class="loading">バックグラウンドで取得開始...</div>' +
+        '<div id="scrape-progress" style="color:#ffa726;font-size:0.72rem;margin-top:4px;">準備中...</div>';
 
-    const pref = document.getElementById('scrape-pref').value;
-    const pages = document.getElementById('scrape-pages').value;
+    const pref = getPrefectureParam('scrape-property', ['13', '14', '11', '12']);
+    // ブラウザタイムアウト回避のため既定ページ数を抑える
+    const pagesRaw = Number(document.getElementById('scrape-pages').value || 3);
+    const pages = Math.max(1, Math.min(pagesRaw || 3, 10));
 
     // マルチソース選択
     const sources = [];
     if (document.getElementById('scrape-rakumachi')?.checked) sources.push('rakumachi');
     if (document.getElementById('scrape-kenbiya')?.checked) sources.push('kenbiya');
     if (document.getElementById('scrape-rals')?.checked) sources.push('rals');
-    if (sources.length === 0) sources.push('rakumachi');
+    if (document.getElementById('scrape-athome')?.checked) sources.push('athome');
+    if (document.getElementById('scrape-homes')?.checked) sources.push('homes');
+    if (sources.length === 0) sources.push('rakumachi', 'kenbiya', 'rals', 'athome', 'homes');
     const splitPrice = document.getElementById('scrape-split-price')?.checked ? '&split_by_price=true' : '';
 
     try {
         const resp = await fetch(
             `/api/scrape?prefecture_code=${pref}&max_pages=${pages}` +
-            `&sources=${sources.join(',')}${splitPrice}`
+            `&sources=${sources.join(',')}${splitPrice}&run_in_background=true`
         );
         const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
-        if (data.count > 0) {
-            document.getElementById('scrape-result').innerHTML =
-                `<span style="color:#66bb6a">${data.count}件取得 (${(data.sources||[]).join(', ')})</span>`;
-            sampleProperties = sampleProperties.concat(data.properties);
-            loadSampleProperties();
-            plotSampleProperties();
-        } else {
-            document.getElementById('scrape-result').innerHTML =
-                '<span style="color:#ffa726">物件が見つかりませんでした</span>';
-        }
+        resultEl.innerHTML =
+            `<span style="color:#ffa726">${data.message || 'スクレイピングを開始しました'}</span>` +
+            `<div id="scrape-progress" style="color:#ffa726;font-size:0.72rem;margin-top:4px;">実行中...</div>`;
+
+        pollTaskStatus({
+            targetElId: 'scrape-progress',
+            taskType: 'property_scrape',
+            onComplete: (taskData) => {
+                btn.disabled = false;
+                btn.textContent = '収益物件スクレイピング';
+                if (taskData && taskData.error) {
+                    resultEl.innerHTML =
+                        `<span style="color:#ef5350">エラー: ${taskData.error}</span>` +
+                        `<div id="scrape-progress" style="color:#ef5350;font-size:0.72rem;margin-top:4px;">失敗</div>`;
+                    return;
+                }
+                const result = (taskData && taskData.result) || {};
+                const count = Number(result.count || 0);
+                const dedupe = result.dedupe || {};
+                const judged = Number(result.auto_judged || 0);
+                const sourceErrors = result.source_errors || {};
+                const sourceErrText = Object.keys(sourceErrors).length
+                    ? `<br><span style="color:#ef9a9a;font-size:0.72rem;">取得詳細: ${
+                        Object.entries(sourceErrors).map(([k,v]) => `${k}=${v}`).join(' / ')
+                      }</span>`
+                    : '';
+                if (count > 0) {
+                    resultEl.innerHTML =
+                        `<span style="color:#66bb6a">${count}件取得 (${(result.sources || sources).join(', ')})</span>` +
+                        `<br><span style="color:#90caf9;font-size:0.72rem;">重複統合: ${dedupe.merged_records || 0}件 / 自動判定: ${judged}件</span>` +
+                        sourceErrText +
+                        `<div id="scrape-progress" style="color:#66bb6a;font-size:0.72rem;margin-top:4px;">完了</div>`;
+                    if (Array.isArray(result.properties) && result.properties.length) {
+                        sampleProperties = sampleProperties.concat(result.properties);
+                    }
+                    loadSampleProperties();
+                    plotSampleProperties();
+                    if (Array.isArray(result.ranking) && result.ranking.length) {
+                        showRanking(result.ranking);
+                    }
+                } else {
+                    resultEl.innerHTML =
+                        `<span style="color:#ffa726">${result.message || '物件が見つかりませんでした'}</span>` +
+                        sourceErrText +
+                        '<div id="scrape-progress" style="color:#90a4ae;font-size:0.72rem;margin-top:4px;">完了</div>';
+                }
+            },
+        });
     } catch (e) {
-        document.getElementById('scrape-result').innerHTML =
-            `<span style="color:#ef5350">エラー: ${e.message}</span>`;
-    } finally {
+        resultEl.innerHTML =
+            `<span style="color:#ef5350">エラー: ${e.message}</span>` +
+            `<div style="color:#90a4ae;font-size:0.72rem;margin-top:4px;">※長時間処理はバックグラウンド化済みです。再試行してください</div>`;
         btn.disabled = false;
         btn.textContent = '収益物件スクレイピング';
+    }
+}
+
+async function startConsistencyCheck() {
+    const btn = document.getElementById('btn-consistency-check');
+    const resultEl = document.getElementById('consistency-result');
+    if (!btn || !resultEl) return;
+
+    btn.disabled = true;
+    btn.textContent = '整合チェック開始中...';
+    resultEl.innerHTML = '<div class="loading">バックグラウンド処理を起動中...</div>';
+
+    try {
+        const resp = await fetch('/api/properties/consistency-check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                limit: 50000,
+                max_rescrape: 120,
+                run_in_background: true,
+                max_runtime_sec: 900,
+                strict_nearest: true,
+                with_dedupe: true,
+            }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+        if (data.status === 'running') {
+            resultEl.innerHTML = `<span style="color:#ffa726;">${data.message || 'すでに実行中です'}</span>
+                <div id="consistency-progress" style="color:#ffa726;font-size:0.72rem;margin-top:4px;">実行中...</div>`;
+        } else {
+            resultEl.innerHTML = `<span style="color:#66bb6a;">${data.message || '整合チェックを開始しました'}</span>
+                <div id="consistency-progress" style="color:#ffa726;font-size:0.72rem;margin-top:4px;">実行中...</div>`;
+        }
+        pollTaskStatus({
+            targetElId: 'consistency-progress',
+            taskType: 'properties_consistency_check',
+            onComplete: (taskData) => {
+                btn.disabled = false;
+                btn.textContent = '住所/駅/座標 整合チェック（自動補正）';
+                const result = (taskData && taskData.result) || {};
+                if (taskData && taskData.error) return;
+                const summary = [
+                    `checked ${result.scanned || 0}件`,
+                    `疑義 ${result.suspicious || 0}件`,
+                    `再取得更新 ${result.rescrape_updated || 0}件`,
+                    result.timed_out ? '※時間上限到達' : '',
+                ].filter(Boolean).join(' / ');
+                resultEl.innerHTML = `<span style="color:#66bb6a;">完了: ${summary}</span>
+                    <div id="consistency-progress" style="color:#90a4ae;font-size:0.72rem;margin-top:4px;">完了</div>`;
+                loadSampleProperties();
+                loadLandListings();
+            },
+        });
+    } catch (e) {
+        resultEl.innerHTML = `<span style="color:#ef5350;">エラー: ${e.message}</span>`;
+        btn.disabled = false;
+        btn.textContent = '住所/駅/座標 整合チェック（自動補正）';
     }
 }
 
@@ -1517,14 +2447,16 @@ async function scrapeRentals() {
     const resultEl = document.getElementById('rental-scrape-result');
     resultEl.innerHTML = '<div class="loading">SUUMO賃貸から取得中...</div>';
 
-    const pref = document.getElementById('rental-scrape-pref').value;
+    const pref = getPrefectureParam('scrape-rental', ['13', '14', '11', '12']);
     const pages = document.getElementById('rental-scrape-pages').value;
 
     try {
         const resp = await fetch(`/api/scrape-rentals?prefecture_code=${pref}&max_pages=${pages}`);
         const data = await resp.json();
+        const dedupe = data.dedupe || {};
         resultEl.innerHTML = `<span style="color:#66bb6a">` +
-            `${data.count}件取得, ${data.saved}件DB保存</span>`;
+            `${data.count}件取得, ${data.saved}件DB保存</span>` +
+            `<br><span style="color:#90caf9;font-size:0.72rem;">重複統合: ${dedupe.merged_records || 0}件</span>`;
         loadRentalStats();
     } catch (e) {
         resultEl.innerHTML = `<span style="color:#ef5350">エラー: ${e.message}</span>`;
@@ -1536,35 +2468,53 @@ async function scrapeRentals() {
 
 // ===== 歪み分析（旧/analysis画面の機能を統合） =====
 
+function renderDistortionRanking(ranking) {
+    const el = document.getElementById('distortion-ranking');
+    if (!el) return;
+    const filter = (document.getElementById('distortion-filter')?.value || '').trim().toLowerCase();
+    const view = document.getElementById('distortion-view')?.value || 'distortion_score';
+    let rows = Array.isArray(ranking) ? [...ranking] : [];
+    if (filter) {
+        rows = rows.filter(r => String(r.station_name || '').toLowerCase().includes(filter));
+    }
+    rows.sort((a, b) => Number(b[view] || 0) - Number(a[view] || 0));
+    if (rows.length === 0) {
+        el.innerHTML = '<p style="color:#78909c">該当なし。先にバッチデータ収集を実行してください。</p>';
+        return;
+    }
+    el.innerHTML = rows.slice(0, 50).map((r, i) => {
+        const score = (r.distortion_score || 0).toFixed(2);
+        const yld = ((r.implied_yield || 0) * 100).toFixed(1);
+        const land = r.avg_land_price_sqm ? `¥${Math.round(r.avg_land_price_sqm).toLocaleString()}` : '-';
+        const rent = r.avg_rent_per_sqm ? `¥${Math.round(r.avg_rent_per_sqm).toLocaleString()}` : '-';
+        let metric = score;
+        if (view === 'implied_yield') metric = `${yld}%`;
+        else if (view === 'avg_land_price_sqm') metric = land;
+        else if (view === 'avg_rent_per_sqm') metric = rent;
+        return `<div style="display:flex;gap:6px;padding:3px 0;border-bottom:1px solid #1e3a5f;cursor:pointer;" ` +
+            `onclick="focusStation('${r.station_id||''}','${r.station_name||''}')">` +
+            `<span style="color:#78909c;width:20px;">${i+1}</span>` +
+            `<span style="flex:1;">${r.station_name||'?'}</span>` +
+            `<span style="color:#4fc3f7;width:70px;text-align:right;">${metric}</span>` +
+            `</div>`;
+    }).join('');
+}
+
 async function runDistortionAnalysis() {
     const btn = document.getElementById('btn-run-distortion');
     btn.disabled = true;
     btn.textContent = '分析中...';
-    const pref = document.getElementById('prefecture-select').value;
+    const pref = getPrefectureParam('map', ['13', '14', '11', '12']);
 
     try {
-        const resp = await fetch(`/api/analysis/distortion?prefecture_code=${pref}`);
+        const resp = await fetch(`/api/analysis/distortion?prefecture_code=${encodeURIComponent(pref)}`);
         const data = await resp.json();
         const panel = document.getElementById('distortion-panel');
         panel.style.display = 'block';
 
         const ranking = data.ranking || [];
-        const el = document.getElementById('distortion-ranking');
-        if (ranking.length === 0) {
-            el.innerHTML = '<p style="color:#78909c">データなし。先にバッチデータ収集を実行してください。</p>';
-        } else {
-            el.innerHTML = ranking.slice(0, 30).map((r, i) => {
-                const score = (r.distortion_score || 0).toFixed(2);
-                const yld = ((r.implied_yield || 0) * 100).toFixed(1);
-                return `<div style="display:flex;gap:6px;padding:3px 0;border-bottom:1px solid #1e3a5f;cursor:pointer;" ` +
-                    `onclick="focusStation('${r.station_id||''}','${r.station_name||''}')">` +
-                    `<span style="color:#78909c;width:20px;">${i+1}</span>` +
-                    `<span style="flex:1;">${r.station_name||'?'}</span>` +
-                    `<span style="color:#4fc3f7;width:50px;">${score}</span>` +
-                    `<span style="color:#66bb6a;width:45px;">${yld}%</span>` +
-                    `</div>`;
-            }).join('');
-        }
+        window._lastDistortionRanking = ranking;
+        renderDistortionRanking(ranking);
     } catch (e) {
         console.error('歪み分析エラー:', e);
     } finally {
@@ -1670,9 +2620,9 @@ function toggleLayer(e) {
 async function loadStationMarkers() {
     if (stationLayer) map.removeLayer(stationLayer);
 
-    const pref = document.getElementById('prefecture-select').value;
+    const pref = getPrefectureParam('map', ['13', '14', '11', '12']);
     try {
-        const resp = await fetch(`/api/stations/${pref}`);
+        const resp = await fetch(`/api/stations/${encodeURIComponent(pref)}`);
         const data = await resp.json();
         stationsData = data.stations || [];
 
@@ -1817,6 +2767,7 @@ async function loadHeatmap() {
 
         if (points.length > 0) {
             heatmapLayer = L.heatLayer(points, {
+                pane: 'heatPane',
                 radius: 25,
                 blur: 15,
                 maxZoom: 17,
@@ -1917,9 +2868,11 @@ async function scrapeLandListings() {
     btn.textContent = 'スクレイピング中...';
     document.getElementById('land-scrape-result').innerHTML = '<div class="loading">取得中...</div>';
 
+    const prefCodes = getSelectedPrefectureCodes('scrape-land', ['13', '14', '11', '12']);
     const body = {
         source: document.getElementById('land-source').value,
-        prefecture_code: document.getElementById('land-pref').value,
+        prefecture_code: prefCodes.join(','),
+        prefecture_codes: prefCodes,
         price_min: parseInt(document.getElementById('land-price-min').value) || null,
         price_max: parseInt(document.getElementById('land-price-max').value) || null,
         area_min: parseFloat(document.getElementById('land-area-min').value) || null,
@@ -2057,7 +3010,7 @@ async function loadLandListings() {
                         : (l.land_price / 10000).toLocaleString() + '万円')
                     : '価格不明';
                 const assetBadge = l.asset_grade && l.asset_grade !== '?'
-                    ? `<span style="background:${gradeColor(l.asset_grade)};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;font-weight:bold;margin-left:4px;">${l.asset_grade}${l.asset_score ? ' ' + l.asset_score.toFixed(0) : ''}</span>`
+                    ? `<span style="background:${gradeColor(l.asset_grade, { asset: true })};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;font-weight:bold;margin-left:4px;">${l.asset_grade}${l.asset_score ? ' ' + l.asset_score.toFixed(0) : ''}</span>`
                     : '';
                 html += `
                     <div class="land-listing-item" onclick="showLandDetail(${l.id})" style="padding:8px;border-bottom:1px solid #263238;cursor:pointer;">
@@ -2093,7 +3046,7 @@ async function loadLandListings() {
                 : '価格不明';
             const yieldLabel = p.estimated_yield ? (p.estimated_yield * 100).toFixed(2) + '%' : '';
             const assetBadge = p.asset_grade && p.asset_grade !== '?'
-                ? `<span style="background:${gradeColor(p.asset_grade)};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;font-weight:bold;">${p.asset_grade}${p.asset_score ? ' ' + p.asset_score.toFixed(0) : ''}</span>`
+                ? `<span style="background:${gradeColor(p.asset_grade, { asset: true })};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65rem;font-weight:bold;">${p.asset_grade}${p.asset_score ? ' ' + p.asset_score.toFixed(0) : ''}</span>`
                 : '';
             html += `
                 <div class="land-listing-item" onclick="showLandDetail(${p.id})" style="padding:8px;border-bottom:1px solid #263238;cursor:pointer;">
@@ -2159,6 +3112,7 @@ function plotLandListings(listings) {
             const bg = y >= 0.08 ? '#1a9641' : y >= 0.06 ? '#4dac26' : y >= 0.04 ? '#fdb863' : y >= 0.02 ? '#e66101' : '#78909c';
             const label = y > 0 ? (y * 100).toFixed(1) : '地';
             return L.marker(ll, {
+                pane: 'objectPane',
                 icon: L.divIcon({
                     className: '',
                     html: `<div style="background:${bg};color:#fff;min-width:28px;height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold;border:1.5px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.4);padding:0 3px;">${label}</div>`,
@@ -2503,13 +3457,49 @@ async function batchGeocode() {
 // ===== バックグラウンドタスク進捗ポーリング =====
 
 let _pollTimer = null;
-function pollTaskStatus() {
+let _pollContext = {
+    targetElId: 'scrape-progress',
+    taskType: null,
+    onComplete: null,
+};
+
+function _renderTaskDoneMessage(data) {
+    if (data.task_type === 'properties_consistency_check') {
+        const r = data.result || {};
+        const timed = r.timed_out ? ' / 時間上限到達' : '';
+        return `完了: checked ${r.scanned || 0}件 / 疑義 ${r.suspicious || 0}件 / 再取得更新 ${r.rescrape_updated || 0}件${timed}`;
+    }
+    if (data.task_type === 'property_scrape') {
+        const r = data.result || {};
+        return `完了: ${r.count || 0}件取得 / 自動判定 ${r.auto_judged || 0}件`;
+    }
+    const r = data.result || {};
+    return `完了: ${r.listings_saved || 0}物件, ${r.plans_generated || 0}プラン, ${r.asset_scores_generated || 0}スコア`;
+}
+
+function pollTaskStatus(options = {}) {
+    _pollContext = {
+        targetElId: options.targetElId || _pollContext.targetElId || 'scrape-progress',
+        taskType: options.taskType || null,
+        onComplete: typeof options.onComplete === 'function' ? options.onComplete : null,
+    };
     if (_pollTimer) clearInterval(_pollTimer);
     _pollTimer = setInterval(async () => {
         try {
             const resp = await fetch('/api/task-status');
             const data = await resp.json();
-            const el = document.getElementById('scrape-progress');
+            const el = document.getElementById(_pollContext.targetElId);
+            if (
+                _pollContext.taskType &&
+                data.running &&
+                data.task_type &&
+                data.task_type !== _pollContext.taskType
+            ) {
+                if (el) {
+                    el.textContent = `他タスク実行中: ${data.step || ''}`;
+                }
+                return;
+            }
             if (el) {
                 el.textContent = data.step || '実行中...';
             }
@@ -2520,16 +3510,53 @@ function pollTaskStatus() {
                     if (data.error) {
                         el.innerHTML = `<span style="color:#ef5350;">エラー: ${data.error}</span>`;
                     } else {
-                        const r = data.result || {};
-                        el.innerHTML = `<span style="color:#66bb6a;">完了: ${r.listings_saved || 0}物件, ${r.plans_generated || 0}プラン, ${r.asset_scores_generated || 0}スコア</span>`;
+                        el.innerHTML = `<span style="color:#66bb6a;">${_renderTaskDoneMessage(data)}</span>`;
                     }
                 }
-                loadLandListings();
+                if (typeof _pollContext.onComplete === 'function') {
+                    _pollContext.onComplete(data);
+                } else {
+                    loadLandListings();
+                }
             }
         } catch (e) {
             console.debug('poll error:', e);
         }
     }, 5000);
+}
+
+async function resumeTaskProgressUI() {
+    try {
+        const resp = await fetch('/api/task-status');
+        const data = await resp.json();
+        if (!data || !data.running) return;
+        if (data.task_type === 'properties_consistency_check') {
+            const btn = document.getElementById('btn-consistency-check');
+            const resultEl = document.getElementById('consistency-result');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '整合チェック実行中...';
+            }
+            if (resultEl) {
+                resultEl.innerHTML = `<span style="color:#ffa726;">整合チェックが進行中です</span>
+                    <div id="consistency-progress" style="color:#ffa726;font-size:0.72rem;margin-top:4px;">${data.step || '実行中...'}</div>`;
+            }
+            pollTaskStatus({
+                targetElId: 'consistency-progress',
+                taskType: 'properties_consistency_check',
+                onComplete: () => {
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = '住所/駅/座標 整合チェック（自動補正）';
+                    }
+                    loadSampleProperties();
+                    loadLandListings();
+                },
+            });
+        }
+    } catch (e) {
+        console.debug('resumeTaskProgressUI error:', e);
+    }
 }
 
 // ===== 一括資産性スコアリング =====
@@ -2597,10 +3624,11 @@ async function saveScrapeConfig() {
         return;
     }
 
+    const prefCodes = getSelectedPrefectureCodes('scrape-land', ['13', '14', '11', '12']);
     const config = {
         name: name,
         source: document.getElementById('land-source').value,
-        prefecture_codes: [document.getElementById('land-pref').value],
+        prefecture_codes: prefCodes,
         price_min: parseInt(document.getElementById('land-price-min').value) || null,
         price_max: parseInt(document.getElementById('land-price-max').value) || null,
         area_min: parseFloat(document.getElementById('land-area-min').value) || null,
@@ -2857,7 +3885,7 @@ async function loadCompareTable() {
                 ? `${r.structure_type}${r.floors || ''}F ${r.max_units || ''}戸`
                 : '-';
             const asGrade = r.asset_grade
-                ? `<span style="background:${gradeColor(r.asset_grade)};color:#fff;padding:0 4px;border-radius:2px;">${r.asset_grade}</span> ${r.asset_score ? r.asset_score.toFixed(0) : ''}`
+                ? `<span style="background:${gradeColor(r.asset_grade, { asset: true })};color:#fff;padding:0 4px;border-radius:2px;">${r.asset_grade}</span> ${r.asset_score ? r.asset_score.toFixed(0) : ''}`
                 : '<span style="color:#546e7a;">-</span>';
             const jGrade = r.judge_grade
                 ? `<span style="background:${gradeColor(r.judge_grade)};color:#fff;padding:0 4px;border-radius:2px;">${r.judge_grade}</span> ${r.judge_score ? r.judge_score.toFixed(0) : ''}`
@@ -2965,17 +3993,24 @@ async function loadUnifiedData(offset) {
     }
 }
 
-function selectPropertyById(propertyId) {
+async function selectPropertyById(propertyId) {
     const idx = sampleProperties.findIndex(p => String(p.id) === String(propertyId));
     if (idx >= 0) {
         selectProperty(idx);
-        return;
+        return true;
     }
     // 最新データに未読込のIDがある場合は再読込後に再解決
-    loadSampleProperties().then(() => {
+    try {
+        await loadSampleProperties();
         const reIdx = sampleProperties.findIndex(p => String(p.id) === String(propertyId));
-        if (reIdx >= 0) selectProperty(reIdx);
-    }).catch(() => {});
+        if (reIdx >= 0) {
+            selectProperty(reIdx);
+            return true;
+        }
+        return false;
+    } catch (_) {
+        return false;
+    }
 }
 
 // =====================================================
@@ -3042,7 +4077,7 @@ function showAssetScore(data) {
     if (!panel || !data) return;
     panel.style.display = 'block';
 
-    const gradeColors = {S:'#4caf50',A:'#66bb6a',B:'#ffd54f',C:'#ffa726',D:'#ef5350',F:'#b71c1c'};
+    const gradeColors = window.GRADE_PALETTE || {S:'#1a9641',A:'#4dac26',B:'#b8e186',C:'#fdb863',D:'#e66101',F:'#d7191c'};
     const gradeEl = document.getElementById('asset-grade');
     gradeEl.textContent = data.grade || '?';
     gradeEl.style.background = gradeColors[data.grade] || '#78909c';
@@ -3358,6 +4393,7 @@ function _buildMeshRect(metric, f) {
 
     const bounds = [[c[1] - dLat, c[0] - dLng], [c[1] + dLat, c[0] + dLng]];
     const rect = L.rectangle(bounds, {
+        pane: 'heatPane',
         color: '#fff', fillColor: color,
         fillOpacity: opacity, weight: 0.2, opacity: 0.1,
     });
@@ -3396,6 +4432,16 @@ function _buildMeshRect(metric, f) {
 }
 
 async function loadMeshLayer(metric, forceRefresh) {
+    if (metric === 'tx_price') {
+        // 取引平均メッシュは表示対象外
+        if (meshLayers[metric] && map.hasLayer(meshLayers[metric])) {
+            map.removeLayer(meshLayers[metric]);
+        }
+        delete meshLayers[metric];
+        delete meshCache[metric];
+        delete meshRectCache[metric];
+        return;
+    }
     // キャッシュ初期化
     if (!meshCache[metric]) meshCache[metric] = {};
     if (!meshRectCache[metric]) meshRectCache[metric] = {};
@@ -3787,41 +4833,9 @@ async function loadIVYield() {
 }
 
 async function loadIVTransactions() {
+    // 市区町村/区平均の取引プロットは表示しない
     if (ivTransLayer) map.removeLayer(ivTransLayer);
-    ivTransLayer = L.layerGroup();
-    try {
-        // ズームに応じてメッシュ粒度 or 市区町村集計
-        const zoom = map.getZoom();
-        const url = zoom >= 12
-            ? `/api/layers/mesh-transactions?${_mapBoundsParams()}`
-            : `/api/layers/transactions?${_mapBoundsParams()}`;
-        const resp = await fetch(url);
-        const data = await resp.json();
-
-        (data.features || []).forEach(f => {
-            const p = f.properties, c = f.geometry.coordinates;
-            const psm = p.avg_price_sqm || p.avg_price_sqm;
-            const color = p.color || (psm > 1000000 ? '#880e4f' : psm > 500000 ? '#d32f2f' :
-                          psm > 300000 ? '#ff6f00' : psm > 150000 ? '#fbc02d' : '#66bb6a');
-            const r = Math.max(3, Math.min(12, Math.log10(Math.max(1, p.count)) * 3));
-            const m = L.circleMarker([c[1], c[0]], {
-                radius: r, color: '#fff', fillColor: color,
-                fillOpacity: 0.6, weight: 0.5, opacity: 0.4,
-            });
-            const pType = p.type || p.property_type || '';
-            let tip = `<b>¥${psm.toLocaleString()}/m²</b>`;
-            if (pType) tip += ` <span style="color:#90a4ae">${pType}</span>`;
-            if (p.city_name) tip += `<br>${p.city_name}`;
-            if (p.min_price_sqm) tip += `<br>幅: ¥${p.min_price_sqm.toLocaleString()}~${p.max_price_sqm.toLocaleString()}`;
-            const total = p.avg_total || p.avg_total_price;
-            if (total) tip += `<br>平均総額: ¥${(total/10000).toFixed(0)}万円`;
-            tip += `<br>${p.count.toLocaleString()}件`;
-            m.bindTooltip(tip, {sticky:true});
-            ivTransLayer.addLayer(m);
-        });
-        ivTransLayer.addTo(map);
-        console.log(`取引(${zoom>=12?'mesh':'area'}): ${data.features?.length || 0}件`);
-    } catch(e) { console.error('取引レイヤーエラー:', e); }
+    ivTransLayer = null;
 }
 
 async function loadIVPopulation() {
@@ -4258,11 +5272,12 @@ function updateLegend() {
 
     div.innerHTML = html;
     div.style.display = show ? 'block' : 'none';
+    adjustRankingPanelPosition();
 }
 
 function _hookLegendUpdate() {
     // 新レイヤーIDと旧レイヤーID両方フック
-    ['layer-mesh-landprice','layer-mesh-rent','layer-mesh-tx','layer-mesh-yield',
+    ['layer-mesh-landprice','layer-mesh-rent','layer-mesh-yield',
      'layer-mesh-pop','layer-mesh-facility','layer-mesh-zoning',
      'layer-iv-stationpower','layer-iv-yield'].forEach(id => {
         const el = document.getElementById(id);

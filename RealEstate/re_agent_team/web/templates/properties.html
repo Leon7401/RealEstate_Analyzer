@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>収益物件一覧 - 不動産投資判定</title>
+    <link rel="stylesheet" href="/static/css/style.css?v={{ cache_bust }}" />
+    <link rel="stylesheet" href="/static/css/properties.css?v={{ cache_bust }}" />
+</head>
+<body class="properties-page">
+    <header class="props-header">
+        <div class="props-header-inner">
+            <div>
+                <p class="props-brand">不動産投資判定</p>
+                <h1>収益物件 分析一覧</h1>
+                <p class="props-lead">判定済み・未判定の収益物件を表で比較する</p>
+            </div>
+            <nav class="app-nav">
+                <a href="/" class="app-nav-link">地図</a>
+                <a href="/properties" class="app-nav-link is-active">収益物件一覧</a>
+                <a href="/analysis" class="app-nav-link">歪み分析</a>
+            </nav>
+        </div>
+    </header>
+
+    <main class="props-main">
+        <section class="props-toolbar">
+            <div class="props-filters">
+                <label class="pref-chip"><input type="checkbox" data-pref="13" checked> 東京</label>
+                <label class="pref-chip"><input type="checkbox" data-pref="14" checked> 神奈川</label>
+                <label class="pref-chip"><input type="checkbox" data-pref="11" checked> 埼玉</label>
+                <label class="pref-chip"><input type="checkbox" data-pref="12" checked> 千葉</label>
+                <label class="pref-chip"><input type="checkbox" data-pref="all"> 全国</label>
+            </div>
+            <div class="props-controls">
+                <input type="text" id="filter-station" placeholder="駅・住所・物件名">
+                <select id="filter-grade">
+                    <option value="">判定すべて</option>
+                    <option value="S">S</option>
+                    <option value="A">A</option>
+                    <option value="B">B</option>
+                    <option value="C">C</option>
+                    <option value="D">D</option>
+                    <option value="F">F</option>
+                    <option value="unjudged">未判定のみ</option>
+                </select>
+                <select id="filter-sort">
+                    <option value="judge_score">判定スコア順</option>
+                    <option value="gross_yield">利回り順</option>
+                    <option value="asking_price">価格順</option>
+                    <option value="station_distance_min">駅距離順</option>
+                    <option value="updated_at">更新日順</option>
+                </select>
+                <input type="number" id="filter-min-yield" placeholder="最低利回り%" step="0.1" min="0" style="width:110px;">
+                <select id="filter-link-status">
+                    <option value="">元ページすべて</option>
+                    <option value="alive">掲載中</option>
+                    <option value="unchecked">未確認</option>
+                    <option value="suspect">要確認</option>
+                    <option value="dead">リンク切れ</option>
+                    <option value="no_url">URLなし</option>
+                </select>
+                <button id="btn-reload" class="btn-primary">更新</button>
+                <button id="btn-verify-links" class="btn-secondary">元ページ走査</button>
+                <button id="btn-analyze-visible" class="btn-secondary">表示中を一括判定</button>
+                <a id="btn-export-csv" class="btn-secondary" href="/api/properties/export/csv">CSV</a>
+            </div>
+            <div class="props-meta">
+                <span id="props-count">読込中...</span>
+                <span id="props-verify-status"></span>
+                <span id="props-analyze-status"></span>
+            </div>
+        </section>
+
+        <section class="props-table-wrap">
+            <table class="props-table" id="props-table">
+                <thead>
+                    <tr>
+                        <th data-sort="judge_grade">判定</th>
+                        <th data-sort="judge_score">スコア</th>
+                        <th data-sort="name">物件</th>
+                        <th data-sort="nearest_station">最寄駅</th>
+                        <th data-sort="station_distance_min">徒歩</th>
+                        <th data-sort="asking_price">価格</th>
+                        <th data-sort="gross_yield">表面利回り</th>
+                        <th data-sort="current_rent_annual">年賃料</th>
+                        <th data-sort="land_area">土地㎡</th>
+                        <th data-sort="building_area">建物㎡</th>
+                        <th data-sort="structure">構造</th>
+                        <th data-sort="building_age">築年</th>
+                        <th data-sort="source">出典</th>
+                        <th data-sort="link_status">元ページ</th>
+                        <th data-sort="updated_at">更新</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="props-tbody">
+                    <tr><td colspan="16" class="empty">読込中...</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <aside id="props-detail" class="props-detail" hidden>
+            <button type="button" id="detail-close" class="detail-close">閉じる</button>
+            <div id="props-detail-body"></div>
+        </aside>
+    </main>
+
+    <script src="/static/js/properties.js?v={{ cache_bust }}"></script>
+</body>
+</html>

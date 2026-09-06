@@ -4,6 +4,7 @@
 - 座標から最寄り駅を特定する関数
 """
 import math
+import re
 from typing import List, Dict, Optional, Tuple
 
 
@@ -335,45 +336,91 @@ def resolve_station_id(
     2. 失敗したら座標で最寄り検索
     """
     if nearest_station_text:
-        # テキスト正規化
-        name = nearest_station_text.strip()
-        # 括弧内の路線名を除去: "渋谷(JR)" → "渋谷"
-        for ch in ["(", "（"]:
-            if ch in name:
-                name = name[:name.index(ch)]
-        name = name.strip()
+        text = str(nearest_station_text).strip().replace("　", " ")
+        # 括弧内補足を除去
+        text = text.replace("（", "(").replace("）", ")")
+        text = re.sub(r"\([^)]*\)", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
 
-        # 完全一致
-        if name in _NAME_TO_ID:
-            candidates = _NAME_TO_ID[name]
-            if len(candidates) == 1:
-                return candidates[0]
-            # 都道府県でフィルタ
+        # 候補抽出: 「◯◯」駅 / ◯◯駅 / 最寄駅:◯◯
+        candidates = []
+        for pat in [r"「([^」]+)」駅?", r"([^\s/／()（）,、]+?)駅", r"最寄(?:り)?駅[:：]?\s*([^\s/／()（）,、]+)"]:
+            for m in re.finditer(pat, text):
+                nm = (m.group(1) or "").strip()
+                if nm:
+                    candidates.append(nm)
+        # 明示候補が無ければ全文を候補化
+        if not candidates and text:
+            candidates.append(text)
+
+        # 行き先・路線名ノイズ除去
+        cleaned = []
+        for c in candidates:
+            c = c.replace("駅", "").strip()
+            # 事業者名を無条件除去すると「東武練馬」「小田急相模原」を壊すため、
+            # 「◯◯線」の接頭語として現れる場合のみ除去する。
+            c = re.sub(
+                r"^(?:JR|東京メトロ|都営|東急|京王|小田急|相鉄|西武|東武|京急|地下鉄)[^駅]{0,12}?線[／/\s]*",
+                "",
+                c,
+            )
+            c = c.replace("本線", "線").strip()
+            if c and len(c) >= 2:
+                cleaned.append(c)
+        candidates = cleaned or candidates
+
+        # 1) 完全一致優先
+        for name in candidates:
+            if name in _NAME_TO_ID:
+                sids = _NAME_TO_ID[name]
+                if pref_code:
+                    pref_sids = [sid for sid in sids if STATION_MAP[sid]["pref"] == pref_code]
+                    if pref_sids:
+                        sids = pref_sids
+                if len(sids) == 1:
+                    return sids[0]
+                if lat and lon:
+                    best_sid = None
+                    best_dist = 999.0
+                    for sid in sids:
+                        s = STATION_MAP[sid]
+                        d = _haversine(lat, lon, s["lat"], s["lon"])
+                        if d < best_dist:
+                            best_dist = d
+                            best_sid = sid
+                    if best_sid:
+                        return best_sid
+                return sids[0]
+
+        # 2) 先頭一致/末尾一致のみ許容（"横浜線"→"横浜"誤爆を回避）
+        for name in candidates:
+            if len(name) < 3:
+                continue
+            matched = []
+            for st_name, sids in _NAME_TO_ID.items():
+                if st_name.startswith(name) or st_name.endswith(name) or name.startswith(st_name):
+                    matched.extend(sids)
+            if not matched:
+                continue
+            # 重複排除
+            uniq = list(dict.fromkeys(matched))
             if pref_code:
-                for sid in candidates:
-                    if STATION_MAP[sid]["pref"] == pref_code:
-                        return sid
-            # 座標で最も近い候補を選択
+                pref_uniq = [sid for sid in uniq if STATION_MAP[sid]["pref"] == pref_code]
+                if pref_uniq:
+                    uniq = pref_uniq
+            if len(uniq) == 1:
+                return uniq[0]
             if lat and lon:
                 best_sid = None
-                best_dist = 999
-                for sid in candidates:
+                best_dist = 999.0
+                for sid in uniq:
                     s = STATION_MAP[sid]
                     d = _haversine(lat, lon, s["lat"], s["lon"])
                     if d < best_dist:
                         best_dist = d
                         best_sid = sid
-                return best_sid
-            return candidates[0]
-
-        # 部分一致
-        for station_name, sids in _NAME_TO_ID.items():
-            if name in station_name or station_name in name:
-                if pref_code:
-                    for sid in sids:
-                        if STATION_MAP[sid]["pref"] == pref_code:
-                            return sid
-                return sids[0]
+                if best_sid:
+                    return best_sid
 
     # 座標による最寄り駅検索
     if lat and lon:

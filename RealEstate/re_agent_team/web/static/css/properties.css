@@ -1,0 +1,313 @@
+/* 収益物件 分析一覧 */
+
+.properties-page {
+    margin: 0;
+    min-height: 100vh;
+    background:
+        radial-gradient(ellipse 80% 50% at 10% -10%, rgba(33, 88, 120, 0.35), transparent 55%),
+        linear-gradient(165deg, #0b1520 0%, #122033 45%, #0e1a24 100%);
+    color: #e8eef4;
+    font-family: "IBM Plex Sans JP", "Hiragino Sans", "Noto Sans JP", sans-serif;
+}
+
+.props-header {
+    border-bottom: 1px solid rgba(120, 160, 190, 0.25);
+    background: rgba(8, 16, 24, 0.72);
+    backdrop-filter: blur(8px);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+}
+
+.props-header-inner {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 18px 24px 14px;
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+    align-items: flex-end;
+}
+
+.props-brand {
+    margin: 0;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #7eb6d6;
+}
+
+.props-header h1 {
+    margin: 4px 0 2px;
+    font-size: 1.55rem;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+}
+
+.props-lead {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #9eb0c0;
+}
+
+.app-nav {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.app-nav-link {
+    color: #a9c2d4;
+    text-decoration: none;
+    font-size: 0.78rem;
+    padding: 6px 10px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+}
+
+.app-nav-link:hover {
+    color: #e8eef4;
+    border-color: rgba(126, 182, 214, 0.4);
+}
+
+.app-nav-link.is-active {
+    color: #0b1520;
+    background: #7eb6d6;
+    border-color: #7eb6d6;
+    font-weight: 600;
+}
+
+.props-main {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 16px 24px 40px;
+}
+
+.props-toolbar {
+    margin-bottom: 12px;
+}
+
+.props-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.pref-chip {
+    font-size: 0.78rem;
+    color: #c5d5e2;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border: 1px solid rgba(120, 160, 190, 0.3);
+    border-radius: 999px;
+    background: rgba(18, 32, 48, 0.6);
+}
+
+.props-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.props-controls input,
+.props-controls select {
+    background: #122033;
+    border: 1px solid #2a3f55;
+    color: #e8eef4;
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-size: 0.8rem;
+    min-height: 32px;
+}
+
+.props-controls input[type="text"] {
+    min-width: 180px;
+    flex: 1;
+}
+
+.props-meta {
+    margin-top: 8px;
+    font-size: 0.78rem;
+    color: #9eb0c0;
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.props-table-wrap {
+    overflow: auto;
+    border: 1px solid rgba(120, 160, 190, 0.28);
+    border-radius: 8px;
+    background: rgba(10, 18, 28, 0.85);
+    max-height: calc(100vh - 220px);
+}
+
+.props-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+    white-space: nowrap;
+}
+
+.props-table th {
+    position: sticky;
+    top: 0;
+    background: #152536;
+    color: #9eb0c0;
+    font-weight: 600;
+    text-align: left;
+    padding: 10px 8px;
+    border-bottom: 1px solid #2a3f55;
+    cursor: pointer;
+    user-select: none;
+    z-index: 1;
+}
+
+.props-table th:hover {
+    color: #7eb6d6;
+}
+
+.props-table td {
+    padding: 8px;
+    border-bottom: 1px solid rgba(42, 63, 85, 0.7);
+    vertical-align: middle;
+}
+
+.props-table tbody tr {
+    cursor: pointer;
+    transition: background 0.12s;
+}
+
+.props-table tbody tr:hover {
+    background: rgba(50, 90, 120, 0.22);
+}
+
+.props-table tbody tr.is-selected {
+    background: rgba(126, 182, 214, 0.16);
+}
+
+.props-table .empty {
+    text-align: center;
+    color: #78909c;
+    padding: 28px;
+}
+
+.grade-pill {
+    display: inline-block;
+    min-width: 28px;
+    text-align: center;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 0.75rem;
+}
+
+.grade-S { background: #1b5e20; color: #c8e6c9; }
+.grade-A { background: #0d47a1; color: #bbdefb; }
+.grade-B { background: #00695c; color: #b2dfdb; }
+.grade-C { background: #ef6c00; color: #ffe0b2; }
+.grade-D { background: #6a1b9a; color: #e1bee7; }
+.grade-F { background: #b71c1c; color: #ffcdd2; }
+.grade-none { background: #37474f; color: #cfd8dc; }
+
+.num {
+    font-variant-numeric: tabular-nums;
+    font-family: "IBM Plex Mono", "Menlo", monospace;
+}
+
+.muted { color: #90a4ae; }
+
+.row-actions a,
+.row-actions button {
+    font-size: 0.7rem;
+    color: #7eb6d6;
+    background: none;
+    border: 1px solid rgba(126, 182, 214, 0.45);
+    border-radius: 3px;
+    padding: 2px 6px;
+    cursor: pointer;
+    text-decoration: none;
+    margin-right: 4px;
+}
+
+.props-detail {
+    position: fixed;
+    right: 16px;
+    top: 90px;
+    width: min(380px, calc(100vw - 32px));
+    max-height: calc(100vh - 110px);
+    overflow: auto;
+    background: #101c2a;
+    border: 1px solid rgba(126, 182, 214, 0.35);
+    border-radius: 8px;
+    padding: 14px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    z-index: 30;
+}
+
+.detail-close {
+    float: right;
+    background: none;
+    border: 1px solid #455a64;
+    color: #cfd8dc;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 0.72rem;
+    padding: 2px 8px;
+}
+
+.props-detail h3 {
+    margin: 0 0 8px;
+    font-size: 1rem;
+}
+
+.detail-grid {
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    gap: 4px 8px;
+    font-size: 0.78rem;
+}
+
+.detail-grid dt { color: #90a4ae; }
+.detail-grid dd { margin: 0; }
+
+.detail-metrics {
+    margin-top: 10px;
+    font-size: 0.75rem;
+    line-height: 1.5;
+}
+
+@media (max-width: 800px) {
+    .props-header-inner {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    .props-table-wrap {
+        max-height: none;
+    }
+    .props-detail {
+        position: static;
+        width: auto;
+        max-height: none;
+        margin-top: 12px;
+    }
+}
+
+
+.link-pill {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.link-alive { background: #e8f5e9; color: #2e7d32; }
+.link-unchecked { background: #eceff1; color: #546e7a; }
+.link-suspect { background: #fff8e1; color: #f57f17; }
+.link-dead { background: #ffebee; color: #c62828; }
+.link-no_url { background: #f3e5f5; color: #6a1b9a; }

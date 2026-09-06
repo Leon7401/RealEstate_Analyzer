@@ -6,6 +6,8 @@ let map;
 let distortionLayer = null;
 let landPriceDetailLayer = null;
 let currentDistortionData = null;
+let currentStationDetail = null;
+let currentCompetitionData = null;
 
 function initAnalysisMap(center, zoom) {
     map = L.map('map').setView(center, zoom);
@@ -18,6 +20,8 @@ function initAnalysisMap(center, zoom) {
     document.getElementById('btn-analyze').addEventListener('click', runAnalysis);
     document.getElementById('btn-batch').addEventListener('click', runBatch);
     document.getElementById('view-mode').addEventListener('change', updateVisualization);
+    const simBtn = document.getElementById('btn-simulate');
+    if (simBtn) simBtn.addEventListener('click', runSimpleSimulation);
 
     // 駅検索
     const searchInput = document.getElementById('station-search');
@@ -259,7 +263,9 @@ async function loadStationDetail(stationId) {
     try {
         const resp = await fetch(`/api/analysis/station-detail/${stationId}`);
         const data = await resp.json();
+        currentStationDetail = data;
         renderStationDetail(data);
+        await loadAdvancedStationAnalytics(data);
 
         if (data.land_price_points && data.land_price_points.length > 0) {
             showLandPricePoints(data.land_price_points);
@@ -267,6 +273,189 @@ async function loadStationDetail(stationId) {
     } catch (e) {
         document.getElementById('detail-content').textContent = 'エラー';
     }
+}
+
+async function loadAdvancedStationAnalytics(stationDetail) {
+    const panel = document.getElementById('advanced-panel');
+    if (!panel || !stationDetail) return;
+    panel.style.display = 'block';
+    document.getElementById('demand-metrics').innerHTML = '<span class="label">読込中</span><span class="value">...</span>';
+    document.getElementById('price-trend-chart').innerHTML = '<div class="loading">推移読込中</div>';
+    document.getElementById('price-trend-summary').textContent = '';
+
+    const pref = document.getElementById('pref-select').value;
+    const stationName = stationDetail.station_name || '';
+    if (!stationName) return;
+
+    try {
+        const resp = await fetch(`/api/analysis/competition?station=${encodeURIComponent(stationName)}&prefecture_code=${pref}`);
+        const data = await resp.json();
+        currentCompetitionData = data;
+        renderDemandMetrics(data.station_stats || {});
+        renderPriceTrendChart(data.price_trend || {});
+        applySimulationDefaults(stationDetail, data);
+    } catch (e) {
+        document.getElementById('demand-metrics').innerHTML = '<span class="label">エラー</span><span class="value">読込失敗</span>';
+        document.getElementById('price-trend-chart').innerHTML = '<span style="color:#ef5350;">推移データ取得エラー</span>';
+    }
+}
+
+function renderDemandMetrics(stats) {
+    const el = document.getElementById('demand-metrics');
+    if (!el) return;
+    const fmtInt = (v) => (v == null ? 'N/A' : Number(v).toLocaleString());
+    const fmtPct = (v) => (v == null ? 'N/A' : `${(Number(v) * 100).toFixed(1)}%`);
+    const fmtYld = (v) => (v == null ? 'N/A' : `${(Number(v) * 100).toFixed(2)}%`);
+    el.innerHTML = `
+        <span class="label">駅名</span><span class="value">${stats.station_name || 'N/A'}</span>
+        <span class="label">乗降客数/日</span><span class="value">${fmtInt(stats.passengers_daily)}</span>
+        <span class="label">空室率</span><span class="value">${fmtPct(stats.vacancy_rate)}</span>
+        <span class="label">平均地価</span><span class="value">${fmtInt(stats.avg_land_price_sqm)} 円/㎡</span>
+        <span class="label">平均賃料</span><span class="value">${fmtInt(stats.avg_rent_per_sqm)} 円/㎡</span>
+        <span class="label">暗黙利回り</span><span class="value">${fmtYld(stats.implied_yield)}</span>
+    `;
+}
+
+function renderPriceTrendChart(priceTrend) {
+    const chartEl = document.getElementById('price-trend-chart');
+    const summaryEl = document.getElementById('price-trend-summary');
+    if (!chartEl || !summaryEl) return;
+    const entries = Object.entries(priceTrend || {})
+        .map(([year, row]) => ({ year: Number(year), avg: Number(row.avg || 0), count: Number(row.count || 0) }))
+        .filter(x => x.year > 0 && x.avg > 0)
+        .sort((a, b) => a.year - b.year);
+    if (!entries.length) {
+        chartEl.innerHTML = '<span style="color:#78909c;">推移データがありません</span>';
+        summaryEl.textContent = '';
+        return;
+    }
+    const min = Math.min(...entries.map(e => e.avg));
+    const max = Math.max(...entries.map(e => e.avg));
+    const range = Math.max(1, max - min);
+    const bars = entries.map(e => {
+        const ratio = (e.avg - min) / range;
+        const h = Math.round(28 + ratio * 80);
+        return `<div class="trend-bar-wrap">
+            <div class="trend-bar" style="height:${h}px;" title="${e.year}: ${Math.round(e.avg).toLocaleString()} 円/㎡"></div>
+            <div class="trend-year">${e.year}</div>
+        </div>`;
+    }).join('');
+    chartEl.innerHTML = `<div class="trend-bars">${bars}</div>`;
+    const first = entries[0];
+    const last = entries[entries.length - 1];
+    const change = first.avg > 0 ? ((last.avg / first.avg) - 1) : 0;
+    const sign = change >= 0 ? '+' : '';
+    summaryEl.textContent = `${first.year}→${last.year}: ${Math.round(first.avg).toLocaleString()} → ${Math.round(last.avg).toLocaleString()} 円/㎡ (${sign}${(change * 100).toFixed(1)}%)`;
+}
+
+function applySimulationDefaults(stationDetail, competitionData) {
+    const stats = (competitionData && competitionData.station_stats) || {};
+    const avgRentSqm = Number(stats.avg_rent_per_sqm || 0);
+    const vacancyRate = Number(stats.vacancy_rate || 0.08);
+    const avgLand = Number(stats.avg_land_price_sqm || 0);
+    // デフォルト前提: 延床200㎡
+    if (avgLand > 0) {
+        const estPriceMan = Math.max(1500, Math.round((avgLand * 120) / 10000));
+        const priceEl = document.getElementById('sim-price-man');
+        if (priceEl && (!priceEl.value || Number(priceEl.value) <= 0)) priceEl.value = estPriceMan;
+    }
+    if (avgRentSqm > 0) {
+        const estMonthlyMan = Math.max(10, Math.round((avgRentSqm * 200 * (1 - vacancyRate)) / 10000 / 12));
+        const rentEl = document.getElementById('sim-rent-man');
+        if (rentEl && (!rentEl.value || Number(rentEl.value) <= 0)) rentEl.value = estMonthlyMan;
+    }
+}
+
+function runSimpleSimulation() {
+    const priceMan = Number(document.getElementById('sim-price-man')?.value || 0);
+    const rentMan = Number(document.getElementById('sim-rent-man')?.value || 0);
+    const equityPct = Number(document.getElementById('sim-equity-pct')?.value || 20) / 100;
+    const ratePct = Number(document.getElementById('sim-rate-pct')?.value || 2.0) / 100;
+    const termYears = Number(document.getElementById('sim-term-year')?.value || 30);
+    const holdYears = Number(document.getElementById('sim-hold-year')?.value || 10);
+    const summaryEl = document.getElementById('sim-summary');
+    const chartEl = document.getElementById('sim-chart');
+    const tableEl = document.getElementById('sim-table');
+    if (!summaryEl || !chartEl || !tableEl) return;
+
+    if (priceMan <= 0 || rentMan <= 0 || termYears <= 0 || holdYears <= 0) {
+        summaryEl.innerHTML = '<span style="color:#ef5350;">入力値を確認してください</span>';
+        return;
+    }
+
+    const stats = (currentCompetitionData && currentCompetitionData.station_stats) || {};
+    const vacancyRate = Number(stats.vacancy_rate ?? 0.08);
+    const opexRate = 0.24;
+    const rentGrowth = 0.005;
+
+    const purchase = priceMan * 10000;
+    const monthlyRent = rentMan * 10000;
+    const loanAmount = Math.max(0, Math.round(purchase * (1 - equityPct)));
+    const annualDebt = calcAnnualDebtService(loanAmount, ratePct, termYears);
+    let balance = loanAmount;
+
+    const rows = [];
+    let cumulative = 0;
+    for (let y = 1; y <= holdYears; y++) {
+        const gross = monthlyRent * 12 * Math.pow(1 + rentGrowth, y - 1);
+        const effective = gross * (1 - vacancyRate);
+        const noi = effective * (1 - opexRate);
+        const interest = balance * ratePct;
+        const principal = Math.max(0, Math.min(balance, annualDebt - interest));
+        balance = Math.max(0, balance - principal);
+        const cf = noi - annualDebt;
+        cumulative += cf;
+        rows.push({ year: y, gross, noi, debt: annualDebt, cf, balance });
+    }
+
+    const year1 = rows[0];
+    const last = rows[rows.length - 1];
+    const ccr = purchase > 0 ? (year1.cf / purchase) : 0;
+    const dscr = annualDebt > 0 ? (year1.noi / annualDebt) : 0;
+    summaryEl.innerHTML = `
+        <div class="detail-grid">
+            <span class="label">初年度CF</span><span class="value">${Math.round(year1.cf).toLocaleString()} 円</span>
+            <span class="label">累計CF(${holdYears}年)</span><span class="value">${Math.round(cumulative).toLocaleString()} 円</span>
+            <span class="label">CCR</span><span class="value">${(ccr * 100).toFixed(2)}%</span>
+            <span class="label">DSCR</span><span class="value">${dscr.toFixed(2)}</span>
+            <span class="label">期末ローン残高</span><span class="value">${Math.round(last.balance).toLocaleString()} 円</span>
+        </div>
+    `;
+
+    const cfMax = Math.max(...rows.map(r => Math.abs(r.cf)), 1);
+    chartEl.innerHTML = `<div class="trend-bars">` + rows.map(r => {
+        const h = Math.round(20 + (Math.abs(r.cf) / cfMax) * 88);
+        const cls = r.cf >= 0 ? 'trend-bar-positive' : 'trend-bar-negative';
+        return `<div class="trend-bar-wrap">
+            <div class="trend-bar ${cls}" style="height:${h}px;" title="Y${r.year}: CF ${Math.round(r.cf).toLocaleString()} 円"></div>
+            <div class="trend-year">Y${r.year}</div>
+        </div>`;
+    }).join('') + `</div>`;
+
+    tableEl.innerHTML = `
+        <table class="station-table">
+            <tr>
+                <th>年</th><th>満室賃料</th><th>NOI</th><th>返済額</th><th>税前CF</th><th>ローン残高</th>
+            </tr>
+            ${rows.map(r => `<tr>
+                <td>${r.year}</td>
+                <td>${Math.round(r.gross).toLocaleString()}</td>
+                <td>${Math.round(r.noi).toLocaleString()}</td>
+                <td>${Math.round(r.debt).toLocaleString()}</td>
+                <td style="color:${r.cf >= 0 ? '#66bb6a' : '#ef5350'}">${Math.round(r.cf).toLocaleString()}</td>
+                <td>${Math.round(r.balance).toLocaleString()}</td>
+            </tr>`).join('')}
+        </table>
+    `;
+}
+
+function calcAnnualDebtService(loanAmount, rate, termYears) {
+    if (loanAmount <= 0) return 0;
+    const mRate = rate / 12;
+    const n = termYears * 12;
+    if (mRate <= 0) return loanAmount / Math.max(1, termYears);
+    const monthly = loanAmount * (mRate * Math.pow(1 + mRate, n)) / (Math.pow(1 + mRate, n) - 1);
+    return monthly * 12;
 }
 
 function renderStationDetail(data) {
